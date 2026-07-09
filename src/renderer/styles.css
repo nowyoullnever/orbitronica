@@ -1,13 +1,22 @@
-@import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Manrope:wght@400;500;600&display=swap");
+@font-face {
+  font-family: "MapoFlowerIsland";
+  src: url("../../MapoFlowerIsland.otf") format("opentype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
 
 :root {
-  font-family: "Manrope", sans-serif;
+  font-family: "MapoFlowerIsland", sans-serif;
   color: #242520;
   background: #f4f3ee;
   font-synthesis: none;
 }
 
-* { box-sizing: border-box; }
+* {
+  box-sizing: border-box;
+  font-family: "MapoFlowerIsland", sans-serif !important;
+}
 html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 button, input, select { font: inherit; }
 button { color: inherit; }
@@ -38,13 +47,13 @@ button { color: inherit; }
 }
 
 .topline span, .panel-eyebrow, footer {
-  font-family: "DM Mono", monospace;
+  font-family: "MapoFlowerIsland", sans-serif;
   font-size: 11px;
   letter-spacing: .17em;
   font-weight: 500;
 }
-.topline small { margin-left: 18px; color: #989890; font: 9px "DM Mono", monospace; letter-spacing: .12em; }
-.topline i { margin-left: auto; font: normal 9px "DM Mono", monospace; letter-spacing: .12em; color: #999; }
+.topline small { margin-left: 18px; color: #989890; font: 9px "MapoFlowerIsland", sans-serif; letter-spacing: .12em; }
+.topline i { margin-left: auto; font: normal 9px "MapoFlowerIsland", sans-serif; letter-spacing: .12em; color: #999; }
 .topline i::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #aaa; margin-right: 7px; }
 .topline i.live { color: #3d6e51; }
 .topline i.live::before { background: #4b9967; box-shadow: 0 0 0 3px #d9eadf; }
@@ -64,7 +73,7 @@ button { color: inherit; }
   width: 34px; height: 34px; margin: 13px 0 46px;
   border: 1px solid #33342f; border-radius: 50%;
   display: grid; place-items: center;
-  font: 500 13px "DM Mono", monospace;
+  font: 500 13px "MapoFlowerIsland", sans-serif;
 }
 .brand-mark::after { content: ""; position: absolute; width: 4px; height: 4px; border-radius: 50%; background: #33342f; transform: translate(13px, -8px); }
 .tool-group { display: flex; flex-direction: column; gap: 8px; }
@@ -73,8 +82,8 @@ button { color: inherit; }
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
   cursor: pointer; color: #777870;
 }
-.tool-button span { font: 21px "DM Mono", monospace; }
-.tool-button small { font: 8px "DM Mono", monospace; text-transform: uppercase; letter-spacing: .08em; }
+.tool-button span { font: 21px "MapoFlowerIsland", sans-serif; }
+.tool-button small { font: 8px "MapoFlowerIsland", sans-serif; text-transform: uppercase; letter-spacing: .08em; }
 .tool-button:hover { background: #e3e2dc; color: #252620; }
 .tool-button.active { background: #292a25; color: #f5f4ef; }
 
@@ -83,7 +92,7 @@ button { color: inherit; }
   content: "DROP AUDIO TO CREATE ORBIT";
   position: absolute; inset: 12px; border: 1px dashed transparent; border-radius: 8px;
   display: grid; place-items: start center; padding-top: 24px;
-  color: transparent; font: 10px "DM Mono", monospace; letter-spacing: .12em;
+  color: transparent; font: 10px "MapoFlowerIsland", sans-serif; letter-spacing: .12em;
   pointer-events: none; transition: .15s ease;
 }
 .canvas-shell.receiving::after { border-color: #376cc4; color: #376cc4; background: rgba(55,108,196,.055); }
@@ -104,12 +113,12 @@ button { color: inherit; }
 .project-section input, .settings-section > input {
   width: 100%; height: 34px; padding: 0 9px;
   border: 1px solid #cccbc4; border-radius: 3px; background: #f8f7f2;
-  font: 11px "DM Mono", monospace;
+  font: 11px "MapoFlowerIsland", sans-serif;
 }
 .panel-actions { display: flex; gap: 7px; }
 .panel-actions button {
   flex: 1; padding: 8px; border: 1px solid #c9c8c1; border-radius: 3px;
-  background: #f8f7f2; cursor: pointer; font: 8px "DM Mono", monospace;
+  background: #f8f7f2; cursor: pointer; font: 8px "MapoFlowerIsland", sans-serif;
 }
 .panel-actions button:hover { background: #292a25; color: #fff; }
 .panel-actions button.danger { color: #a9443f; border-color: #d6aaa7; }
@@ -117,26 +126,26 @@ button { color: inherit; }
 .toggle-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; }
 .toggle-row label, .reverse-toggle {
   display: flex !important; align-items: center; gap: 5px; margin: 0 !important;
-  font: 8px "DM Mono", monospace; letter-spacing: .05em;
+  font: 8px "MapoFlowerIsland", sans-serif; letter-spacing: .05em;
 }
 .toggle-row input, .reverse-toggle input { width: auto !important; accent-color: #292a25; }
 .settings h2 { font-size: 18px; font-weight: 500; margin: 10px 0 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.settings .audio-duration { margin: -14px 0 20px; color: #8c8d85; font: 8px "DM Mono", monospace; letter-spacing: .1em; }
+.settings .audio-duration { margin: -14px 0 20px; color: #8c8d85; font: 8px "MapoFlowerIsland", sans-serif; letter-spacing: .1em; }
 .panel-eyebrow { color: #777870; }
 .rule { height: 1px; background: #d3d2cc; margin-bottom: 26px; }
 .settings label { display: block; margin-bottom: 27px; }
-.settings label > span { display: flex; justify-content: space-between; margin-bottom: 11px; font: 9px "DM Mono", monospace; letter-spacing: .12em; color: #72736c; }
+.settings label > span { display: flex; justify-content: space-between; margin-bottom: 11px; font: 9px "MapoFlowerIsland", sans-serif; letter-spacing: .12em; color: #72736c; }
 .settings output { color: #292a25; }
 .settings select {
   width: 100%; height: 38px; padding: 0 10px; border: 1px solid #cccbc4; border-radius: 3px;
-  background: #f8f7f2; font: 11px "DM Mono", monospace;
+  background: #f8f7f2; font: 11px "MapoFlowerIsland", sans-serif;
 }
 input[type="range"] { width: 100%; accent-color: #292a25; }
 input[type="range"]:disabled { opacity: .35; }
 .orbit-status {
   flex: 0 0 auto; margin: -8px 0 24px; padding: 10px 0;
   border-top: 1px solid #d7d6d0; border-bottom: 1px solid #d7d6d0;
-  font: 9px "DM Mono", monospace; color: #797a73; letter-spacing: .07em;
+  font: 9px "MapoFlowerIsland", sans-serif; color: #797a73; letter-spacing: .07em;
 }
 .orbit-status i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #55a071; margin-right: 8px; }
 .orbit-status i.paused { background: #aaa; }
@@ -144,7 +153,7 @@ input[type="range"]:disabled { opacity: .35; }
 .planet-rule { margin-top: 5px; margin-bottom: 20px; }
 .planet-controls { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; padding-bottom: 20px; }
 .planet-control { border: 1px solid #d2d1ca; border-radius: 4px; padding: 12px 12px 0; margin-bottom: 10px; background: rgba(248,247,242,.55); }
-.planet-control h3 { margin: 0 0 14px; font: 9px "DM Mono", monospace; letter-spacing: .1em; }
+.planet-control h3 { margin: 0 0 14px; font: 9px "MapoFlowerIsland", sans-serif; letter-spacing: .1em; }
 .planet-control h3 i { display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: #252620; }
 .planet-control label { margin-bottom: 14px; }
 .effective-values {
@@ -153,12 +162,12 @@ input[type="range"]:disabled { opacity: .35; }
 }
 .effective-values span {
   display: flex; justify-content: space-between;
-  color: #777870; font: 8px "DM Mono", monospace; letter-spacing: .07em;
+  color: #777870; font: 8px "MapoFlowerIsland", sans-serif; letter-spacing: .07em;
 }
 .effective-values output { color: #2e302a; }
 .pitch-status {
   display: flex; justify-content: space-between; margin: -3px 0 13px;
-  color: #777870; font: 7px "DM Mono", monospace; letter-spacing: .06em;
+  color: #777870; font: 7px "MapoFlowerIsland", sans-serif; letter-spacing: .06em;
 }
 .pitch-status.processing { color: #9a692d; }
 .pitch-status.processing span:last-child::before {
@@ -170,10 +179,10 @@ input[type="range"]:disabled { opacity: .35; }
   width: 100%; margin: 0 0 12px; padding: 7px 9px;
   border: 1px solid #d3aaa7; border-radius: 3px;
   background: transparent; color: #9f4742; cursor: pointer;
-  font: 8px "DM Mono", monospace; letter-spacing: .08em; text-transform: uppercase;
+  font: 8px "MapoFlowerIsland", sans-serif; letter-spacing: .08em; text-transform: uppercase;
 }
 .delete-planet:hover { color: #fff; background: #b94f49; border-color: #b94f49; }
-.no-planets { color: #92938b; font: 9px/1.6 "DM Mono", monospace; }
+.no-planets { color: #92938b; font: 9px/1.6 "MapoFlowerIsland", sans-serif; }
 .empty-orbit { width: 92px; height: 54px; border: 1px solid #c9c8c2; border-radius: 50%; margin-bottom: 13px; transform: rotate(-12deg); }
 .empty-orbit::after { content: ""; display: block; width: 6px; height: 6px; border-radius: 50%; background: #a7a7a0; transform: translate(68px, 4px); }
 
@@ -182,7 +191,7 @@ input[type="range"]:disabled { opacity: .35; }
   display: flex; padding: 5px; gap: 3px; border: 1px solid #c9c8c1; border-radius: 6px;
   background: rgba(248, 247, 242, .94); box-shadow: 0 5px 18px rgba(40, 40, 35, .08);
 }
-.transport button { width: 42px; height: 36px; border: 0; border-radius: 3px; background: transparent; cursor: pointer; font: 12px "DM Mono", monospace; }
+.transport button { width: 42px; height: 36px; border: 0; border-radius: 3px; background: transparent; cursor: pointer; font: 12px "MapoFlowerIsland", sans-serif; }
 .transport button:hover { background: #e6e5df; }
 .transport button.active { background: #292a25; color: #f5f4ef; }
 .transport button.recording { background: #b84943; color: #fff; animation: pitch-pulse 1s ease-in-out infinite; }
@@ -191,16 +200,16 @@ input[type="range"]:disabled { opacity: .35; }
 .welcome-orbit { width: 190px; height: 90px; border: 1px solid #b8b8b1; border-radius: 50%; transform: rotate(-10deg); margin-bottom: 30px; }
 .welcome-orbit i { display: block; width: 9px; height: 9px; border-radius: 50%; background: #33342f; transform: translate(145px, -1px); }
 .welcome h1 { font-size: 28px; font-weight: 500; margin: 0 0 12px; }
-.welcome p { font: 11px/1.8 "DM Mono", monospace; text-align: center; color: #85867f; margin: 0 0 24px; }
-.welcome button { pointer-events: auto; border: 1px solid #30312c; border-radius: 4px; padding: 11px 16px; background: #30312c; color: #f6f5f0; cursor: pointer; font: 10px "DM Mono", monospace; letter-spacing: .05em; }
+.welcome p { font: 11px/1.8 "MapoFlowerIsland", sans-serif; text-align: center; color: #85867f; margin: 0 0 24px; }
+.welcome button { pointer-events: auto; border: 1px solid #30312c; border-radius: 4px; padding: 11px 16px; background: #30312c; color: #f6f5f0; cursor: pointer; font: 10px "MapoFlowerIsland", sans-serif; letter-spacing: .05em; }
 .welcome button:hover { background: #151611; }
 
 .context-menu { position: fixed; z-index: 20; min-width: 225px; padding: 5px; border: 1px solid #c9c8c1; border-radius: 5px; background: #f9f8f4; box-shadow: 0 14px 35px rgba(35, 35, 30, .16); }
 .context-menu button { width: 100%; height: 35px; border: 0; border-radius: 3px; background: transparent; text-align: left; padding: 0 10px; cursor: pointer; font-size: 11px; }
 .context-menu button:hover { background: #292a25; color: white; }
-.context-menu kbd { float: right; font: 9px "DM Mono", monospace; color: #999; }
+.context-menu kbd { float: right; font: 9px "MapoFlowerIsland", sans-serif; color: #999; }
 .hidden-input { position: fixed; opacity: 0; pointer-events: none; }
-.toast { position: absolute; z-index: 30; left: calc(var(--toolbar) + 22px); bottom: 22px; padding: 10px 13px; border-radius: 4px; color: #f6f5f0; background: #2e302a; font: 10px "DM Mono", monospace; box-shadow: 0 5px 18px rgba(30,30,25,.14); }
+.toast { position: absolute; z-index: 30; left: calc(var(--toolbar) + 22px); bottom: 22px; padding: 10px 13px; border-radius: 4px; color: #f6f5f0; background: #2e302a; font: 10px "MapoFlowerIsland", sans-serif; box-shadow: 0 5px 18px rgba(30,30,25,.14); }
 footer { position: absolute; z-index: 4; bottom: 28px; left: calc(var(--toolbar) + 24px); color: #aaa9a2; font-size: 8px; pointer-events: none; }
 
 @media (max-width: 1050px) {
