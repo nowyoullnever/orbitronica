@@ -97,6 +97,29 @@ button { color: inherit; }
   background: rgba(239, 238, 232, .95); backdrop-filter: blur(9px); overflow-y: auto;
   display: flex; flex-direction: column;
 }
+.settings-section {
+  display: flex; flex-direction: column; gap: 12px;
+  padding-bottom: 20px; margin-bottom: 20px; border-bottom: 1px solid #d2d1cb;
+}
+.project-section input, .settings-section > input {
+  width: 100%; height: 34px; padding: 0 9px;
+  border: 1px solid #cccbc4; border-radius: 3px; background: #f8f7f2;
+  font: 11px "DM Mono", monospace;
+}
+.panel-actions { display: flex; gap: 7px; }
+.panel-actions button {
+  flex: 1; padding: 8px; border: 1px solid #c9c8c1; border-radius: 3px;
+  background: #f8f7f2; cursor: pointer; font: 8px "DM Mono", monospace;
+}
+.panel-actions button:hover { background: #292a25; color: #fff; }
+.panel-actions button.danger { color: #a9443f; border-color: #d6aaa7; }
+.color-input { height: 34px !important; padding: 3px !important; }
+.toggle-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; }
+.toggle-row label, .reverse-toggle {
+  display: flex !important; align-items: center; gap: 5px; margin: 0 !important;
+  font: 8px "DM Mono", monospace; letter-spacing: .05em;
+}
+.toggle-row input, .reverse-toggle input { width: auto !important; accent-color: #292a25; }
 .settings h2 { font-size: 18px; font-weight: 500; margin: 10px 0 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .settings .audio-duration { margin: -14px 0 20px; color: #8c8d85; font: 8px "DM Mono", monospace; letter-spacing: .1em; }
 .panel-eyebrow { color: #777870; }
@@ -162,6 +185,7 @@ input[type="range"]:disabled { opacity: .35; }
 .transport button { width: 42px; height: 36px; border: 0; border-radius: 3px; background: transparent; cursor: pointer; font: 12px "DM Mono", monospace; }
 .transport button:hover { background: #e6e5df; }
 .transport button.active { background: #292a25; color: #f5f4ef; }
+.transport button.recording { background: #b84943; color: #fff; animation: pitch-pulse 1s ease-in-out infinite; }
 
 .welcome { position: absolute; z-index: 2; inset: 0; display: grid; place-content: center; justify-items: center; pointer-events: none; transform: translateY(-15px); }
 .welcome-orbit { width: 190px; height: 90px; border: 1px solid #b8b8b1; border-radius: 50%; transform: rotate(-10deg); margin-bottom: 30px; }

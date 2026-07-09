@@ -64,9 +64,13 @@ export function getOrbitSizeScale(orbit: Orbit) {
   return initialSize <= 0 ? 1 : currentSize / initialSize;
 }
 
-export function getPlanetEffectiveSpeed(orbit: Orbit, planet: { speed: number }) {
-  if (orbit.mode === "sequence") return planet.speed;
-  return planet.speed / getOrbitSizeScale(orbit);
+export function getPlanetEffectiveSpeed(
+  orbit: Orbit,
+  planet: { speed: number; collisionSpeedMultiplier?: number }
+) {
+  const collision = planet.collisionSpeedMultiplier ?? 1;
+  if (orbit.mode === "sequence") return planet.speed * collision;
+  return planet.speed * collision / getOrbitSizeScale(orbit);
 }
 
 export function centsToPlaybackRate(cents: number) {

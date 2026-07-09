@@ -1,4 +1,5 @@
 import { SimpleFilter, SoundTouch, WebAudioBufferSource } from "soundtouchjs";
+import type { SequenceRetriggerMode } from "../state/types";
 
 type ActivePlayback = {
   id: string;
@@ -8,17 +9,30 @@ type ActivePlayback = {
   source: AudioBufferSourceNode;
   gainNode: GainNode;
   mode: "loop" | "sequence";
+  isReverse: boolean;
 };
 
 class AudioEngine {
   private context: AudioContext | null = null;
   private buffers = new Map<string, AudioBuffer>();
   private pitchBuffers = new Map<string, AudioBuffer>();
+  private reverseBuffers = new Map<string, AudioBuffer>();
+  private rawFiles = new Map<string, { fileName: string; bytes: Uint8Array }>();
   private orbitGains = new Map<string, GainNode>();
   private active = new Map<string, ActivePlayback>();
+  private masterGain: GainNode | null = null;
+  private recordingDestination: MediaStreamAudioDestinationNode | null = null;
+  private recorder: MediaRecorder | null = null;
+  private recordingChunks: Blob[] = [];
 
   private getContext() {
-    if (!this.context) this.context = new AudioContext();
+    if (!this.context) {
+      this.context = new AudioContext();
+      this.masterGain = this.context.createGain();
+      this.masterGain.connect(this.context.destination);
+      this.recordingDestination = this.context.createMediaStreamDestination();
+      this.masterGain.connect(this.recordingDestination);
+    }
     return this.context;
   }
 
@@ -29,13 +43,41 @@ class AudioEngine {
 
   async decodeFile(orbitId: string, file: File, volume = 1) {
     const context = this.getContext();
-    const buffer = await context.decodeAudioData(await file.arrayBuffer());
+    const raw = await file.arrayBuffer();
+    const buffer = await context.decodeAudioData(raw.slice(0));
+    this.rawFiles.set(orbitId, { fileName: file.name, bytes: new Uint8Array(raw) });
+    this.registerBuffer(orbitId, buffer, volume);
+    return buffer;
+  }
+
+  async decodeBytes(orbitId: string, fileName: string, bytes: Uint8Array, volume = 1) {
+    const copy = new Uint8Array(bytes);
+    const buffer = await this.getContext().decodeAudioData(copy.buffer.slice(0));
+    this.rawFiles.set(orbitId, { fileName, bytes: copy });
+    this.registerBuffer(orbitId, buffer, volume);
+    return buffer;
+  }
+
+  private registerBuffer(orbitId: string, buffer: AudioBuffer, volume: number) {
+    const context = this.getContext();
     this.buffers.set(orbitId, buffer);
     const gain = context.createGain();
     gain.gain.value = volume;
-    gain.connect(context.destination);
+    gain.connect(this.masterGain!);
     this.orbitGains.set(orbitId, gain);
-    return buffer;
+  }
+
+  duplicateOrbitAudio(sourceOrbitId: string, newOrbitId: string, volume = 1) {
+    const buffer = this.buffers.get(sourceOrbitId);
+    const raw = this.rawFiles.get(sourceOrbitId);
+    if (!buffer) return false;
+    this.registerBuffer(newOrbitId, buffer, volume);
+    if (raw) this.rawFiles.set(newOrbitId, raw);
+    return true;
+  }
+
+  getProjectAsset(orbitId: string) {
+    return this.rawFiles.get(orbitId);
   }
 
   setVolume(orbitId: string, volume: number) {
@@ -45,7 +87,8 @@ class AudioEngine {
 
   private createPlayback(
     id: string, orbitId: string, planetId: string, barId: string,
-    mode: "loop" | "sequence", planetVolume: number, playbackRate = 1, pitchCents = 0
+    mode: "loop" | "sequence", planetVolume: number, playbackRate = 1,
+    pitchCents = 0, reverse = false
   ) {
     const context = this.getContext();
     const buffer = pitchCents === 0
@@ -53,14 +96,21 @@ class AudioEngine {
       : this.pitchBuffers.get(`${orbitId}:${planetId}:${pitchCents}`) ?? this.buffers.get(orbitId);
     const orbitGain = this.orbitGains.get(orbitId);
     if (!buffer || !orbitGain) return null;
+    let playbackBuffer = buffer;
+    if (reverse) {
+      const reverseKey = `${orbitId}:${planetId}:${pitchCents}:reverse`;
+      playbackBuffer = this.reverseBuffers.get(reverseKey) ?? this.createReversedBuffer(reverseKey, buffer);
+    }
     const source = context.createBufferSource();
     const planetGain = context.createGain();
-    source.buffer = buffer;
+    source.buffer = playbackBuffer;
     source.playbackRate.value = playbackRate;
     planetGain.gain.value = planetVolume;
     source.connect(planetGain);
     planetGain.connect(orbitGain);
-    const playback: ActivePlayback = { id, orbitId, planetId, barId, source, gainNode: planetGain, mode };
+    const playback: ActivePlayback = {
+      id, orbitId, planetId, barId, source, gainNode: planetGain, mode, isReverse: reverse
+    };
     this.active.set(id, playback);
     source.onended = () => {
       if (this.active.get(id)?.source === source) this.active.delete(id);
@@ -68,15 +118,29 @@ class AudioEngine {
     };
     return {
       playback,
-      buffer,
+      buffer: playbackBuffer,
       context,
       usingProcessedBuffer: buffer !== this.buffers.get(orbitId)
     };
   }
 
+  private createReversedBuffer(key: string, source: AudioBuffer) {
+    const reversed = this.getContext().createBuffer(
+      source.numberOfChannels, source.length, source.sampleRate
+    );
+    for (let channel = 0; channel < source.numberOfChannels; channel++) {
+      const input = source.getChannelData(channel);
+      const output = reversed.getChannelData(channel);
+      for (let index = 0; index < input.length; index++) output[index] = input[input.length - 1 - index];
+    }
+    this.reverseBuffers.set(key, reversed);
+    return reversed;
+  }
+
   syncLoop(
     orbitId: string, planetId: string, barId: string, inside: boolean,
-    audioTime: number, planetVolume: number, playbackRate: number, pitchCents: number
+    audioTime: number, planetVolume: number, playbackRate: number, pitchCents: number,
+    reverse = false
   ) {
     const key = `loop:${planetId}:${barId}`;
     const current = this.active.get(key);
@@ -90,10 +154,11 @@ class AudioEngine {
       return;
     }
     const created = this.createPlayback(
-      key, orbitId, planetId, barId, "loop", planetVolume, playbackRate, pitchCents
+      key, orbitId, planetId, barId, "loop", planetVolume, playbackRate, pitchCents, reverse
     );
     if (!created) return;
-    const safeOffset = Math.min(Math.max(audioTime, 0), Math.max(0, created.buffer.duration - .001));
+    const mappedTime = reverse ? created.buffer.duration - audioTime : audioTime;
+    const safeOffset = Math.min(Math.max(mappedTime, 0), Math.max(0, created.buffer.duration - .001));
     created.playback.source.start(created.context.currentTime, safeOffset);
     console.debug({
       orbitId, planetId, barId, pitchCents,
@@ -104,12 +169,14 @@ class AudioEngine {
 
   triggerSequence(
     orbitId: string, planetId: string, barId: string, planetVolume: number,
-    playbackRate: number, pitchCents: number
+    playbackRate: number, pitchCents: number, reverse: boolean,
+    retriggerMode: SequenceRetriggerMode
   ) {
-    this.stopActivePlaybackForPlanetBar(planetId, barId);
+    if (retriggerMode === "ignore-until-end" && this.hasActiveSequencePlayback(orbitId)) return;
+    if (retriggerMode === "cut-previous") this.stopActiveSequencePlaybacksForOrbit(orbitId);
     const id = `sequence:${planetId}:${barId}:${crypto.randomUUID()}`;
     const created = this.createPlayback(
-      id, orbitId, planetId, barId, "sequence", planetVolume, playbackRate, pitchCents
+      id, orbitId, planetId, barId, "sequence", planetVolume, playbackRate, pitchCents, reverse
     );
     if (created) {
       created.playback.source.start(created.context.currentTime);
@@ -143,6 +210,24 @@ class AudioEngine {
 
   stopAllActivePlaybacksForBar(barId: string) {
     for (const [id, playback] of [...this.active]) if (playback.barId === barId) this.stopPlayback(id);
+  }
+
+  stopActiveSequencePlaybacksForOrbit(orbitId: string) {
+    for (const [id, playback] of [...this.active]) {
+      if (playback.orbitId === orbitId && playback.mode === "sequence") this.stopPlayback(id);
+    }
+  }
+
+  stopActiveLoopPlaybacksForOrbit(orbitId: string) {
+    for (const [id, playback] of [...this.active]) {
+      if (playback.orbitId === orbitId && playback.mode === "loop") this.stopPlayback(id);
+    }
+  }
+
+  hasActiveSequencePlayback(orbitId: string) {
+    return [...this.active.values()].some(
+      (playback) => playback.orbitId === orbitId && playback.mode === "sequence"
+    );
   }
 
   stopActivePlaybackForPlanetBar(planetId: string, barId: string) {
@@ -228,12 +313,49 @@ class AudioEngine {
     this.pitchBuffers.set(key, output);
   }
 
+  startRecording() {
+    if (!this.recordingDestination || typeof MediaRecorder === "undefined") {
+      throw new Error("Audio recording is not supported on this system.");
+    }
+    if (this.recorder?.state === "recording") return;
+    this.recordingChunks = [];
+    const options = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+      ? { mimeType: "audio/webm;codecs=opus" } : undefined;
+    this.recorder = new MediaRecorder(this.recordingDestination.stream, options);
+    this.recorder.ondataavailable = (event) => {
+      if (event.data.size) this.recordingChunks.push(event.data);
+    };
+    this.recorder.start();
+  }
+
+  stopRecording(): Promise<Blob> {
+    return new Promise((resolve, reject) => {
+      if (!this.recorder || this.recorder.state !== "recording") {
+        reject(new Error("No recording is active."));
+        return;
+      }
+      const recorder = this.recorder;
+      recorder.onerror = () => reject(new Error("Recording failed."));
+      recorder.onstop = () => {
+        const blob = new Blob(this.recordingChunks, { type: "audio/webm" });
+        this.recordingChunks = [];
+        this.recorder = null;
+        resolve(blob);
+      };
+      recorder.stop();
+    });
+  }
+
   removeOrbit(orbitId: string) {
     this.stopAllActivePlaybacksForOrbit(orbitId);
     this.buffers.delete(orbitId);
     for (const key of [...this.pitchBuffers.keys()]) {
       if (key.startsWith(`${orbitId}:`)) this.pitchBuffers.delete(key);
     }
+    for (const key of [...this.reverseBuffers.keys()]) {
+      if (key.startsWith(`${orbitId}:`)) this.reverseBuffers.delete(key);
+    }
+    this.rawFiles.delete(orbitId);
     this.orbitGains.get(orbitId)?.disconnect();
     this.orbitGains.delete(orbitId);
   }

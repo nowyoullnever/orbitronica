@@ -8,5 +8,5 @@
     "rootDir": "src/main",
     "outDir": "dist-electron"
   },
-  "include": ["src/main/electron.ts"]
+  "include": ["src/main/electron.ts", "src/main/preload.ts"]
 }

@@ -49,10 +49,11 @@ type Props = {
   selectedTool: Tool;
   isPlaying: boolean;
   isDragOver: boolean;
+  cancelSignal: number;
   onSelect: (selection: Selection) => void;
   onAddPlanet: (orbitId: string, angle: number) => void;
   onAddBar: (orbitId: string, angle: number) => void;
-  onMovePlanets: (updates: Map<string, number>) => void;
+  onMovePlanets: (updates: Map<string, Partial<Planet>>) => void;
   onLoopFrame: (orbit: Orbit, planet: Planet, bar: TriggerBar, inside: boolean, angle: number) => void;
   onSequencePlay: (orbit: Orbit, planet: Planet, bar: TriggerBar) => void;
   onSequenceStop: (orbitId: string) => void;
@@ -204,7 +205,7 @@ export function CanvasStage(props: Props) {
       for (const orbit of state.orbits) {
         context.beginPath();
         context.ellipse(orbit.x, orbit.y, orbit.radiusX, orbit.radiusY, 0, 0, TAU);
-        context.strokeStyle = orbit.isPaused ? "#c8c8c3" : orbit.mode === "sequence" ? "#376cc4" : "#90918c";
+        context.strokeStyle = orbit.isPaused ? "#c8c8c3" : orbit.mode === "sequence" ? "#376cc4" : orbit.color;
         context.lineWidth = orbit.id === state.selection.orbitId ? 2 : 1;
         context.globalAlpha = orbit.isPaused ? .48 : 1;
         context.stroke();
@@ -255,7 +256,7 @@ export function CanvasStage(props: Props) {
         const point = ellipsePoint(orbit, planet.angle);
         context.beginPath();
         context.arc(point.x, point.y, PLANET_RADIUS, 0, TAU);
-        context.fillStyle = orbit.mode === "sequence" ? "#255cb8" : "#22231f";
+        context.fillStyle = orbit.color;
         context.fill();
         context.strokeStyle = "#ffffff";
         context.lineWidth = PLANET_STROKE_WIDTH;
@@ -273,39 +274,80 @@ export function CanvasStage(props: Props) {
   }, []);
 
   useEffect(() => {
+    setDrag(null);
+  }, [props.cancelSignal]);
+
+  useEffect(() => {
     let lastTick = performance.now();
     const timer = window.setInterval(() => {
       const now = performance.now();
       const delta = (now - lastTick) / 1000;
       lastTick = now;
       const state = stateRef.current;
-      const updates = new Map<string, number>();
+      const updates = new Map<string, Partial<Planet>>();
+      const dynamics = new Map<string, Planet>();
       for (const planet of state.planets) {
         const orbit = state.orbits.find((item) => item.id === planet.orbitId);
         if (!orbit) continue;
         if (!state.isPlaying) runtimeAngles.current.set(planet.id, planet.angle);
         let angle = runtimeAngles.current.get(planet.id) ?? planet.angle;
+        let collisionCooldownRemaining = Math.max(0, planet.collisionCooldownRemaining - delta);
+        let collisionSpeedMultiplier = planet.collisionSpeedMultiplier +
+          (1 - planet.collisionSpeedMultiplier) * Math.min(1, delta * 2.5);
+        let direction = planet.direction;
         if (state.isPlaying && !orbit.isPaused && planet.isActive) {
           const baseDuration = orbit.mode === "loop" ? orbit.audioDuration : SEQUENCE_BASE_CYCLE_DURATION;
-          angle = normalizeAngle(angle + delta * (TAU / baseDuration) * getPlanetEffectiveSpeed(orbit, planet));
+          angle = normalizeAngle(angle + delta * (TAU / baseDuration) *
+            getPlanetEffectiveSpeed(orbit, { ...planet, collisionSpeedMultiplier }) * direction);
           runtimeAngles.current.set(planet.id, angle);
-          updates.set(planet.id, angle);
         }
+        const next = {
+          ...planet, angle, direction, collisionCooldownRemaining, collisionSpeedMultiplier
+        };
+        dynamics.set(planet.id, next);
+        updates.set(planet.id, { angle, collisionCooldownRemaining, collisionSpeedMultiplier });
         for (const bar of state.bars.filter((item) => item.orbitId === orbit.id)) {
           const key = `${planet.id}:${bar.id}`;
           if (orbit.mode === "loop") {
             const inside = state.isPlaying && !orbit.isPaused && planet.isActive &&
               bar.kind === "play" && isAngleInsideBar(angle, bar.angle, bar.lengthRadians);
-            state.onLoopFrame(orbit, planet, bar, inside, angle);
+            state.onLoopFrame(orbit, next, bar, inside, angle);
             triggerStates.current.set(key, inside);
           } else {
             const inside = state.isPlaying && !orbit.isPaused && planet.isActive &&
               angularDistance(angle, bar.angle) < .04;
             if (inside && !triggerStates.current.get(key)) {
               if (bar.kind === "stop") state.onSequenceStop(orbit.id);
-              else state.onSequencePlay(orbit, planet, bar);
+              else state.onSequencePlay(orbit, next, bar);
             }
             triggerStates.current.set(key, inside);
+          }
+        }
+      }
+      const byOrbit = new Map<string, Planet[]>();
+      for (const planet of dynamics.values()) {
+        const list = byOrbit.get(planet.orbitId) ?? [];
+        list.push(planet);
+        byOrbit.set(planet.orbitId, list);
+      }
+      for (const orbitPlanets of byOrbit.values()) {
+        for (let left = 0; left < orbitPlanets.length; left++) {
+          for (let right = left + 1; right < orbitPlanets.length; right++) {
+            const a = orbitPlanets[left], b = orbitPlanets[right];
+            if (a.collisionCooldownRemaining > 0 || b.collisionCooldownRemaining > 0) continue;
+            const orbit = state.orbits.find((item) => item.id === a.orbitId);
+            if (!orbit) continue;
+            const pa = ellipsePoint(orbit, a.angle), pb = ellipsePoint(orbit, b.angle);
+            if (Math.hypot(pa.x - pb.x, pa.y - pb.y) <= PLANET_RADIUS * 2) {
+              updates.set(a.id, {
+                ...(updates.get(a.id) ?? {}), direction: (a.direction * -1) as 1 | -1,
+                collisionSpeedMultiplier: .4, collisionCooldownRemaining: .25
+              });
+              updates.set(b.id, {
+                ...(updates.get(b.id) ?? {}), direction: (b.direction * -1) as 1 | -1,
+                collisionSpeedMultiplier: .4, collisionCooldownRemaining: .25
+              });
+            }
           }
         }
       }

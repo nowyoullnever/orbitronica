@@ -1,9 +1,12 @@
 export type Tool = "select" | "planet" | "bar";
 export type OrbitMode = "loop" | "sequence";
+export type SequenceRetriggerMode = "overlap" | "cut-previous" | "ignore-until-end";
 
 export type Orbit = {
   id: string;
+  name: string;
   audioName: string;
+  audioPath?: string;
   x: number;
   y: number;
   radiusX: number;
@@ -14,6 +17,11 @@ export type Orbit = {
   mode: OrbitMode;
   volume: number;
   isPaused: boolean;
+  isMuted: boolean;
+  isSolo: boolean;
+  color: string;
+  sequenceRetriggerMode: SequenceRetriggerMode;
+  isMissingAudio?: boolean;
 };
 
 export type Planet = {
@@ -28,6 +36,10 @@ export type Planet = {
   processingPitchCents?: number;
   pitchProcessRequestId?: string;
   isActive: boolean;
+  direction: 1 | -1;
+  collisionSpeedMultiplier: number;
+  collisionCooldownRemaining: number;
+  name?: string;
 };
 
 export type TriggerBar = {
@@ -52,6 +64,18 @@ export type HistorySnapshot = {
   planets: Planet[];
   bars: TriggerBar[];
   selection: Selection;
+};
+
+export type SerializableProject = {
+  schemaVersion: 2;
+  appName: "Orbitonic";
+  savedAt: string;
+  projectName: string;
+  orbits: Orbit[];
+  planets: Planet[];
+  bars: TriggerBar[];
+  lastLoopBarLengthRadians: number;
+  ui?: Selection;
 };
 
 export type ContextMenuState = {
