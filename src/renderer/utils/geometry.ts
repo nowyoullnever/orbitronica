@@ -84,7 +84,8 @@ export function getSpeedBasedPlaybackRate(orbit: Orbit, planet: { speed: number 
 export function arePlanetCirclesColliding(
   a: { x: number; y: number },
   b: { x: number; y: number },
-  radius: number
+  radiusA: number,
+  radiusB = radiusA
 ) {
-  return Math.hypot(a.x - b.x, a.y - b.y) <= radius * 2;
+  return Math.hypot(a.x - b.x, a.y - b.y) <= radiusA + radiusB;
 }

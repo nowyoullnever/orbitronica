@@ -300,8 +300,9 @@ export function CanvasStage(props: Props) {
       const state = stateRef.current;
       const updates = new Map<string, Partial<Planet>>();
       const dynamics = new Map<string, Planet>();
+      const orbitsById = new Map(state.orbits.map((orbit) => [orbit.id, orbit]));
       for (const planet of state.planets) {
-        const orbit = state.orbits.find((item) => item.id === planet.orbitId);
+        const orbit = orbitsById.get(planet.orbitId);
         if (!orbit) continue;
         if (!state.isPlaying) runtimeAngles.current.set(planet.id, planet.angle);
         let angle = runtimeAngles.current.get(planet.id) ?? planet.angle;
@@ -344,44 +345,40 @@ export function CanvasStage(props: Props) {
           }
         }
       }
-      const byOrbit = new Map<string, Planet[]>();
-      for (const planet of dynamics.values()) {
-        const orbit = state.orbits.find((item) => item.id === planet.orbitId);
-        if (!state.isPlaying || !planet.isActive || !orbit || orbit.isPaused) continue;
-        const list = byOrbit.get(planet.orbitId) ?? [];
-        list.push(planet);
-        byOrbit.set(planet.orbitId, list);
-      }
-      for (const orbitPlanets of byOrbit.values()) {
-        for (let left = 0; left < orbitPlanets.length; left++) {
-          for (let right = left + 1; right < orbitPlanets.length; right++) {
-            const a = orbitPlanets[left], b = orbitPlanets[right];
-            if (a.collisionCooldownRemaining > 0 || b.collisionCooldownRemaining > 0) continue;
-            const orbit = state.orbits.find((item) => item.id === a.orbitId);
-            if (!orbit) continue;
-            const pa = ellipsePoint(orbit, a.angle), pb = ellipsePoint(orbit, b.angle);
-            if (arePlanetCirclesColliding(pa, pb, PLANET_RADIUS)) {
-              const collidedA: Planet = {
-                ...a,
-                direction: (a.direction * -1) as 1 | -1,
-                collisionSpeedMultiplier: COLLISION_SLOWDOWN,
-                collisionCooldownRemaining: COLLISION_COOLDOWN_SECONDS,
-                collisionFlashRemaining: COLLISION_FLASH_SECONDS
-              };
-              const collidedB: Planet = {
-                ...b,
-                direction: (b.direction * -1) as 1 | -1,
-                collisionSpeedMultiplier: COLLISION_SLOWDOWN,
-                collisionCooldownRemaining: COLLISION_COOLDOWN_SECONDS,
-                collisionFlashRemaining: COLLISION_FLASH_SECONDS
-              };
-              orbitPlanets[left] = collidedA;
-              orbitPlanets[right] = collidedB;
-              dynamics.set(a.id, collidedA);
-              dynamics.set(b.id, collidedB);
-              updates.set(a.id, { ...updates.get(a.id), ...collidedA });
-              updates.set(b.id, { ...updates.get(b.id), ...collidedB });
-            }
+      const collisionPlanets = [...dynamics.values()].filter((planet) => {
+        const orbit = orbitsById.get(planet.orbitId);
+        return state.isPlaying && planet.isActive && Boolean(orbit);
+      });
+      for (let left = 0; left < collisionPlanets.length; left++) {
+        for (let right = left + 1; right < collisionPlanets.length; right++) {
+          const a = collisionPlanets[left], b = collisionPlanets[right];
+          if (a.collisionCooldownRemaining > 0 || b.collisionCooldownRemaining > 0) continue;
+          const orbitA = orbitsById.get(a.orbitId);
+          const orbitB = orbitsById.get(b.orbitId);
+          if (!orbitA || !orbitB) continue;
+          const positionA = ellipsePoint(orbitA, a.angle);
+          const positionB = ellipsePoint(orbitB, b.angle);
+          if (arePlanetCirclesColliding(positionA, positionB, PLANET_RADIUS, PLANET_RADIUS)) {
+            const collidedA: Planet = {
+              ...a,
+              direction: (a.direction * -1) as 1 | -1,
+              collisionSpeedMultiplier: COLLISION_SLOWDOWN,
+              collisionCooldownRemaining: COLLISION_COOLDOWN_SECONDS,
+              collisionFlashRemaining: COLLISION_FLASH_SECONDS
+            };
+            const collidedB: Planet = {
+              ...b,
+              direction: (b.direction * -1) as 1 | -1,
+              collisionSpeedMultiplier: COLLISION_SLOWDOWN,
+              collisionCooldownRemaining: COLLISION_COOLDOWN_SECONDS,
+              collisionFlashRemaining: COLLISION_FLASH_SECONDS
+            };
+            collisionPlanets[left] = collidedA;
+            collisionPlanets[right] = collidedB;
+            dynamics.set(a.id, collidedA);
+            dynamics.set(b.id, collidedB);
+            updates.set(a.id, { ...updates.get(a.id), ...collidedA });
+            updates.set(b.id, { ...updates.get(b.id), ...collidedB });
           }
         }
       }
