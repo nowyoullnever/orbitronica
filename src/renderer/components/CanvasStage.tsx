@@ -1,0 +1,467 @@
+import { useEffect, useRef, useState } from "react";
+import type { ContextMenuState, Orbit, Planet, Selection, Tool, TriggerBar } from "../state/types";
+import {
+  TAU, ellipsePoint, findNearestOrbit, getPlanetEffectiveSpeed,
+  isAngleInsideBar, isFullLoopBar, normalizeAngle, orbitAngleAtPoint
+} from "../utils/geometry";
+import { angularDistance } from "../utils/triggerDetection";
+
+const PLANET_RADIUS = 6;
+const PLANET_STROKE_WIDTH = 2;
+const LOOP_BAR_WIDTH = 7.65;
+const LOOP_BAR_SELECTED_WIDTH = 9.35;
+const SEQUENCE_BAR_WIDTH = 6.8;
+const SEQUENCE_BAR_SELECTED_WIDTH = 8.5;
+const BAR_EDGE_HIT_RADIUS = 8;
+const ORBIT_LINE_TOLERANCE = 8;
+const MIN_BAR = .01;
+const MAX_BAR = TAU;
+const FULL_LOOP_SNAP_THRESHOLD = TAU * .03;
+const MIN_RADIUS = 40;
+const MAX_RADIUS = 1000;
+const SEQUENCE_BASE_CYCLE_DURATION = 4;
+
+// lengthRadians is always the complete span from the start edge to the end edge.
+const clampBarLength = (lengthRadians: number) => {
+  const clamped = Math.min(MAX_BAR, Math.max(MIN_BAR, lengthRadians));
+  return TAU - clamped <= FULL_LOOP_SNAP_THRESHOLD ? TAU : clamped;
+};
+
+type HitTestResult =
+  | { type: "planet"; planetId: string; orbitId: string }
+  | { type: "bar-edge"; barId: string; orbitId: string; edge: "start" | "end" }
+  | { type: "bar-body"; barId: string; orbitId: string }
+  | { type: "orbit-line"; orbitId: string }
+  | { type: "orbit-inside"; orbitId: string }
+  | { type: "empty" };
+
+type Drag =
+  | { type: "resize-orbit"; orbit: Orbit }
+  | { type: "move-orbit"; orbit: Orbit; startX: number; startY: number }
+  | { type: "bar-start" | "bar-end"; bar: TriggerBar; orbit: Orbit; fixedAngle: number }
+  | { type: "move-bar"; bar: TriggerBar; orbit: Orbit };
+
+type Props = {
+  orbits: Orbit[];
+  planets: Planet[];
+  bars: TriggerBar[];
+  selection: Selection;
+  selectedTool: Tool;
+  isPlaying: boolean;
+  isDragOver: boolean;
+  onSelect: (selection: Selection) => void;
+  onAddPlanet: (orbitId: string, angle: number) => void;
+  onAddBar: (orbitId: string, angle: number) => void;
+  onMovePlanets: (updates: Map<string, number>) => void;
+  onLoopFrame: (orbit: Orbit, planet: Planet, bar: TriggerBar, inside: boolean, angle: number) => void;
+  onSequencePlay: (orbit: Orbit, planet: Planet, bar: TriggerBar) => void;
+  onSequenceStop: (orbitId: string) => void;
+  onContextMenu: (menu: ContextMenuState) => void;
+  onBeginMutation: () => void;
+  onResizeOrbit: (orbitId: string, radiusX: number, radiusY: number) => void;
+  onMoveOrbit: (orbitId: string, x: number, y: number) => void;
+  onEditBar: (barId: string, angle: number, lengthRadians: number, startAngle: number) => void;
+  onBarLengthEditEnd: (barId: string, lengthRadians: number) => void;
+  onDropFiles: (files: File[], point: { x: number; y: number }) => void;
+  onDragState: (over: boolean) => void;
+};
+
+export function CanvasStage(props: Props) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const frameRef = useRef(0);
+  const triggerStates = useRef(new Map<string, boolean>());
+  const runtimeAngles = useRef(new Map<string, number>());
+  const stateRef = useRef(props);
+  const [drag, setDrag] = useState<Drag | null>(null);
+  stateRef.current = props;
+
+  useEffect(() => {
+    const canvas = canvasRef.current!;
+    const context = canvas.getContext("2d")!;
+    const resize = () => {
+      const rect = canvas.getBoundingClientRect();
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.round(rect.width * ratio);
+      canvas.height = Math.round(rect.height * ratio);
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    };
+    resize();
+    const observer = new ResizeObserver(resize);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, []);
+
+  function pointDistanceToOrbit(orbit: Orbit, x: number, y: number) {
+    const angle = orbitAngleAtPoint(orbit, x, y);
+    const point = ellipsePoint(orbit, angle);
+    return Math.hypot(point.x - x, point.y - y);
+  }
+
+  function hitTestCanvas(x: number, y: number): HitTestResult {
+    for (let index = props.planets.length - 1; index >= 0; index--) {
+      const planet = props.planets[index];
+      const orbit = props.orbits.find((item) => item.id === planet.orbitId);
+      if (!orbit) continue;
+      const point = ellipsePoint(orbit, planet.angle);
+      if (Math.hypot(point.x - x, point.y - y) <= PLANET_RADIUS + PLANET_STROKE_WIDTH / 2) {
+        return { type: "planet", planetId: planet.id, orbitId: orbit.id };
+      }
+    }
+    for (let index = props.bars.length - 1; index >= 0; index--) {
+      const bar = props.bars[index];
+      const orbit = props.orbits.find((item) => item.id === bar.orbitId);
+      if (!orbit || orbit.mode !== "loop") continue;
+      const start = bar.angle - bar.lengthRadians / 2;
+      const end = bar.angle + bar.lengthRadians / 2;
+      if (Math.hypot(ellipsePoint(orbit, start).x - x, ellipsePoint(orbit, start).y - y) <= BAR_EDGE_HIT_RADIUS) {
+        return { type: "bar-edge", barId: bar.id, orbitId: orbit.id, edge: "start" };
+      }
+      if (Math.hypot(ellipsePoint(orbit, end).x - x, ellipsePoint(orbit, end).y - y) <= BAR_EDGE_HIT_RADIUS) {
+        return { type: "bar-edge", barId: bar.id, orbitId: orbit.id, edge: "end" };
+      }
+    }
+    for (let index = props.bars.length - 1; index >= 0; index--) {
+      const bar = props.bars[index];
+      const orbit = props.orbits.find((item) => item.id === bar.orbitId);
+      if (!orbit) continue;
+      const angle = orbitAngleAtPoint(orbit, x, y);
+      const onLine = pointDistanceToOrbit(orbit, x, y) <= 10;
+      const onBar = orbit.mode === "loop"
+        ? !isFullLoopBar(bar) && isAngleInsideBar(angle, bar.angle, bar.lengthRadians)
+        : angularDistance(angle, bar.angle) <= .07;
+      if (onLine && onBar) return { type: "bar-body", barId: bar.id, orbitId: orbit.id };
+    }
+    for (let index = props.orbits.length - 1; index >= 0; index--) {
+      const orbit = props.orbits[index];
+      if (pointDistanceToOrbit(orbit, x, y) <= ORBIT_LINE_TOLERANCE) {
+        return { type: "orbit-line", orbitId: orbit.id };
+      }
+    }
+    for (let index = props.orbits.length - 1; index >= 0; index--) {
+      const orbit = props.orbits[index];
+      const normalized = ((x - orbit.x) / orbit.radiusX) ** 2 + ((y - orbit.y) / orbit.radiusY) ** 2;
+      if (normalized < 1) return { type: "orbit-inside", orbitId: orbit.id };
+    }
+    return { type: "empty" };
+  }
+
+  useEffect(() => {
+    const drawTick = (context: CanvasRenderingContext2D, orbit: Orbit, angle: number, color: string, width = 8) => {
+      const point = ellipsePoint(orbit, angle);
+      const nx = Math.cos(angle), ny = Math.sin(angle);
+      context.beginPath();
+      context.moveTo(point.x - nx * 8, point.y - ny * 8);
+      context.lineTo(point.x + nx * 8, point.y + ny * 8);
+      context.strokeStyle = color;
+      context.lineWidth = width;
+      context.lineCap = "butt";
+      context.stroke();
+    };
+    const drawRadialMarker = (
+      context: CanvasRenderingContext2D, orbit: Orbit, angle: number, length: number
+    ) => {
+      const point = ellipsePoint(orbit, angle);
+      const dx = point.x - orbit.x;
+      const dy = point.y - orbit.y;
+      const magnitude = Math.hypot(dx, dy) || 1;
+      const nx = dx / magnitude;
+      const ny = dy / magnitude;
+      context.beginPath();
+      context.moveTo(point.x - nx * length / 2, point.y - ny * length / 2);
+      context.lineTo(point.x + nx * length / 2, point.y + ny * length / 2);
+      context.stroke();
+    };
+    const drawAudioStartMarker = (context: CanvasRenderingContext2D, orbit: Orbit) => {
+      const point = ellipsePoint(orbit, 0);
+      const dx = point.x - orbit.x;
+      const dy = point.y - orbit.y;
+      const magnitude = Math.hypot(dx, dy) || 1;
+      const nx = dx / magnitude;
+      const ny = dy / magnitude;
+      const tx = -ny;
+      const ty = nx;
+      // Keep the marker outside even the selected loop bar's thickest edge.
+      const markerX = point.x + nx * 11;
+      const markerY = point.y + ny * 11;
+      context.strokeStyle = "#11120f";
+      context.lineWidth = 1.5;
+      context.lineCap = "round";
+      context.lineJoin = "round";
+      context.beginPath();
+      context.moveTo(markerX + nx * 3 + tx * 3, markerY + ny * 3 + ty * 3);
+      context.lineTo(markerX - nx * 2, markerY - ny * 2);
+      context.lineTo(markerX + nx * 3 - tx * 3, markerY + ny * 3 - ty * 3);
+      context.stroke();
+    };
+    const draw = (time: number) => {
+      const canvas = canvasRef.current!;
+      const context = canvas.getContext("2d")!;
+      const rect = canvas.getBoundingClientRect();
+      const state = stateRef.current;
+      context.clearRect(0, 0, rect.width, rect.height);
+      context.lineCap = "round";
+
+      for (const orbit of state.orbits) {
+        context.beginPath();
+        context.ellipse(orbit.x, orbit.y, orbit.radiusX, orbit.radiusY, 0, 0, TAU);
+        context.strokeStyle = orbit.isPaused ? "#c8c8c3" : orbit.mode === "sequence" ? "#376cc4" : "#90918c";
+        context.lineWidth = orbit.id === state.selection.orbitId ? 2 : 1;
+        context.globalAlpha = orbit.isPaused ? .48 : 1;
+        context.stroke();
+        context.globalAlpha = 1;
+      }
+
+      for (const bar of state.bars) {
+        const orbit = state.orbits.find((item) => item.id === bar.orbitId);
+        if (!orbit) continue;
+        const selected = bar.id === state.selection.barId;
+        if (orbit.mode === "loop") {
+          context.beginPath();
+          if (isFullLoopBar(bar)) {
+            context.ellipse(orbit.x, orbit.y, orbit.radiusX, orbit.radiusY, 0, 0, TAU);
+          } else {
+            context.ellipse(orbit.x, orbit.y, orbit.radiusX, orbit.radiusY, 0,
+              bar.angle - bar.lengthRadians / 2, bar.angle + bar.lengthRadians / 2);
+          }
+          context.strokeStyle = selected ? "#171813" : "#464841";
+          context.lineWidth = selected ? LOOP_BAR_SELECTED_WIDTH : LOOP_BAR_WIDTH;
+          context.lineCap = "butt";
+          context.stroke();
+        } else {
+          const color = bar.kind === "stop" ? "#c64e47" : "#255cb8";
+          drawTick(context, orbit, bar.angle, color, selected ? SEQUENCE_BAR_SELECTED_WIDTH : SEQUENCE_BAR_WIDTH);
+          if (bar.kind === "stop") {
+            const point = ellipsePoint(orbit, bar.angle);
+            context.fillStyle = "#c64e47";
+            context.fillRect(point.x - 3, point.y - 3, 6, 6);
+          }
+        }
+      }
+
+      // Visual markers sit above bars but below moving planets.
+      for (const bar of state.bars) {
+        const orbit = state.orbits.find((item) => item.id === bar.orbitId);
+        if (!orbit || orbit.mode !== "loop" || !isFullLoopBar(bar)) continue;
+        context.strokeStyle = "#ffffff";
+        context.lineWidth = 3;
+        context.lineCap = "round";
+        drawRadialMarker(context, orbit, bar.startAngle, 22);
+      }
+      for (const orbit of state.orbits) drawAudioStartMarker(context, orbit);
+
+      for (const planet of state.planets) {
+        const orbit = state.orbits.find((item) => item.id === planet.orbitId);
+        if (!orbit) continue;
+        const point = ellipsePoint(orbit, planet.angle);
+        context.beginPath();
+        context.arc(point.x, point.y, PLANET_RADIUS, 0, TAU);
+        context.fillStyle = orbit.mode === "sequence" ? "#255cb8" : "#22231f";
+        context.fill();
+        context.strokeStyle = "#ffffff";
+        context.lineWidth = PLANET_STROKE_WIDTH;
+        context.stroke();
+        if (planet.id === state.selection.planetId) {
+          context.beginPath(); context.arc(point.x, point.y, PLANET_RADIUS + 3, 0, TAU);
+          context.strokeStyle = "#777870"; context.lineWidth = 1; context.stroke();
+        }
+      }
+
+      frameRef.current = requestAnimationFrame(draw);
+    };
+    frameRef.current = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(frameRef.current);
+  }, []);
+
+  useEffect(() => {
+    let lastTick = performance.now();
+    const timer = window.setInterval(() => {
+      const now = performance.now();
+      const delta = (now - lastTick) / 1000;
+      lastTick = now;
+      const state = stateRef.current;
+      const updates = new Map<string, number>();
+      for (const planet of state.planets) {
+        const orbit = state.orbits.find((item) => item.id === planet.orbitId);
+        if (!orbit) continue;
+        if (!state.isPlaying) runtimeAngles.current.set(planet.id, planet.angle);
+        let angle = runtimeAngles.current.get(planet.id) ?? planet.angle;
+        if (state.isPlaying && !orbit.isPaused && planet.isActive) {
+          const baseDuration = orbit.mode === "loop" ? orbit.audioDuration : SEQUENCE_BASE_CYCLE_DURATION;
+          angle = normalizeAngle(angle + delta * (TAU / baseDuration) * getPlanetEffectiveSpeed(orbit, planet));
+          runtimeAngles.current.set(planet.id, angle);
+          updates.set(planet.id, angle);
+        }
+        for (const bar of state.bars.filter((item) => item.orbitId === orbit.id)) {
+          const key = `${planet.id}:${bar.id}`;
+          if (orbit.mode === "loop") {
+            const inside = state.isPlaying && !orbit.isPaused && planet.isActive &&
+              bar.kind === "play" && isAngleInsideBar(angle, bar.angle, bar.lengthRadians);
+            state.onLoopFrame(orbit, planet, bar, inside, angle);
+            triggerStates.current.set(key, inside);
+          } else {
+            const inside = state.isPlaying && !orbit.isPaused && planet.isActive &&
+              angularDistance(angle, bar.angle) < .04;
+            if (inside && !triggerStates.current.get(key)) {
+              if (bar.kind === "stop") state.onSequenceStop(orbit.id);
+              else state.onSequencePlay(orbit, planet, bar);
+            }
+            triggerStates.current.set(key, inside);
+          }
+        }
+      }
+      if (updates.size) state.onMovePlanets(updates);
+    }, 10);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const localPoint = (event: React.MouseEvent<HTMLCanvasElement> | React.DragEvent<HTMLCanvasElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  };
+
+  function orbitResizeCursor(orbit: Orbit, x: number, y: number) {
+    const angle = orbitAngleAtPoint(orbit, x, y);
+    const horizontal = Math.abs(Math.cos(angle));
+    const vertical = Math.abs(Math.sin(angle));
+    if (horizontal > .78) return "ew-resize";
+    if (vertical > .78) return "ns-resize";
+    return Math.cos(angle) * Math.sin(angle) >= 0 ? "nwse-resize" : "nesw-resize";
+  }
+
+  function cursorFor(hit: HitTestResult, x: number, y: number) {
+    if (drag?.type === "move-orbit") return "move";
+    if (drag?.type === "move-bar") return "grabbing";
+    if (drag?.type === "resize-orbit") return orbitResizeCursor(drag.orbit, x, y);
+    if (drag) return "ew-resize";
+    if (hit.type === "planet") return "pointer";
+    if (hit.type === "bar-edge") return "ew-resize";
+    if (hit.type === "bar-body") return "grab";
+    if (hit.type === "orbit-line") {
+      const orbit = props.orbits.find((item) => item.id === hit.orbitId);
+      return orbit ? orbitResizeCursor(orbit, x, y) : "ew-resize";
+    }
+    if (hit.type === "orbit-inside") return "move";
+    return props.selectedTool === "select" ? "default" : "crosshair";
+  }
+
+  function handleMouseDown(event: React.MouseEvent<HTMLCanvasElement>) {
+    if (event.button !== 0 || props.selectedTool !== "select") return;
+    const point = localPoint(event);
+    const hit = hitTestCanvas(point.x, point.y);
+    if (hit.type === "planet") {
+      props.onSelect({ orbitId: hit.orbitId, planetId: hit.planetId, barId: null });
+      return;
+    }
+    if (hit.type === "bar-edge" || hit.type === "bar-body") {
+      const bar = props.bars.find((item) => item.id === hit.barId)!;
+      const orbit = props.orbits.find((item) => item.id === hit.orbitId)!;
+      props.onSelect({ orbitId: hit.orbitId, planetId: null, barId: hit.barId });
+      props.onBeginMutation();
+      if (hit.type === "bar-body") setDrag({ type: "move-bar", bar, orbit });
+      else {
+        const fixedAngle = hit.edge === "start"
+          ? normalizeAngle(bar.angle + bar.lengthRadians / 2)
+          : normalizeAngle(bar.angle - bar.lengthRadians / 2);
+        setDrag({ type: hit.edge === "start" ? "bar-start" : "bar-end", bar, orbit, fixedAngle });
+      }
+      return;
+    }
+    if (hit.type === "orbit-line") {
+      const orbit = props.orbits.find((item) => item.id === hit.orbitId)!;
+      props.onSelect({ orbitId: hit.orbitId, planetId: null, barId: null });
+      props.onBeginMutation();
+      setDrag({ type: "resize-orbit", orbit });
+      return;
+    }
+    if (hit.type === "orbit-inside") {
+      const orbit = props.orbits.find((item) => item.id === hit.orbitId)!;
+      props.onSelect({ orbitId: hit.orbitId, planetId: null, barId: null });
+      props.onBeginMutation();
+      setDrag({ type: "move-orbit", orbit, startX: point.x, startY: point.y });
+      return;
+    }
+    props.onSelect({ orbitId: null, planetId: null, barId: null });
+  }
+
+  function handleMouseMove(event: React.MouseEvent<HTMLCanvasElement>) {
+    const point = localPoint(event);
+    event.currentTarget.style.cursor = cursorFor(hitTestCanvas(point.x, point.y), point.x, point.y);
+    if (!drag) return;
+    if (drag.type === "resize-orbit") {
+      props.onResizeOrbit(
+        drag.orbit.id,
+        Math.min(MAX_RADIUS, Math.max(MIN_RADIUS, Math.abs(point.x - drag.orbit.x))),
+        Math.min(MAX_RADIUS, Math.max(MIN_RADIUS, Math.abs(point.y - drag.orbit.y)))
+      );
+    } else if (drag.type === "move-orbit") {
+      props.onMoveOrbit(drag.orbit.id, drag.orbit.x + point.x - drag.startX, drag.orbit.y + point.y - drag.startY);
+    } else if (drag.type === "move-bar") {
+      const angle = orbitAngleAtPoint(drag.orbit, point.x, point.y);
+      props.onEditBar(
+        drag.bar.id, angle, drag.bar.lengthRadians,
+        normalizeAngle(angle - drag.bar.lengthRadians / 2)
+      );
+    } else {
+      const mouseAngle = orbitAngleAtPoint(drag.orbit, point.x, point.y);
+      if (drag.type === "bar-end") {
+        const length = clampBarLength(normalizeAngle(mouseAngle - drag.fixedAngle));
+        props.onEditBar(
+          drag.bar.id, normalizeAngle(drag.fixedAngle + length / 2),
+          length, normalizeAngle(drag.fixedAngle)
+        );
+      } else {
+        const length = clampBarLength(normalizeAngle(drag.fixedAngle - mouseAngle));
+        const startAngle = normalizeAngle(drag.fixedAngle - length);
+        props.onEditBar(
+          drag.bar.id, normalizeAngle(startAngle + length / 2),
+          length, startAngle
+        );
+      }
+    }
+  }
+
+  function handleClick(event: React.MouseEvent<HTMLCanvasElement>) {
+    if (drag || props.selectedTool === "select") return;
+    const point = localPoint(event);
+    const orbit = findNearestOrbit(props.orbits, point.x, point.y);
+    if (!orbit) return;
+    const angle = orbitAngleAtPoint(orbit, point.x, point.y);
+    if (props.selectedTool === "planet") props.onAddPlanet(orbit.id, angle);
+    else props.onAddBar(orbit.id, angle);
+  }
+
+  function finishDrag() {
+    if (drag?.type === "bar-start" || drag?.type === "bar-end") {
+      const current = stateRef.current.bars.find((bar) => bar.id === drag.bar.id);
+      props.onBarLengthEditEnd(drag.bar.id, current?.lengthRadians ?? drag.bar.lengthRadians);
+    }
+    setDrag(null);
+  }
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className={`stage tool-${props.selectedTool} ${props.isDragOver ? "drag-over" : ""}`}
+      onClick={handleClick}
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onMouseUp={(event) => { finishDrag(); event.currentTarget.style.cursor = "default"; }}
+      onMouseLeave={finishDrag}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        const point = localPoint(event);
+        const hit = hitTestCanvas(point.x, point.y);
+        const orbitId = hit.type === "empty" ? null : hit.orbitId;
+        props.onContextMenu({ x: event.clientX, y: event.clientY, canvasX: point.x, canvasY: point.y, orbitId });
+        if (orbitId) props.onSelect({ orbitId, planetId: null, barId: null });
+      }}
+      onDragEnter={(event) => { event.preventDefault(); props.onDragState(true); }}
+      onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }}
+      onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) props.onDragState(false); }}
+      onDrop={(event) => {
+        event.preventDefault(); props.onDragState(false);
+        props.onDropFiles(Array.from(event.dataTransfer.files), localPoint(event));
+      }}
+    />
+  );
+}

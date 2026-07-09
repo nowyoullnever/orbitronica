@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "skipLibCheck": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowSyntheticDefaultImports": true,
+    "rootDir": "src/main",
+    "outDir": "dist-electron"
+  },
+  "include": ["src/main/electron.ts"]
+}
