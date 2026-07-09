@@ -149,9 +149,13 @@ class AudioEngine {
       return;
     }
     if (current) {
-      current.gainNode.gain.setValueAtTime(planetVolume, this.getContext().currentTime);
-      current.source.playbackRate.setValueAtTime(playbackRate, this.getContext().currentTime);
-      return;
+      if (current.isReverse !== reverse) {
+        this.stopPlayback(key);
+      } else {
+        current.gainNode.gain.setValueAtTime(planetVolume, this.getContext().currentTime);
+        current.source.playbackRate.setValueAtTime(playbackRate, this.getContext().currentTime);
+        return;
+      }
     }
     const created = this.createPlayback(
       key, orbitId, planetId, barId, "loop", planetVolume, playbackRate, pitchCents, reverse
@@ -246,7 +250,7 @@ class AudioEngine {
   setActivePlanetPlaybackRate(planetId: string, playbackRate: number) {
     const context = this.getContext();
     for (const playback of this.active.values()) {
-      if (playback.planetId === planetId) {
+      if (playback.planetId === planetId && playback.mode === "loop") {
         playback.source.playbackRate.setValueAtTime(playbackRate, context.currentTime);
       }
     }

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ContextMenuState, Orbit, Planet, Selection, Tool, TriggerBar } from "../state/types";
 import {
-  TAU, ellipsePoint, findNearestOrbit, getPlanetEffectiveSpeed,
+  TAU, arePlanetCirclesColliding, ellipsePoint, findNearestOrbit, getPlanetEffectiveSpeed,
   isAngleInsideBar, isFullLoopBar, normalizeAngle, orbitAngleAtPoint
 } from "../utils/geometry";
 import { angularDistance } from "../utils/triggerDetection";
@@ -20,6 +20,10 @@ const FULL_LOOP_SNAP_THRESHOLD = TAU * .03;
 const MIN_RADIUS = 40;
 const MAX_RADIUS = 1000;
 const SEQUENCE_BASE_CYCLE_DURATION = 4;
+const COLLISION_SLOWDOWN = .4;
+const COLLISION_COOLDOWN_SECONDS = .25;
+const COLLISION_RECOVERY_RATE = 2.5;
+const COLLISION_FLASH_SECONDS = .12;
 
 // lengthRadians is always the complete span from the start edge to the end edge.
 const clampBarLength = (lengthRadians: number) => {
@@ -259,8 +263,18 @@ export function CanvasStage(props: Props) {
         context.fillStyle = orbit.color;
         context.fill();
         context.strokeStyle = "#ffffff";
-        context.lineWidth = PLANET_STROKE_WIDTH;
+        context.lineWidth = planet.collisionFlashRemaining > 0 ? PLANET_STROKE_WIDTH + 2 : PLANET_STROKE_WIDTH;
         context.stroke();
+        if (planet.collisionFlashRemaining > 0) {
+          const progress = 1 - planet.collisionFlashRemaining / COLLISION_FLASH_SECONDS;
+          context.beginPath();
+          context.arc(point.x, point.y, PLANET_RADIUS + 3 + progress * 4, 0, TAU);
+          context.globalAlpha = Math.max(0, 1 - progress);
+          context.strokeStyle = "#ffffff";
+          context.lineWidth = 1.5;
+          context.stroke();
+          context.globalAlpha = 1;
+        }
         if (planet.id === state.selection.planetId) {
           context.beginPath(); context.arc(point.x, point.y, PLANET_RADIUS + 3, 0, TAU);
           context.strokeStyle = "#777870"; context.lineWidth = 1; context.stroke();
@@ -293,7 +307,10 @@ export function CanvasStage(props: Props) {
         let angle = runtimeAngles.current.get(planet.id) ?? planet.angle;
         let collisionCooldownRemaining = Math.max(0, planet.collisionCooldownRemaining - delta);
         let collisionSpeedMultiplier = planet.collisionSpeedMultiplier +
-          (1 - planet.collisionSpeedMultiplier) * Math.min(1, delta * 2.5);
+          (1 - planet.collisionSpeedMultiplier) * Math.min(1, delta * COLLISION_RECOVERY_RATE);
+        collisionSpeedMultiplier = Math.min(1, Math.max(.1, collisionSpeedMultiplier));
+        if (collisionSpeedMultiplier > .9995) collisionSpeedMultiplier = 1;
+        const collisionFlashRemaining = Math.max(0, planet.collisionFlashRemaining - delta);
         let direction = planet.direction;
         if (state.isPlaying && !orbit.isPaused && planet.isActive) {
           const baseDuration = orbit.mode === "loop" ? orbit.audioDuration : SEQUENCE_BASE_CYCLE_DURATION;
@@ -302,10 +319,13 @@ export function CanvasStage(props: Props) {
           runtimeAngles.current.set(planet.id, angle);
         }
         const next = {
-          ...planet, angle, direction, collisionCooldownRemaining, collisionSpeedMultiplier
+          ...planet, angle, direction, collisionCooldownRemaining,
+          collisionSpeedMultiplier, collisionFlashRemaining
         };
         dynamics.set(planet.id, next);
-        updates.set(planet.id, { angle, collisionCooldownRemaining, collisionSpeedMultiplier });
+        updates.set(planet.id, {
+          angle, collisionCooldownRemaining, collisionSpeedMultiplier, collisionFlashRemaining
+        });
         for (const bar of state.bars.filter((item) => item.orbitId === orbit.id)) {
           const key = `${planet.id}:${bar.id}`;
           if (orbit.mode === "loop") {
@@ -326,6 +346,8 @@ export function CanvasStage(props: Props) {
       }
       const byOrbit = new Map<string, Planet[]>();
       for (const planet of dynamics.values()) {
+        const orbit = state.orbits.find((item) => item.id === planet.orbitId);
+        if (!state.isPlaying || !planet.isActive || !orbit || orbit.isPaused) continue;
         const list = byOrbit.get(planet.orbitId) ?? [];
         list.push(planet);
         byOrbit.set(planet.orbitId, list);
@@ -338,15 +360,27 @@ export function CanvasStage(props: Props) {
             const orbit = state.orbits.find((item) => item.id === a.orbitId);
             if (!orbit) continue;
             const pa = ellipsePoint(orbit, a.angle), pb = ellipsePoint(orbit, b.angle);
-            if (Math.hypot(pa.x - pb.x, pa.y - pb.y) <= PLANET_RADIUS * 2) {
-              updates.set(a.id, {
-                ...(updates.get(a.id) ?? {}), direction: (a.direction * -1) as 1 | -1,
-                collisionSpeedMultiplier: .4, collisionCooldownRemaining: .25
-              });
-              updates.set(b.id, {
-                ...(updates.get(b.id) ?? {}), direction: (b.direction * -1) as 1 | -1,
-                collisionSpeedMultiplier: .4, collisionCooldownRemaining: .25
-              });
+            if (arePlanetCirclesColliding(pa, pb, PLANET_RADIUS)) {
+              const collidedA: Planet = {
+                ...a,
+                direction: (a.direction * -1) as 1 | -1,
+                collisionSpeedMultiplier: COLLISION_SLOWDOWN,
+                collisionCooldownRemaining: COLLISION_COOLDOWN_SECONDS,
+                collisionFlashRemaining: COLLISION_FLASH_SECONDS
+              };
+              const collidedB: Planet = {
+                ...b,
+                direction: (b.direction * -1) as 1 | -1,
+                collisionSpeedMultiplier: COLLISION_SLOWDOWN,
+                collisionCooldownRemaining: COLLISION_COOLDOWN_SECONDS,
+                collisionFlashRemaining: COLLISION_FLASH_SECONDS
+              };
+              orbitPlanets[left] = collidedA;
+              orbitPlanets[right] = collidedB;
+              dynamics.set(a.id, collidedA);
+              dynamics.set(b.id, collidedB);
+              updates.set(a.id, { ...updates.get(a.id), ...collidedA });
+              updates.set(b.id, { ...updates.get(b.id), ...collidedB });
             }
           }
         }

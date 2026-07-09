@@ -176,7 +176,7 @@ export default function App() {
       planetIdMap.set(planet.id, newId);
       return {
         ...cleanPlanet(planet), id: newId, orbitId: newOrbitId,
-        collisionSpeedMultiplier: 1, collisionCooldownRemaining: 0
+        collisionSpeedMultiplier: 1, collisionCooldownRemaining: 0, collisionFlashRemaining: 0
       };
     });
     const copiedBars = stateRef.current.bars.filter((bar) => bar.orbitId === source.id)
@@ -315,7 +315,8 @@ export default function App() {
         ...cleanPlanet(planet),
         direction: planet.direction ?? 1,
         collisionSpeedMultiplier: planet.collisionSpeedMultiplier ?? 1,
-        collisionCooldownRemaining: 0
+        collisionCooldownRemaining: 0,
+        collisionFlashRemaining: 0
       }));
       setOrbits(restoredOrbits);
       setPlanets(restoredPlanets);
@@ -470,7 +471,8 @@ export default function App() {
           const planetId = id();
           setPlanets((current) => [...current, {
             id: planetId, orbitId, angle, speed: 1, volume: 1, pitchCents: 0, isActive: true,
-            direction: 1, collisionSpeedMultiplier: 1, collisionCooldownRemaining: 0
+            direction: 1, collisionSpeedMultiplier: 1, collisionCooldownRemaining: 0,
+            collisionFlashRemaining: 0
           }]);
           setSelection({ orbitId, planetId, barId: null });
         }}
@@ -487,10 +489,23 @@ export default function App() {
           setBars((current) => [...current, bar]);
           setSelection({ orbitId, planetId: null, barId: bar.id });
         }}
-        onMovePlanets={(updates) => setPlanets((current) => current.map((planet) => {
-          const changes = updates.get(planet.id);
-          return changes ? { ...planet, ...changes } : planet;
-        }))}
+        onMovePlanets={(updates) => {
+          for (const planet of stateRef.current.planets) {
+            const changes = updates.get(planet.id);
+            if (!changes || changes.collisionSpeedMultiplier === undefined ||
+              changes.collisionSpeedMultiplier === planet.collisionSpeedMultiplier) continue;
+            const orbit = stateRef.current.orbits.find((item) => item.id === planet.orbitId);
+            if (orbit?.mode === "loop") {
+              audioEngine.setActivePlanetPlaybackRate(
+                planet.id, getSpeedBasedPlaybackRate(orbit, { ...planet, ...changes })
+              );
+            }
+          }
+          setPlanets((current) => current.map((planet) => {
+            const changes = updates.get(planet.id);
+            return changes ? { ...planet, ...changes } : planet;
+          }));
+        }}
         onLoopFrame={(orbit, planet, bar, inside, angle) => {
           audioEngine.syncLoop(
             orbit.id, planet.id, bar.id, inside && canOrbitSound(orbit.id),
@@ -559,7 +574,13 @@ export default function App() {
       onDeleteOrbit={deleteSelection}
       onPlanetSpeed={(planetId, speed) => {
         pushParameterHistory();
-        setPlanets((current) => current.map((planet) => planet.id === planetId ? { ...planet, speed } : planet));
+        const planet = stateRef.current.planets.find((item) => item.id === planetId);
+        const orbit = stateRef.current.orbits.find((item) => item.id === planet?.orbitId);
+        if (planet && orbit?.mode === "loop") {
+          audioEngine.setActivePlanetPlaybackRate(planet.id, getSpeedBasedPlaybackRate(orbit, { ...planet, speed }));
+        }
+        setPlanets((current) => current.map((item) =>
+          item.id === planetId ? { ...item, speed } : item));
       }}
       onPlanetVolume={(planetId, volume) => {
         pushParameterHistory(); audioEngine.setActivePlanetVolume(planetId, volume);

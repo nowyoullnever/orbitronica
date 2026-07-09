@@ -80,3 +80,11 @@ export function centsToPlaybackRate(cents: number) {
 export function getSpeedBasedPlaybackRate(orbit: Orbit, planet: { speed: number }) {
   return orbit.mode === "sequence" ? 1 : getPlanetEffectiveSpeed(orbit, planet);
 }
+
+export function arePlanetCirclesColliding(
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+  radius: number
+) {
+  return Math.hypot(a.x - b.x, a.y - b.y) <= radius * 2;
+}
