@@ -10,6 +10,12 @@ type Props = {
   onChange: (start: number, end: number) => void;
 };
 
+// Dragging a handle sets start/end; dragging elsewhere pans the zoomed view.
+type Drag =
+  | { type: "start" | "end" }
+  | { type: "pan"; anchorClientX: number; viewStart: number; viewEnd: number }
+  | null;
+
 // Minimum trimmed region so the two handles can never cross or collapse.
 const MIN_REGION_SECONDS = 0.02;
 const HANDLE_HIT_PX = 9;
@@ -20,7 +26,7 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onChange }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawRef = useRef<() => void>(() => {});
-  const [drag, setDrag] = useState<"start" | "end" | null>(null);
+  const [drag, setDrag] = useState<Drag>(null);
   // Visible time window [start, end] in seconds — the wheel zooms/pans this.
   const [view, setView] = useState(() => ({ start: 0, end: audioDuration || 1 }));
   const liveRef = useRef({ view, audioDuration });
@@ -168,23 +174,39 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     const x = event.clientX - rect.left;
-    const startX = viewToX(start, rect.width);
-    const endX = viewToX(end, rect.width);
-    const nearStart = Math.abs(x - startX);
-    const nearEnd = Math.abs(x - endX);
-    let which: "start" | "end" | null = null;
-    if (Math.min(nearStart, nearEnd) <= HANDLE_HIT_PX) which = nearStart <= nearEnd ? "start" : "end";
-    else if (x < startX) which = "start";
-    else if (x > endX) which = "end";
-    if (!which) return;
+    const nearStart = Math.abs(x - viewToX(start, rect.width));
+    const nearEnd = Math.abs(x - viewToX(end, rect.width));
     event.currentTarget.setPointerCapture(event.pointerId);
-    setDrag(which);
-    applyDrag(which, timeAtClientX(event.clientX));
+    // Only grab a handle when the pointer is on it; anywhere else drags (pans) the view.
+    if (Math.min(nearStart, nearEnd) <= HANDLE_HIT_PX) {
+      const which = nearStart <= nearEnd ? "start" : "end";
+      setDrag({ type: which });
+      applyDrag(which, timeAtClientX(event.clientX));
+    } else {
+      setDrag({ type: "pan", anchorClientX: event.clientX, viewStart: view.start, viewEnd: view.end });
+    }
   };
 
   const handlePointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!drag) return;
-    applyDrag(drag, timeAtClientX(event.clientX));
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (!drag) {
+      const near = Math.min(
+        Math.abs(event.clientX - rect.left - viewToX(start, rect.width)),
+        Math.abs(event.clientX - rect.left - viewToX(end, rect.width))
+      );
+      event.currentTarget.style.cursor = near <= HANDLE_HIT_PX ? "ew-resize" : "grab";
+      return;
+    }
+    if (drag.type === "pan") {
+      event.currentTarget.style.cursor = "grabbing";
+      const viewWidth = drag.viewEnd - drag.viewStart;
+      const deltaTime = ((event.clientX - drag.anchorClientX) / (rect.width || 1)) * viewWidth;
+      const nextStart = clamp(drag.viewStart - deltaTime, 0, Math.max(0, audioDuration - viewWidth));
+      setView({ start: nextStart, end: nextStart + viewWidth });
+      return;
+    }
+    event.currentTarget.style.cursor = "ew-resize";
+    applyDrag(drag.type, timeAtClientX(event.clientX));
   };
 
   const endDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
