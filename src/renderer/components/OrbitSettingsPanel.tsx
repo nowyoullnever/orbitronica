@@ -140,6 +140,7 @@ export function OrbitSettingsPanel(props: Props) {
           <div className="sample-trim">
             <div className="panel-eyebrow">SAMPLE START / END</div>
             <SampleTrimEditor
+              key={orbit.id}
               audioDuration={orbit.audioDuration}
               peaks={props.waveformPeaks}
               start={getSampleStart(orbit)}

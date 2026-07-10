@@ -13,6 +13,7 @@ type Props = {
 // Minimum trimmed region so the two handles can never cross or collapse.
 const MIN_REGION_SECONDS = 0.02;
 const HANDLE_HIT_PX = 9;
+const ZOOM_STEP = 0.85;
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -20,6 +21,13 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawRef = useRef<() => void>(() => {});
   const [drag, setDrag] = useState<"start" | "end" | null>(null);
+  // Visible time window [start, end] in seconds — the wheel zooms/pans this.
+  const [view, setView] = useState(() => ({ start: 0, end: audioDuration || 1 }));
+  const liveRef = useRef({ view, audioDuration });
+  liveRef.current = { view, audioDuration };
+
+  const minViewWidth = Math.max(0.01, (audioDuration || 1) / 2000);
+  const viewToX = (time: number, width: number) => ((time - view.start) / (view.end - view.start || 1)) * width;
 
   drawRef.current = () => {
     const canvas = canvasRef.current;
@@ -36,43 +44,69 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
     context.clearRect(0, 0, width, height);
 
     const duration = audioDuration || 1;
+    const viewStart = view.start;
+    const viewWidth = (view.end - view.start) || 1;
     const mid = height / 2;
-    const startX = clamp((start / duration) * width, 0, width);
-    const endX = clamp((end / duration) * width, 0, width);
+    const startX = ((start - viewStart) / viewWidth) * width;
+    const endX = ((end - viewStart) / viewWidth) * width;
     const { r, g, b } = parseHexColor(color);
 
-    // Waveform mirrored around the mid line; bars inside the region take the orbit color.
+    // Waveform over the visible window; bars inside the trimmed region take the orbit color.
     if (peaks && peaks.length) {
-      const bars = Math.max(1, Math.min(peaks.length, Math.floor(width)));
+      const bars = Math.max(1, Math.floor(width));
       for (let index = 0; index < bars; index++) {
-        const from = Math.floor((index / bars) * peaks.length);
-        const to = Math.max(from + 1, Math.floor(((index + 1) / bars) * peaks.length));
+        const t0 = viewStart + (index / bars) * viewWidth;
+        const t1 = viewStart + ((index + 1) / bars) * viewWidth;
+        const p0 = clamp(Math.floor((t0 / duration) * peaks.length), 0, peaks.length - 1);
+        const p1 = clamp(Math.max(p0 + 1, Math.floor((t1 / duration) * peaks.length)), 0, peaks.length);
         let amp = 0;
-        for (let p = from; p < to; p++) if (peaks[p] > amp) amp = peaks[p];
+        for (let p = p0; p < p1; p++) if (peaks[p] > amp) amp = peaks[p];
         const x = (index / bars) * width;
         const barHeight = amp * (height * 0.44);
-        const inside = x >= startX - 0.5 && x <= endX + 0.5;
+        const center = (t0 + t1) / 2;
+        const inside = center >= start && center <= end;
         context.fillStyle = inside ? `rgba(${r}, ${g}, ${b}, .72)` : "rgba(74, 76, 70, .28)";
-        context.fillRect(x, mid - barHeight, Math.max(0.75, width / bars - 0.5), barHeight * 2);
+        context.fillRect(x, mid - barHeight, Math.max(0.75, width / bars), barHeight * 2);
       }
     }
 
-    // Dim the trimmed-away portions.
+    // Dim the trimmed-away portions (clamped to the visible window).
     context.fillStyle = "rgba(28, 28, 25, .30)";
-    context.fillRect(0, 0, startX, height);
-    context.fillRect(endX, 0, width - endX, height);
+    context.fillRect(0, 0, clamp(startX, 0, width), height);
+    context.fillRect(clamp(endX, 0, width), 0, width - clamp(endX, 0, width), height);
 
-    // Handles.
+    // Handles: a line + grip when visible, or an edge triangle when scrolled off-screen.
+    context.lineWidth = 2;
     context.strokeStyle = `rgb(${r}, ${g}, ${b})`;
     context.fillStyle = `rgb(${r}, ${g}, ${b})`;
-    context.lineWidth = 2;
-    context.beginPath(); context.moveTo(startX, 0); context.lineTo(startX, height); context.stroke();
-    context.beginPath(); context.moveTo(endX, 0); context.lineTo(endX, height); context.stroke();
-    context.fillRect(startX - 3, 0, 6, 9);
-    context.fillRect(endX - 3, height - 9, 6, 9);
+    const drawHandle = (x: number, gripTop: boolean) => {
+      if (x < -0.5 || x > width + 0.5) {
+        const edgeX = x < 0 ? 3 : width - 3;
+        const direction = x < 0 ? -1 : 1;
+        context.beginPath();
+        context.moveTo(edgeX - direction * 3, mid - 4);
+        context.lineTo(edgeX + direction * 3, mid);
+        context.lineTo(edgeX - direction * 3, mid + 4);
+        context.closePath();
+        context.fill();
+        return;
+      }
+      context.beginPath(); context.moveTo(x, 0); context.lineTo(x, height); context.stroke();
+      if (gripTop) context.fillRect(x - 3, 0, 6, 9);
+      else context.fillRect(x - 3, height - 9, 6, 9);
+    };
+    drawHandle(startX, true);
+    drawHandle(endX, false);
+
+    const zoom = duration / viewWidth;
+    if (zoom > 1.05) {
+      context.fillStyle = "rgba(46, 48, 42, .6)";
+      context.font = '8px "MapoFlowerIsland", sans-serif';
+      context.fillText(`×${zoom.toFixed(1)}`, 4, height - 4);
+    }
   };
 
-  // Redraw after every render (start/end/color changes) with the latest props.
+  // Redraw after every render (view / trim / color changes) with the latest props.
   useEffect(() => { drawRef.current(); });
 
   // Keep the canvas sharp and correct across panel resizes.
@@ -84,12 +118,46 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
     return () => observer.disconnect();
   }, []);
 
+  // Wheel: zoom at cursor, or pan when horizontal / shifted. Native listener so we can preventDefault.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const duration = liveRef.current.audioDuration;
+      if (!duration) return;
+      const rect = canvas.getBoundingClientRect();
+      const frac = clamp((event.clientX - rect.left) / rect.width, 0, 1);
+      const { start: viewStart, end: viewEnd } = liveRef.current.view;
+      const width = viewEnd - viewStart;
+      if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+        const pan = ((event.shiftKey ? event.deltaY : event.deltaX) / rect.width) * width;
+        let nextStart = viewStart + pan;
+        let nextEnd = viewEnd + pan;
+        if (nextStart < 0) { nextEnd -= nextStart; nextStart = 0; }
+        if (nextEnd > duration) { nextStart -= nextEnd - duration; nextEnd = duration; }
+        setView({ start: Math.max(0, nextStart), end: Math.min(duration, nextEnd) });
+      } else {
+        const cursorTime = viewStart + frac * width;
+        const factor = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+        const nextWidth = clamp(width * factor, minViewWidth, duration);
+        let nextStart = cursorTime - frac * nextWidth;
+        let nextEnd = nextStart + nextWidth;
+        if (nextStart < 0) { nextStart = 0; nextEnd = nextWidth; }
+        if (nextEnd > duration) { nextEnd = duration; nextStart = duration - nextWidth; }
+        setView({ start: Math.max(0, nextStart), end: Math.min(duration, nextEnd) });
+      }
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+  }, [minViewWidth]);
+
   const timeAtClientX = (clientX: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return 0;
     const rect = canvas.getBoundingClientRect();
-    const x = clamp(clientX - rect.left, 0, rect.width);
-    return (x / rect.width) * audioDuration;
+    const frac = clamp((clientX - rect.left) / rect.width, 0, 1);
+    return view.start + frac * (view.end - view.start);
   };
 
   const applyDrag = (which: "start" | "end", time: number) => {
@@ -100,9 +168,8 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     const x = event.clientX - rect.left;
-    const duration = audioDuration || 1;
-    const startX = (start / duration) * rect.width;
-    const endX = (end / duration) * rect.width;
+    const startX = viewToX(start, rect.width);
+    const endX = viewToX(end, rect.width);
     const nearStart = Math.abs(x - startX);
     const nearEnd = Math.abs(x - endX);
     let which: "start" | "end" | null = null;
@@ -134,7 +201,7 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
       onPointerMove={handlePointerMove}
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
-      onDoubleClick={() => onChange(0, audioDuration)}
+      onDoubleClick={() => setView({ start: 0, end: audioDuration || 1 })}
     />
   );
 }
