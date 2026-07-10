@@ -77,8 +77,20 @@ export function centsToPlaybackRate(cents: number) {
   return Math.pow(2, cents / 1200);
 }
 
-export function getSpeedBasedPlaybackRate(orbit: Orbit, planet: { speed: number }) {
-  return orbit.mode === "sequence" ? 1 : getPlanetEffectiveSpeed(orbit, planet);
+export function getTapeStyleRuntimeRateOnly(
+  _orbit: Orbit,
+  planet: { collisionSpeedMultiplier?: number }
+) {
+  return planet.collisionSpeedMultiplier ?? 1;
+}
+
+// User speed is pitch-preserving and rendered into a processed buffer.
+// Raw playbackRate is reserved for immediate tape-style runtime effects only.
+export function getSpeedBasedPlaybackRate(
+  orbit: Orbit,
+  planet: { collisionSpeedMultiplier?: number }
+) {
+  return getTapeStyleRuntimeRateOnly(orbit, planet);
 }
 
 export function arePlanetCirclesColliding(

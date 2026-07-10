@@ -29,6 +29,11 @@ export type Planet = {
   orbitId: string;
   angle: number;
   speed: number;
+  pendingSpeed?: number;
+  isSpeedProcessing?: boolean;
+  processingSpeed?: number;
+  speedProcessRequestId?: string;
+  speedProcessingError?: string;
   volume: number;
   pitchCents: number;
   pendingPitchCents?: number;

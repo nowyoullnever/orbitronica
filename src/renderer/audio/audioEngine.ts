@@ -15,7 +15,7 @@ type ActivePlayback = {
 class AudioEngine {
   private context: AudioContext | null = null;
   private buffers = new Map<string, AudioBuffer>();
-  private pitchBuffers = new Map<string, AudioBuffer>();
+  private processedBuffers = new Map<string, AudioBuffer>();
   private reverseBuffers = new Map<string, AudioBuffer>();
   private rawFiles = new Map<string, { fileName: string; bytes: Uint8Array }>();
   private orbitGains = new Map<string, GainNode>();
@@ -85,26 +85,55 @@ class AudioEngine {
     if (gain) gain.gain.setValueAtTime(volume, this.getContext().currentTime);
   }
 
+  private normalizedSpeed(speed: number) {
+    return Number.isFinite(speed) && speed > 0 ? Math.max(.05, speed) : 1;
+  }
+
+  private processedBufferKey(orbitId: string, planetId: string, speed: number, pitchCents: number) {
+    return `${orbitId}:${planetId}:speed=${this.normalizedSpeed(speed).toFixed(4)}:pitch=${Math.round(pitchCents)}`;
+  }
+
+  private getPlaybackBuffer(orbitId: string, planetId: string, speed: number, pitchCents: number) {
+    const original = this.buffers.get(orbitId);
+    if (!original) return null;
+    const normalizedSpeed = this.normalizedSpeed(speed);
+    const roundedPitch = Math.round(pitchCents);
+    if (Math.abs(normalizedSpeed - 1) < .0001 && roundedPitch === 0) {
+      return {
+        buffer: original,
+        key: this.processedBufferKey(orbitId, planetId, 1, 0),
+        usingProcessedBuffer: false
+      };
+    }
+    const key = this.processedBufferKey(orbitId, planetId, normalizedSpeed, roundedPitch);
+    const processed = this.processedBuffers.get(key);
+    return {
+      buffer: processed ?? original,
+      key: processed ? key : this.processedBufferKey(orbitId, planetId, 1, 0),
+      usingProcessedBuffer: Boolean(processed)
+    };
+  }
+
   private createPlayback(
     id: string, orbitId: string, planetId: string, barId: string,
-    mode: "loop" | "sequence", planetVolume: number, playbackRate = 1,
-    pitchCents = 0, reverse = false
+    mode: "loop" | "sequence", planetVolume: number, tapeRate = 1,
+    userSpeed = 1, pitchCents = 0, reverse = false
   ) {
     const context = this.getContext();
-    const buffer = pitchCents === 0
-      ? this.buffers.get(orbitId)
-      : this.pitchBuffers.get(`${orbitId}:${planetId}:${pitchCents}`) ?? this.buffers.get(orbitId);
+    const resolved = this.getPlaybackBuffer(orbitId, planetId, userSpeed, pitchCents);
     const orbitGain = this.orbitGains.get(orbitId);
-    if (!buffer || !orbitGain) return null;
-    let playbackBuffer = buffer;
+    if (!resolved || !orbitGain) return null;
+    let playbackBuffer = resolved.buffer;
     if (reverse) {
-      const reverseKey = `${orbitId}:${planetId}:${pitchCents}:reverse`;
-      playbackBuffer = this.reverseBuffers.get(reverseKey) ?? this.createReversedBuffer(reverseKey, buffer);
+      const reverseKey = `${resolved.key}:reverse`;
+      playbackBuffer = this.reverseBuffers.get(reverseKey) ?? this.createReversedBuffer(reverseKey, resolved.buffer);
     }
     const source = context.createBufferSource();
     const planetGain = context.createGain();
     source.buffer = playbackBuffer;
-    source.playbackRate.value = playbackRate;
+    // User speed is rendered into the processed buffer to preserve pitch.
+    // playbackRate is intentionally limited to immediate tape-style runtime effects.
+    source.playbackRate.value = tapeRate;
     planetGain.gain.value = planetVolume;
     source.connect(planetGain);
     planetGain.connect(orbitGain);
@@ -120,7 +149,7 @@ class AudioEngine {
       playback,
       buffer: playbackBuffer,
       context,
-      usingProcessedBuffer: buffer !== this.buffers.get(orbitId)
+      usingProcessedBuffer: resolved.usingProcessedBuffer
     };
   }
 
@@ -139,7 +168,7 @@ class AudioEngine {
 
   syncLoop(
     orbitId: string, planetId: string, barId: string, inside: boolean,
-    audioTime: number, planetVolume: number, playbackRate: number, pitchCents: number,
+    audioTime: number, planetVolume: number, tapeRate: number, userSpeed: number, pitchCents: number,
     reverse = false
   ) {
     const key = `loop:${planetId}:${barId}`;
@@ -153,15 +182,16 @@ class AudioEngine {
         this.stopPlayback(key);
       } else {
         current.gainNode.gain.setValueAtTime(planetVolume, this.getContext().currentTime);
-        current.source.playbackRate.setValueAtTime(playbackRate, this.getContext().currentTime);
+        current.source.playbackRate.setValueAtTime(tapeRate, this.getContext().currentTime);
         return;
       }
     }
     const created = this.createPlayback(
-      key, orbitId, planetId, barId, "loop", planetVolume, playbackRate, pitchCents, reverse
+      key, orbitId, planetId, barId, "loop", planetVolume, tapeRate, userSpeed, pitchCents, reverse
     );
     if (!created) return;
-    const mappedTime = reverse ? created.buffer.duration - audioTime : audioTime;
+    const processedOffset = audioTime / this.normalizedSpeed(userSpeed);
+    const mappedTime = reverse ? created.buffer.duration - processedOffset : processedOffset;
     const safeOffset = Math.min(Math.max(mappedTime, 0), Math.max(0, created.buffer.duration - .001));
     created.playback.source.start(created.context.currentTime, safeOffset);
     console.debug({
@@ -173,14 +203,14 @@ class AudioEngine {
 
   triggerSequence(
     orbitId: string, planetId: string, barId: string, planetVolume: number,
-    playbackRate: number, pitchCents: number, reverse: boolean,
+    tapeRate: number, pitchCents: number, reverse: boolean,
     retriggerMode: SequenceRetriggerMode
   ) {
     if (retriggerMode === "ignore-until-end" && this.hasActiveSequencePlayback(orbitId)) return;
     if (retriggerMode === "cut-previous") this.stopActiveSequencePlaybacksForOrbit(orbitId);
     const id = `sequence:${planetId}:${barId}:${crypto.randomUUID()}`;
     const created = this.createPlayback(
-      id, orbitId, planetId, barId, "sequence", planetVolume, playbackRate, pitchCents, reverse
+      id, orbitId, planetId, barId, "sequence", planetVolume, tapeRate, 1, pitchCents, reverse
     );
     if (created) {
       created.playback.source.start(created.context.currentTime);
@@ -247,41 +277,57 @@ class AudioEngine {
     }
   }
 
-  setActivePlanetPlaybackRate(planetId: string, playbackRate: number) {
+  setActivePlanetTapeRate(planetId: string, tapeRate: number) {
     const context = this.getContext();
     for (const playback of this.active.values()) {
       if (playback.planetId === planetId && playback.mode === "loop") {
-        playback.source.playbackRate.setValueAtTime(playbackRate, context.currentTime);
+        playback.source.playbackRate.setValueAtTime(tapeRate, context.currentTime);
       }
     }
   }
 
+  hasProcessedBuffer(orbitId: string, planetId: string, speed: number, pitchCents: number) {
+    const normalizedSpeed = this.normalizedSpeed(speed);
+    const roundedPitch = Math.round(pitchCents);
+    return (Math.abs(normalizedSpeed - 1) < .0001 && roundedPitch === 0) ||
+      this.processedBuffers.has(this.processedBufferKey(orbitId, planetId, normalizedSpeed, roundedPitch));
+  }
+
   hasPitchBuffer(orbitId: string, planetId: string, pitchCents: number) {
-    return pitchCents === 0 || this.pitchBuffers.has(`${orbitId}:${planetId}:${pitchCents}`);
+    return this.hasProcessedBuffer(orbitId, planetId, 1, pitchCents);
   }
 
   async processPitchBuffer(orbitId: string, planetId: string, pitchCents: number) {
-    if (pitchCents === 0) return;
-    const key = `${orbitId}:${planetId}:${pitchCents}`;
-    if (this.pitchBuffers.has(key)) return;
+    return this.processPlanetBuffer(orbitId, planetId, 1, pitchCents);
+  }
+
+  async processPlanetBuffer(orbitId: string, planetId: string, speed: number, pitchCents: number) {
+    const normalizedSpeed = this.normalizedSpeed(speed);
+    const roundedPitch = Math.round(pitchCents);
+    if (this.hasProcessedBuffer(orbitId, planetId, normalizedSpeed, roundedPitch)) return;
+    const key = this.processedBufferKey(orbitId, planetId, normalizedSpeed, roundedPitch);
     const original = this.buffers.get(orbitId);
     if (!original) throw new Error("Audio buffer is unavailable.");
 
-    const pitchRate = Math.pow(2, pitchCents / 1200);
+    const pitchRate = Math.pow(2, roundedPitch / 1200);
+    const outputLength = Math.max(1, Math.ceil(original.length / normalizedSpeed));
     const output = this.getContext().createBuffer(
-      original.numberOfChannels, original.length, original.sampleRate
+      original.numberOfChannels, outputLength, original.sampleRate
     );
     // SoundTouch processes in large windows; zero padding lets it flush the final window
     // without mixing any dry/original source into the rendered result.
     const padded = this.getContext().createBuffer(
-      original.numberOfChannels, original.length + 32768, original.sampleRate
+      original.numberOfChannels, original.length + Math.max(32768, Math.ceil(original.sampleRate * 1.5)),
+      original.sampleRate
     );
     for (let channel = 0; channel < original.numberOfChannels; channel++) {
       padded.copyToChannel(original.getChannelData(channel), channel);
     }
     const soundTouch = new SoundTouch();
     soundTouch.stretch.setParameters(original.sampleRate, 0, 0, 12);
-    soundTouch.tempo = 1;
+    // Processing order is effectively original -> pitch-preserving tempo -> pitch shift -> reverse.
+    // The rendered buffer replaces the dry/original source; playback never layers both.
+    soundTouch.tempo = normalizedSpeed;
     soundTouch.pitch = pitchRate;
     const filter = new SimpleFilter(new WebAudioBufferSource(padded), soundTouch);
     const blockFrames = 8192;
@@ -289,8 +335,8 @@ class AudioEngine {
     let outputPosition = 0;
     let peak = 0;
 
-    while (outputPosition < original.length) {
-      const requested = Math.min(blockFrames, original.length - outputPosition);
+    while (outputPosition < outputLength) {
+      const requested = Math.min(blockFrames, outputLength - outputPosition);
       const frames = filter.extract(interleaved, requested);
       if (frames <= 0) break;
       for (let frame = 0; frame < frames; frame++) {
@@ -314,7 +360,7 @@ class AudioEngine {
         for (let index = 0; index < samples.length; index++) samples[index] *= scale;
       }
     }
-    this.pitchBuffers.set(key, output);
+    this.processedBuffers.set(key, output);
   }
 
   startRecording() {
@@ -353,8 +399,8 @@ class AudioEngine {
   removeOrbit(orbitId: string) {
     this.stopAllActivePlaybacksForOrbit(orbitId);
     this.buffers.delete(orbitId);
-    for (const key of [...this.pitchBuffers.keys()]) {
-      if (key.startsWith(`${orbitId}:`)) this.pitchBuffers.delete(key);
+    for (const key of [...this.processedBuffers.keys()]) {
+      if (key.startsWith(`${orbitId}:`)) this.processedBuffers.delete(key);
     }
     for (const key of [...this.reverseBuffers.keys()]) {
       if (key.startsWith(`${orbitId}:`)) this.reverseBuffers.delete(key);

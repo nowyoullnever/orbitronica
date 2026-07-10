@@ -10,7 +10,7 @@ import type {
   ContextMenuState, HistorySnapshot, Orbit, OrbitMode, Planet, Selection,
   SequenceRetriggerMode, Tool, TriggerBar
 } from "./state/types";
-import { TAU, getSpeedBasedPlaybackRate, isFullLoopBar, orbitAngleAtPoint } from "./utils/geometry";
+import { TAU, getTapeStyleRuntimeRateOnly, isFullLoopBar, orbitAngleAtPoint } from "./utils/geometry";
 
 const id = () => crypto.randomUUID();
 const MAX_HISTORY = 100;
@@ -24,6 +24,11 @@ const supportedAudio = (file: File) => /\.(wav|mp3|ogg)$/i.test(file.name) ||
 
 const cleanPlanet = (planet: Planet): Planet => ({
   ...planet,
+  pendingSpeed: undefined,
+  isSpeedProcessing: false,
+  processingSpeed: undefined,
+  speedProcessRequestId: undefined,
+  speedProcessingError: undefined,
   pendingPitchCents: undefined,
   isPitchProcessing: false,
   processingPitchCents: undefined,
@@ -186,7 +191,52 @@ export default function App() {
     setBars((current) => [...current, ...copiedBars]);
     setSelection({ orbitId: newOrbitId, planetId: null, barId: null });
     for (const planet of copiedPlanets) {
-      if (planet.pitchCents) void audioEngine.processPitchBuffer(newOrbitId, planet.id, planet.pitchCents);
+      if (planet.speed !== 1 || planet.pitchCents) {
+        void audioEngine.processPlanetBuffer(newOrbitId, planet.id, planet.speed, planet.pitchCents);
+      }
+    }
+  }
+
+  function previewPlanetSpeed(planetId: string, pendingSpeed: number) {
+    setPlanets((current) => current.map((planet) =>
+      planet.id === planetId ? { ...planet, pendingSpeed, speedProcessingError: undefined } : planet));
+  }
+
+  async function commitPlanetSpeed(planetId: string, requestedSpeed?: number) {
+    const planet = stateRef.current.planets.find((item) => item.id === planetId);
+    if (!planet) return;
+    const speed = requestedSpeed ?? planet.pendingSpeed ?? planet.speed;
+    if (planet.isSpeedProcessing && planet.processingSpeed === speed) return;
+    if (Math.abs(speed - planet.speed) < .0001 && !planet.isSpeedProcessing) {
+      setPlanets((current) => current.map((item) =>
+        item.id === planetId ? { ...item, pendingSpeed: undefined, speedProcessingError: undefined } : item));
+      return;
+    }
+    pushHistory();
+    const requestId = id();
+    if (audioEngine.hasProcessedBuffer(planet.orbitId, planet.id, speed, planet.pitchCents)) {
+      setPlanets((current) => current.map((item) =>
+        item.id === planetId ? { ...cleanPlanet(item), speed } : item));
+      return;
+    }
+    setPlanets((current) => current.map((item) => item.id === planetId ? {
+      ...item,
+      pendingSpeed: speed,
+      isSpeedProcessing: true,
+      processingSpeed: speed,
+      speedProcessRequestId: requestId,
+      speedProcessingError: undefined
+    } : item));
+    try {
+      await audioEngine.processPlanetBuffer(planet.orbitId, planet.id, speed, planet.pitchCents);
+      const latest = stateRef.current.planets.find((item) => item.id === planetId);
+      if (latest?.speedProcessRequestId !== requestId) return;
+      setPlanets((current) => current.map((item) =>
+        item.id === planetId ? { ...cleanPlanet(item), speed } : item));
+    } catch {
+      setPlanets((current) => current.map((item) =>
+        item.id === planetId ? { ...cleanPlanet(item), speedProcessingError: "Speed processing failed" } : item));
+      flash("Speed processing failed; the previous speed remains active.");
     }
   }
 
@@ -207,7 +257,7 @@ export default function App() {
     }
     pushHistory();
     const requestId = id();
-    if (audioEngine.hasPitchBuffer(planet.orbitId, planet.id, pitchCents)) {
+    if (audioEngine.hasProcessedBuffer(planet.orbitId, planet.id, planet.speed, pitchCents)) {
       setPlanets((current) => current.map((item) =>
         item.id === planetId ? { ...cleanPlanet(item), pitchCents } : item));
       return;
@@ -217,7 +267,7 @@ export default function App() {
       processingPitchCents: pitchCents, pitchProcessRequestId: requestId
     } : item));
     try {
-      await audioEngine.processPitchBuffer(planet.orbitId, planet.id, pitchCents);
+      await audioEngine.processPlanetBuffer(planet.orbitId, planet.id, planet.speed, pitchCents);
       const latest = stateRef.current.planets.find((item) => item.id === planetId);
       if (latest?.pitchProcessRequestId !== requestId) return;
       setPlanets((current) => current.map((item) =>
@@ -313,6 +363,9 @@ export default function App() {
       }
       const restoredPlanets = project.planets.map((planet) => ({
         ...cleanPlanet(planet),
+        speed: planet.speed ?? 1,
+        volume: planet.volume ?? 1,
+        pitchCents: planet.pitchCents ?? 0,
         direction: planet.direction ?? 1,
         collisionSpeedMultiplier: planet.collisionSpeedMultiplier ?? 1,
         collisionCooldownRemaining: 0,
@@ -332,7 +385,9 @@ export default function App() {
       if (missing.length) flash(`Project loaded with missing audio: ${missing.join(", ")}`, 5000);
       else flash("Project loaded.");
       for (const planet of restoredPlanets) {
-        if (planet.pitchCents) void audioEngine.processPitchBuffer(planet.orbitId, planet.id, planet.pitchCents);
+        if (planet.speed !== 1 || planet.pitchCents) {
+          void audioEngine.processPlanetBuffer(planet.orbitId, planet.id, planet.speed, planet.pitchCents);
+        }
       }
     } catch (error) {
       flash(error instanceof Error ? error.message : "Project could not be loaded.");
@@ -496,8 +551,8 @@ export default function App() {
               changes.collisionSpeedMultiplier === planet.collisionSpeedMultiplier) continue;
             const orbit = stateRef.current.orbits.find((item) => item.id === planet.orbitId);
             if (orbit?.mode === "loop") {
-              audioEngine.setActivePlanetPlaybackRate(
-                planet.id, getSpeedBasedPlaybackRate(orbit, { ...planet, ...changes })
+              audioEngine.setActivePlanetTapeRate(
+                planet.id, getTapeStyleRuntimeRateOnly(orbit, { ...planet, ...changes })
               );
             }
           }
@@ -510,7 +565,7 @@ export default function App() {
           audioEngine.syncLoop(
             orbit.id, planet.id, bar.id, inside && canOrbitSound(orbit.id),
             angle / TAU * orbit.audioDuration, planet.volume,
-            getSpeedBasedPlaybackRate(orbit, planet), planet.pitchCents, planet.direction === -1
+            getTapeStyleRuntimeRateOnly(orbit, planet), planet.speed, planet.pitchCents, planet.direction === -1
           );
         }}
         onSequencePlay={(orbit, planet, bar) => {
@@ -521,14 +576,8 @@ export default function App() {
           );
         }}
         onSequenceStop={(orbitId) => audioEngine.stopActiveSequencePlaybacksForOrbit(orbitId)}
-        onResizeOrbit={(orbitId, radiusX, radiusY) => setOrbits((current) => current.map((orbit) => {
-          if (orbit.id !== orbitId) return orbit;
-          const resized = { ...orbit, radiusX, radiusY };
-          for (const planet of stateRef.current.planets.filter((item) => item.orbitId === orbitId)) {
-            audioEngine.setActivePlanetPlaybackRate(planet.id, getSpeedBasedPlaybackRate(resized, planet));
-          }
-          return resized;
-        }))}
+        onResizeOrbit={(orbitId, radiusX, radiusY) => setOrbits((current) =>
+          current.map((orbit) => orbit.id === orbitId ? { ...orbit, radiusX, radiusY } : orbit))}
         onMoveOrbit={(orbitId, x, y) => setOrbits((current) =>
           current.map((orbit) => orbit.id === orbitId ? { ...orbit, x, y } : orbit))}
         onEditBar={(barId, angle, lengthRadians, startAngle) => setBars((current) =>
@@ -572,16 +621,8 @@ export default function App() {
         selectedOrbit && updateOrbit(selectedOrbit.id, { sequenceRetriggerMode })}
       onDuplicate={() => selectedOrbit && duplicateOrbit(selectedOrbit.id)}
       onDeleteOrbit={deleteSelection}
-      onPlanetSpeed={(planetId, speed) => {
-        pushParameterHistory();
-        const planet = stateRef.current.planets.find((item) => item.id === planetId);
-        const orbit = stateRef.current.orbits.find((item) => item.id === planet?.orbitId);
-        if (planet && orbit?.mode === "loop") {
-          audioEngine.setActivePlanetPlaybackRate(planet.id, getSpeedBasedPlaybackRate(orbit, { ...planet, speed }));
-        }
-        setPlanets((current) => current.map((item) =>
-          item.id === planetId ? { ...item, speed } : item));
-      }}
+      onPlanetSpeedPreview={previewPlanetSpeed}
+      onPlanetSpeedCommit={(planetId, speed) => void commitPlanetSpeed(planetId, speed)}
       onPlanetVolume={(planetId, volume) => {
         pushParameterHistory(); audioEngine.setActivePlanetVolume(planetId, volume);
         setPlanets((current) => current.map((planet) => planet.id === planetId ? { ...planet, volume } : planet));

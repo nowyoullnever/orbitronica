@@ -16,6 +16,11 @@ export function serializeProject(
     orbits: orbits.map((orbit) => ({ ...orbit })),
     planets: planets.map((planet) => ({
       ...planet,
+      pendingSpeed: undefined,
+      isSpeedProcessing: false,
+      processingSpeed: undefined,
+      speedProcessRequestId: undefined,
+      speedProcessingError: undefined,
       pendingPitchCents: undefined,
       isPitchProcessing: false,
       processingPitchCents: undefined,
