@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import type { ContextMenuState, Orbit, Planet, Selection, Tool, TriggerBar, ViewportState } from "../state/types";
 import {
   TAU, arePlanetCirclesColliding, ellipsePoint, findNearestOrbit, getPlanetEffectiveSpeed,
-  getSampleDuration, isAngleInsideBar, isFullLoopBar, normalizeAngle, orbitAngleAtPoint
+  getSampleDuration, getSampleEnd, getSampleStart, isAngleInsideBar, isFullLoopBar,
+  normalizeAngle, orbitAngleAtPoint
 } from "../utils/geometry";
 import { angularDistance } from "../utils/triggerDetection";
 import { parseHexColor } from "../utils/color";
@@ -77,6 +78,8 @@ type WaveformGeometry = {
   radiusX: number;
   radiusY: number;
   spikeCount: number;
+  startFraction: number;
+  endFraction: number;
   baseWidth: number;
   segments: WaveformSegment[];
   basePath: Path2D;
@@ -320,15 +323,22 @@ export function CanvasStage(props: Props) {
       const spikeCount = Math.min(720, Math.max(160, Math.round(circumference / 4)));
       const amplitudeScale = Math.max(14, Math.min(orbit.radiusX, orbit.radiusY) * .22);
       const baseWidth = Math.max(.6, (circumference / spikeCount) * .55);
+      // Only the trimmed [start, end] slice of the sample is wrapped around the orbit,
+      // matching what actually plays as the angle sweeps 0..TAU.
+      const startFraction = orbit.audioDuration > 0 ? getSampleStart(orbit) / orbit.audioDuration : 0;
+      const endFraction = orbit.audioDuration > 0 ? getSampleEnd(orbit) / orbit.audioDuration : 1;
       const cached = waveformGeometryCache.current.get(orbit.id);
       if (cached && cached.peaks === peaks && cached.radiusX === orbit.radiusX &&
-        cached.radiusY === orbit.radiusY && cached.spikeCount === spikeCount) return cached;
+        cached.radiusY === orbit.radiusY && cached.spikeCount === spikeCount &&
+        cached.startFraction === startFraction && cached.endFraction === endFraction) return cached;
 
+      const lo = startFraction * peaks.length;
+      const hi = endFraction * peaks.length;
       const segments: WaveformSegment[] = [];
       const basePath = new Path2D();
       for (let index = 0; index < spikeCount; index++) {
-        const from = Math.floor((index / spikeCount) * peaks.length);
-        const to = Math.max(from + 1, Math.floor(((index + 1) / spikeCount) * peaks.length));
+        const from = Math.min(peaks.length - 1, Math.max(0, Math.floor(lo + (index / spikeCount) * (hi - lo))));
+        const to = Math.min(peaks.length, Math.max(from + 1, Math.floor(lo + ((index + 1) / spikeCount) * (hi - lo))));
         let amp = 0;
         for (let p = from; p < to; p++) if (peaks[p] > amp) amp = peaks[p];
         const angle = (index / spikeCount) * TAU;
@@ -342,7 +352,10 @@ export function CanvasStage(props: Props) {
         basePath.moveTo(segment.x - segment.nx * segment.half, segment.y - segment.ny * segment.half);
         basePath.lineTo(segment.x + segment.nx * segment.half, segment.y + segment.ny * segment.half);
       }
-      const geometry = { peaks, radiusX: orbit.radiusX, radiusY: orbit.radiusY, spikeCount, baseWidth, segments, basePath };
+      const geometry = {
+        peaks, radiusX: orbit.radiusX, radiusY: orbit.radiusY, spikeCount,
+        startFraction, endFraction, baseWidth, segments, basePath
+      };
       waveformGeometryCache.current.set(orbit.id, geometry);
       return geometry;
     };
