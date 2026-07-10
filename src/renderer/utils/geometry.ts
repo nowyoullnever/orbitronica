@@ -37,6 +37,19 @@ export function findNearestOrbit(orbits: Orbit[], x: number, y: number, toleranc
   return nearest;
 }
 
+// Effective playback window into the sample, clamped and defaulting to the full sample.
+export function getSampleStart(orbit: Orbit) {
+  return Math.min(Math.max(orbit.sampleStart ?? 0, 0), orbit.audioDuration);
+}
+
+export function getSampleEnd(orbit: Orbit) {
+  return Math.min(Math.max(orbit.sampleEnd ?? orbit.audioDuration, getSampleStart(orbit)), orbit.audioDuration);
+}
+
+export function getSampleDuration(orbit: Orbit) {
+  return Math.max(0.0001, getSampleEnd(orbit) - getSampleStart(orbit));
+}
+
 export function getBarTimeRange(bar: { angle: number; lengthRadians: number }, orbit: Orbit) {
   if (isFullLoopBar(bar)) return { startTime: 0, endTime: orbit.audioDuration };
   const half = bar.lengthRadians / 2;

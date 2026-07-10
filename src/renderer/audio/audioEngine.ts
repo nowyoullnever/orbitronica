@@ -273,7 +273,7 @@ class AudioEngine {
   triggerSequence(
     orbitId: string, planetId: string, barId: string, planetVolume: number,
     tapeRate: number, pitchCents: number, reverse: boolean,
-    retriggerMode: SequenceRetriggerMode
+    retriggerMode: SequenceRetriggerMode, sampleStart = 0, sampleEnd = Infinity
   ) {
     if (retriggerMode === "ignore-until-end" && this.hasActiveSequencePlayback(orbitId)) return;
     if (retriggerMode === "cut-previous") this.stopActiveSequencePlaybacksForOrbit(orbitId);
@@ -282,7 +282,14 @@ class AudioEngine {
       id, orbitId, planetId, barId, "sequence", planetVolume, tapeRate, 1, pitchCents, reverse
     );
     if (created) {
-      created.playback.source.start(created.context.currentTime);
+      // Play only the trimmed window. Pitch shifting preserves length, so the
+      // sample-time bounds map straight onto the (possibly reversed) buffer.
+      const bufferDuration = created.buffer.duration;
+      const start = Math.min(Math.max(sampleStart, 0), bufferDuration);
+      const end = Math.min(Math.max(sampleEnd, start), bufferDuration);
+      const duration = Math.max(0.001, end - start);
+      const offset = reverse ? Math.max(0, bufferDuration - end) : start;
+      created.playback.source.start(created.context.currentTime, offset, duration);
       console.debug({
         orbitId, planetId, barId, pitchCents,
         usingProcessedBuffer: created.usingProcessedBuffer,

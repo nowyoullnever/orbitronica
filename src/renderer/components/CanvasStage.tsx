@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import type { ContextMenuState, Orbit, Planet, Selection, Tool, TriggerBar, ViewportState } from "../state/types";
 import {
   TAU, arePlanetCirclesColliding, ellipsePoint, findNearestOrbit, getPlanetEffectiveSpeed,
-  isAngleInsideBar, isFullLoopBar, normalizeAngle, orbitAngleAtPoint
+  getSampleDuration, isAngleInsideBar, isFullLoopBar, normalizeAngle, orbitAngleAtPoint
 } from "../utils/geometry";
 import { angularDistance } from "../utils/triggerDetection";
+import { parseHexColor } from "../utils/color";
 
 const PLANET_RADIUS = 6;
 const PLANET_STROKE_WIDTH = 2;
@@ -30,16 +31,6 @@ const DEFAULT_WORLD_WIDTH = 4000;
 const DEFAULT_WORLD_HEIGHT = 3000;
 
 const WAVEFORM_HIGHLIGHT_WINDOW = .28;
-
-const parseHexColor = (hex: string) => {
-  const value = hex.replace("#", "");
-  const full = value.length === 3
-    ? value.split("").map((char) => char + char).join("")
-    : value;
-  const int = Number.parseInt(full, 16);
-  if (full.length !== 6 || Number.isNaN(int)) return { r: 74, g: 76, b: 70 };
-  return { r: (int >> 16) & 255, g: (int >> 8) & 255, b: int & 255 };
-};
 
 // lengthRadians is always the complete span from the start edge to the end edge.
 const clampBarLength = (lengthRadians: number) => {
@@ -572,7 +563,7 @@ export function CanvasStage(props: Props) {
         const collisionFlashRemaining = Math.max(0, planet.collisionFlashRemaining - delta);
         let direction = planet.direction;
         if (state.isPlaying && !orbit.isPaused && planet.isActive) {
-          const baseDuration = orbit.mode === "loop" ? orbit.audioDuration : SEQUENCE_BASE_CYCLE_DURATION;
+          const baseDuration = orbit.mode === "loop" ? getSampleDuration(orbit) : SEQUENCE_BASE_CYCLE_DURATION;
           angle = normalizeAngle(angle + delta * (TAU / baseDuration) *
             getPlanetEffectiveSpeed(orbit, { ...planet, collisionSpeedMultiplier }) * direction);
           runtimeAngles.current.set(planet.id, angle);

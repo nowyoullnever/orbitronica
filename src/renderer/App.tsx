@@ -11,7 +11,8 @@ import type {
   SequenceRetriggerMode, Tool, TriggerBar, ViewportState
 } from "./state/types";
 import {
-  TAU, getOrbitTapeRate, getTapeStyleRuntimeRateOnly, isFullLoopBar, orbitAngleAtPoint, rateToCents
+  TAU, getOrbitTapeRate, getSampleDuration, getSampleEnd, getSampleStart,
+  getTapeStyleRuntimeRateOnly, isFullLoopBar, orbitAngleAtPoint, rateToCents
 } from "./utils/geometry";
 
 const id = () => crypto.randomUUID();
@@ -782,7 +783,7 @@ export default function App() {
         onLoopFrame={(orbit, planet, bar, inside, angle) => {
           audioEngine.syncLoop(
             orbit.id, planet.id, bar.id, inside && canOrbitSound(orbit.id),
-            angle / TAU * orbit.audioDuration, planet.volume,
+            getSampleStart(orbit) + angle / TAU * getSampleDuration(orbit), planet.volume,
             getTapeStyleRuntimeRateOnly(orbit, planet), planet.speed, planet.pitchCents, planet.direction === -1
           );
         }}
@@ -790,7 +791,8 @@ export default function App() {
           if (!canOrbitSound(orbit.id)) return;
           audioEngine.triggerSequence(
             orbit.id, planet.id, bar.id, planet.volume, 1, planet.pitchCents,
-            planet.direction === -1, orbit.sequenceRetriggerMode
+            planet.direction === -1, orbit.sequenceRetriggerMode,
+            getSampleStart(orbit), getSampleEnd(orbit)
           );
         }}
         onSequenceStop={(orbitId) => audioEngine.stopActiveSequencePlaybacksForOrbit(orbitId)}
@@ -822,6 +824,13 @@ export default function App() {
 
     <OrbitSettingsPanel
       orbit={selectedOrbit} planets={planets} projectName={projectName} isDirty={isDirty}
+      waveformPeaks={selectedOrbit ? waveformPeaksByOrbit.get(selectedOrbit.id) : undefined}
+      onSampleTrim={(orbitId, start, end) => {
+        pushParameterHistory();
+        setOrbits((current) => current.map((orbit) =>
+          orbit.id === orbitId ? { ...orbit, sampleStart: start, sampleEnd: end } : orbit));
+        audioEngine.stopActiveLoopPlaybacksForOrbit(orbitId);
+      }}
       hasPlanetClipboard={clipboard?.type === "planet"}
       onProjectName={(name) => { setProjectName(name); setIsDirty(true); }}
       onSave={() => void saveProject()} onOpen={() => void openProject()}

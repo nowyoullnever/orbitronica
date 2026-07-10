@@ -14,6 +14,10 @@ export type Orbit = {
   initialRadiusX: number;
   initialRadiusY: number;
   audioDuration: number;
+  // Playback window into the sample, in seconds. Undefined means the full sample
+  // (sampleStart 0 .. sampleEnd audioDuration). Both loop and sequence modes honor it.
+  sampleStart?: number;
+  sampleEnd?: number;
   mode: OrbitMode;
   volume: number;
   isPaused: boolean;
