@@ -73,12 +73,27 @@ export function getOrbitTapeRate(orbit: Orbit) {
   return initialSize / currentSize;
 }
 
+export function hasUserSpeedOrPitchChange(planet: { speed?: number; pitchCents?: number }) {
+  return Math.abs((planet.speed ?? 1) - 1) > 0.0001 || Math.abs(planet.pitchCents ?? 0) > 0.0001;
+}
+
+export function getLegacyOrbitSizeRate(
+  orbit: Orbit,
+  planet: { collisionSpeedMultiplier?: number }
+) {
+  if (orbit.mode === "sequence") return 1;
+  // This is the exact orbit-size behavior from commit 3e8ee22:
+  // smaller orbit = faster/higher, larger orbit = slower/lower.
+  return (planet.collisionSpeedMultiplier ?? 1) / getOrbitSizeScale(orbit);
+}
+
 export function getPlanetEffectiveSpeed(
   orbit: Orbit,
-  planet: { speed: number; collisionSpeedMultiplier?: number }
+  planet: { speed: number; pitchCents?: number; collisionSpeedMultiplier?: number }
 ) {
   const collision = planet.collisionSpeedMultiplier ?? 1;
   if (orbit.mode === "sequence") return planet.speed;
+  if (!hasUserSpeedOrPitchChange(planet)) return getLegacyOrbitSizeRate(orbit, planet);
   return planet.speed * getOrbitTapeRate(orbit) * collision;
 }
 
@@ -92,9 +107,10 @@ export function rateToCents(rate: number) {
 
 export function getTapeStyleRuntimeRateOnly(
   orbit: Orbit,
-  planet: { collisionSpeedMultiplier?: number }
+  planet: { speed?: number; pitchCents?: number; collisionSpeedMultiplier?: number }
 ) {
   if (orbit.mode === "sequence") return 1;
+  if (!hasUserSpeedOrPitchChange(planet)) return getLegacyOrbitSizeRate(orbit, planet);
   return getOrbitTapeRate(orbit) * (planet.collisionSpeedMultiplier ?? 1);
 }
 

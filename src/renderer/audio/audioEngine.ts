@@ -89,6 +89,10 @@ class AudioEngine {
     return Number.isFinite(speed) && speed > 0 ? Math.max(.05, speed) : 1;
   }
 
+  private hasUserSpeedChange(speed: number) {
+    return Math.abs(this.normalizedSpeed(speed) - 1) > .0001;
+  }
+
   private processedBufferKey(orbitId: string, planetId: string, speed: number, pitchCents: number) {
     return `${orbitId}:${planetId}:speed=${this.normalizedSpeed(speed).toFixed(4)}:pitch=${Math.round(pitchCents)}`;
   }
@@ -190,7 +194,11 @@ class AudioEngine {
       key, orbitId, planetId, barId, "loop", planetVolume, tapeRate, userSpeed, pitchCents, reverse
     );
     if (!created) return;
-    const processedOffset = audioTime / this.normalizedSpeed(userSpeed);
+    // Match commit 3e8ee22 exactly when the user speed is unchanged:
+    // the loop bar maps directly to the original audio timeline.
+    const processedOffset = this.hasUserSpeedChange(userSpeed)
+      ? audioTime / this.normalizedSpeed(userSpeed)
+      : audioTime;
     const mappedTime = reverse ? created.buffer.duration - processedOffset : processedOffset;
     const safeOffset = Math.min(Math.max(mappedTime, 0), Math.max(0, created.buffer.duration - .001));
     created.playback.source.start(created.context.currentTime, safeOffset);
