@@ -181,6 +181,16 @@ input[type="range"]:disabled { opacity: .35; }
 }
 .editable-metric button:hover { background: #292a25; color: #fff; }
 .editable-metric input:disabled, .editable-metric button:disabled { opacity: .45; cursor: not-allowed; }
+.readonly-metric {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 4px 0; border-top: 1px solid rgba(201, 199, 190, .55);
+}
+.readonly-metric span {
+  color: #777870; font: 8px "MapoFlowerIsland", sans-serif; letter-spacing: .07em;
+}
+.readonly-metric output {
+  color: #2e302a; font: 8px "MapoFlowerIsland", sans-serif; letter-spacing: .04em;
+}
 .pitch-status {
   display: flex; justify-content: space-between; margin: -3px 0 13px;
   color: #777870; font: 7px "MapoFlowerIsland", sans-serif; letter-spacing: .06em;

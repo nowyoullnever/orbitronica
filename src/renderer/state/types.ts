@@ -65,6 +65,12 @@ export type Selection = {
   barId: string | null;
 };
 
+export type ViewportState = {
+  zoom: number;
+  offsetX: number;
+  offsetY: number;
+};
+
 export type HistorySnapshot = {
   orbits: Orbit[];
   planets: Planet[];

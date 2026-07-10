@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { ContextMenuState, Orbit, Planet, Selection, Tool, TriggerBar } from "../state/types";
+import type { ContextMenuState, Orbit, Planet, Selection, Tool, TriggerBar, ViewportState } from "../state/types";
 import {
   TAU, arePlanetCirclesColliding, ellipsePoint, findNearestOrbit, getPlanetEffectiveSpeed,
   isAngleInsideBar, isFullLoopBar, normalizeAngle, orbitAngleAtPoint
@@ -24,6 +24,10 @@ const COLLISION_SLOWDOWN = .4;
 const COLLISION_COOLDOWN_SECONDS = .25;
 const COLLISION_RECOVERY_RATE = 2.5;
 const COLLISION_FLASH_SECONDS = .12;
+const MIN_VIEWPORT_ZOOM = .15;
+const MAX_VIEWPORT_ZOOM = 4;
+const DEFAULT_WORLD_WIDTH = 4000;
+const DEFAULT_WORLD_HEIGHT = 3000;
 
 // lengthRadians is always the complete span from the start edge to the end edge.
 const clampBarLength = (lengthRadians: number) => {
@@ -43,7 +47,8 @@ type Drag =
   | { type: "resize-orbit"; orbit: Orbit }
   | { type: "move-orbit"; orbit: Orbit; startX: number; startY: number }
   | { type: "bar-start" | "bar-end"; bar: TriggerBar; orbit: Orbit; fixedAngle: number }
-  | { type: "move-bar"; bar: TriggerBar; orbit: Orbit };
+  | { type: "move-bar"; bar: TriggerBar; orbit: Orbit }
+  | { type: "pan-viewport"; startX: number; startY: number; viewport: ViewportState };
 
 type Props = {
   orbits: Orbit[];
@@ -54,6 +59,8 @@ type Props = {
   isPlaying: boolean;
   isDragOver: boolean;
   cancelSignal: number;
+  viewport: ViewportState;
+  onViewportChange: (viewport: ViewportState) => void;
   onSelect: (selection: Selection) => void;
   onAddPlanet: (orbitId: string, angle: number) => void;
   onAddBar: (orbitId: string, angle: number) => void;
@@ -80,6 +87,55 @@ export function CanvasStage(props: Props) {
   const [drag, setDrag] = useState<Drag | null>(null);
   stateRef.current = props;
 
+  const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+  function clampViewport(viewport: ViewportState) {
+    const canvas = canvasRef.current;
+    if (!canvas) return viewport;
+    const rect = canvas.getBoundingClientRect();
+    const worldScreenWidth = DEFAULT_WORLD_WIDTH * viewport.zoom;
+    const worldScreenHeight = DEFAULT_WORLD_HEIGHT * viewport.zoom;
+    const minOffsetX = Math.min(0, rect.width - worldScreenWidth);
+    const minOffsetY = Math.min(0, rect.height - worldScreenHeight);
+    return {
+      zoom: clamp(viewport.zoom, MIN_VIEWPORT_ZOOM, MAX_VIEWPORT_ZOOM),
+      offsetX: clamp(viewport.offsetX, minOffsetX, 0),
+      offsetY: clamp(viewport.offsetY, minOffsetY, 0)
+    };
+  }
+
+  function screenToWorld(point: { x: number; y: number }, viewport = stateRef.current.viewport) {
+    return {
+      x: (point.x - viewport.offsetX) / viewport.zoom,
+      y: (point.y - viewport.offsetY) / viewport.zoom
+    };
+  }
+
+  function zoomViewportAtLocalPoint(localX: number, localY: number, factor: number) {
+    const viewport = stateRef.current.viewport;
+    const oldZoom = viewport.zoom;
+    const newZoom = clamp(oldZoom * factor, MIN_VIEWPORT_ZOOM, MAX_VIEWPORT_ZOOM);
+    if (Math.abs(newZoom - oldZoom) < .0001) return;
+    const worldX = (localX - viewport.offsetX) / oldZoom;
+    const worldY = (localY - viewport.offsetY) / oldZoom;
+    props.onViewportChange(clampViewport({
+      zoom: newZoom,
+      offsetX: localX - worldX * newZoom,
+      offsetY: localY - worldY * newZoom
+    }));
+  }
+
+  function zoomViewportAtCanvasCenter(factor: number) {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    zoomViewportAtLocalPoint(rect.width / 2, rect.height / 2, factor);
+  }
+
+  function resetViewportZoom() {
+    props.onViewportChange({ zoom: 1, offsetX: 0, offsetY: 0 });
+  }
+
   useEffect(() => {
     const canvas = canvasRef.current!;
     const context = canvas.getContext("2d")!;
@@ -96,6 +152,51 @@ export function CanvasStage(props: Props) {
     return () => observer.disconnect();
   }, []);
 
+  useEffect(() => {
+    const canvas = canvasRef.current!;
+    const wheel = (event: WheelEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      const localX = event.clientX - rect.left;
+      const localY = event.clientY - rect.top;
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+        zoomViewportAtLocalPoint(localX, localY, event.deltaY < 0 ? 1.1 : .9);
+        return;
+      }
+      event.preventDefault();
+      const viewport = stateRef.current.viewport;
+      props.onViewportChange(clampViewport({
+        ...viewport,
+        offsetX: viewport.offsetX - event.deltaX,
+        offsetY: viewport.offsetY - event.deltaY
+      }));
+    };
+    canvas.addEventListener("wheel", wheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", wheel);
+  }, []);
+
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const typing = !!target && (target.matches("input, select, textarea") || target.isContentEditable);
+      if (typing) return;
+      const command = event.ctrlKey || event.metaKey;
+      if (!command) return;
+      if (event.key === "+" || event.key === "=") {
+        event.preventDefault();
+        zoomViewportAtCanvasCenter(1.1);
+      } else if (event.key === "-") {
+        event.preventDefault();
+        zoomViewportAtCanvasCenter(.9);
+      } else if (event.key === "0") {
+        event.preventDefault();
+        resetViewportZoom();
+      }
+    };
+    window.addEventListener("keydown", keydown);
+    return () => window.removeEventListener("keydown", keydown);
+  }, []);
+
   function pointDistanceToOrbit(orbit: Orbit, x: number, y: number) {
     const angle = orbitAngleAtPoint(orbit, x, y);
     const point = ellipsePoint(orbit, angle);
@@ -103,6 +204,10 @@ export function CanvasStage(props: Props) {
   }
 
   function hitTestCanvas(x: number, y: number): HitTestResult {
+    const zoom = stateRef.current.viewport.zoom || 1;
+    const barEdgeHitRadius = BAR_EDGE_HIT_RADIUS / zoom;
+    const orbitLineTolerance = ORBIT_LINE_TOLERANCE / zoom;
+    const barBodyLineTolerance = 10 / zoom;
     for (let index = props.planets.length - 1; index >= 0; index--) {
       const planet = props.planets[index];
       const orbit = props.orbits.find((item) => item.id === planet.orbitId);
@@ -118,10 +223,10 @@ export function CanvasStage(props: Props) {
       if (!orbit || orbit.mode !== "loop") continue;
       const start = bar.angle - bar.lengthRadians / 2;
       const end = bar.angle + bar.lengthRadians / 2;
-      if (Math.hypot(ellipsePoint(orbit, start).x - x, ellipsePoint(orbit, start).y - y) <= BAR_EDGE_HIT_RADIUS) {
+      if (Math.hypot(ellipsePoint(orbit, start).x - x, ellipsePoint(orbit, start).y - y) <= barEdgeHitRadius) {
         return { type: "bar-edge", barId: bar.id, orbitId: orbit.id, edge: "start" };
       }
-      if (Math.hypot(ellipsePoint(orbit, end).x - x, ellipsePoint(orbit, end).y - y) <= BAR_EDGE_HIT_RADIUS) {
+      if (Math.hypot(ellipsePoint(orbit, end).x - x, ellipsePoint(orbit, end).y - y) <= barEdgeHitRadius) {
         return { type: "bar-edge", barId: bar.id, orbitId: orbit.id, edge: "end" };
       }
     }
@@ -130,7 +235,7 @@ export function CanvasStage(props: Props) {
       const orbit = props.orbits.find((item) => item.id === bar.orbitId);
       if (!orbit) continue;
       const angle = orbitAngleAtPoint(orbit, x, y);
-      const onLine = pointDistanceToOrbit(orbit, x, y) <= 10;
+      const onLine = pointDistanceToOrbit(orbit, x, y) <= barBodyLineTolerance;
       const onBar = orbit.mode === "loop"
         ? !isFullLoopBar(bar) && isAngleInsideBar(angle, bar.angle, bar.lengthRadians)
         : angularDistance(angle, bar.angle) <= .07;
@@ -138,7 +243,7 @@ export function CanvasStage(props: Props) {
     }
     for (let index = props.orbits.length - 1; index >= 0; index--) {
       const orbit = props.orbits[index];
-      if (pointDistanceToOrbit(orbit, x, y) <= ORBIT_LINE_TOLERANCE) {
+      if (pointDistanceToOrbit(orbit, x, y) <= orbitLineTolerance) {
         return { type: "orbit-line", orbitId: orbit.id };
       }
     }
@@ -204,7 +309,14 @@ export function CanvasStage(props: Props) {
       const rect = canvas.getBoundingClientRect();
       const state = stateRef.current;
       context.clearRect(0, 0, rect.width, rect.height);
+      context.save();
+      context.translate(state.viewport.offsetX, state.viewport.offsetY);
+      context.scale(state.viewport.zoom, state.viewport.zoom);
       context.lineCap = "round";
+
+      context.strokeStyle = "#dddcd5";
+      context.lineWidth = 1 / state.viewport.zoom;
+      context.strokeRect(0, 0, DEFAULT_WORLD_WIDTH, DEFAULT_WORLD_HEIGHT);
 
       for (const orbit of state.orbits) {
         context.beginPath();
@@ -281,6 +393,10 @@ export function CanvasStage(props: Props) {
         }
       }
 
+      context.restore();
+      context.fillStyle = "rgba(46, 48, 42, .72)";
+      context.font = '10px "MapoFlowerIsland", sans-serif';
+      context.fillText(`Zoom: ${Math.round(state.viewport.zoom * 100)}%`, rect.width - 82, rect.height - 18);
       frameRef.current = requestAnimationFrame(draw);
     };
     frameRef.current = requestAnimationFrame(draw);
@@ -402,6 +518,7 @@ export function CanvasStage(props: Props) {
   }
 
   function cursorFor(hit: HitTestResult, x: number, y: number) {
+    if (drag?.type === "pan-viewport") return "grabbing";
     if (drag?.type === "move-orbit") return "move";
     if (drag?.type === "move-bar") return "grabbing";
     if (drag?.type === "resize-orbit") return orbitResizeCursor(drag.orbit, x, y);
@@ -418,8 +535,15 @@ export function CanvasStage(props: Props) {
   }
 
   function handleMouseDown(event: React.MouseEvent<HTMLCanvasElement>) {
+    if (event.button === 1) {
+      event.preventDefault();
+      const point = localPoint(event);
+      setDrag({ type: "pan-viewport", startX: point.x, startY: point.y, viewport: props.viewport });
+      event.currentTarget.style.cursor = "grabbing";
+      return;
+    }
     if (event.button !== 0 || props.selectedTool !== "select") return;
-    const point = localPoint(event);
+    const point = screenToWorld(localPoint(event));
     const hit = hitTestCanvas(point.x, point.y);
     if (hit.type === "planet") {
       props.onSelect({ orbitId: hit.orbitId, planetId: hit.planetId, barId: null });
@@ -457,17 +581,28 @@ export function CanvasStage(props: Props) {
   }
 
   function handleMouseMove(event: React.MouseEvent<HTMLCanvasElement>) {
-    const point = localPoint(event);
+    const screenPoint = localPoint(event);
+    const point = screenToWorld(screenPoint);
     event.currentTarget.style.cursor = cursorFor(hitTestCanvas(point.x, point.y), point.x, point.y);
     if (!drag) return;
-    if (drag.type === "resize-orbit") {
+    if (drag.type === "pan-viewport") {
+      props.onViewportChange(clampViewport({
+        ...drag.viewport,
+        offsetX: drag.viewport.offsetX + screenPoint.x - drag.startX,
+        offsetY: drag.viewport.offsetY + screenPoint.y - drag.startY
+      }));
+    } else if (drag.type === "resize-orbit") {
       props.onResizeOrbit(
         drag.orbit.id,
         Math.min(MAX_RADIUS, Math.max(MIN_RADIUS, Math.abs(point.x - drag.orbit.x))),
         Math.min(MAX_RADIUS, Math.max(MIN_RADIUS, Math.abs(point.y - drag.orbit.y)))
       );
     } else if (drag.type === "move-orbit") {
-      props.onMoveOrbit(drag.orbit.id, drag.orbit.x + point.x - drag.startX, drag.orbit.y + point.y - drag.startY);
+      props.onMoveOrbit(
+        drag.orbit.id,
+        clamp(drag.orbit.x + point.x - drag.startX, 0, DEFAULT_WORLD_WIDTH),
+        clamp(drag.orbit.y + point.y - drag.startY, 0, DEFAULT_WORLD_HEIGHT)
+      );
     } else if (drag.type === "move-bar") {
       const angle = orbitAngleAtPoint(drag.orbit, point.x, point.y);
       props.onEditBar(
@@ -495,8 +630,8 @@ export function CanvasStage(props: Props) {
 
   function handleClick(event: React.MouseEvent<HTMLCanvasElement>) {
     if (drag || props.selectedTool === "select") return;
-    const point = localPoint(event);
-    const orbit = findNearestOrbit(props.orbits, point.x, point.y);
+    const point = screenToWorld(localPoint(event));
+    const orbit = findNearestOrbit(props.orbits, point.x, point.y, 14 / stateRef.current.viewport.zoom);
     if (!orbit) return;
     const angle = orbitAngleAtPoint(orbit, point.x, point.y);
     if (props.selectedTool === "planet") props.onAddPlanet(orbit.id, angle);
@@ -522,7 +657,7 @@ export function CanvasStage(props: Props) {
       onMouseLeave={finishDrag}
       onContextMenu={(event) => {
         event.preventDefault();
-        const point = localPoint(event);
+        const point = screenToWorld(localPoint(event));
         const hit = hitTestCanvas(point.x, point.y);
         const orbitId = hit.type === "empty" ? null : hit.orbitId;
         const planetId = hit.type === "planet" ? hit.planetId : null;
@@ -537,7 +672,7 @@ export function CanvasStage(props: Props) {
       onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) props.onDragState(false); }}
       onDrop={(event) => {
         event.preventDefault(); props.onDragState(false);
-        props.onDropFiles(Array.from(event.dataTransfer.files), localPoint(event));
+        props.onDropFiles(Array.from(event.dataTransfer.files), screenToWorld(localPoint(event)));
       }}
     />
   );

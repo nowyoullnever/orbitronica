@@ -69,7 +69,10 @@ function EditableMetric({
   onApply: (value: number) => void;
 }) {
   const [draft, setDraft] = useState(formatMetric(value, decimals));
-  useEffect(() => setDraft(formatMetric(value, decimals)), [value, decimals]);
+  const [isEditing, setIsEditing] = useState(false);
+  useEffect(() => {
+    if (!isEditing) setDraft(formatMetric(value, decimals));
+  }, [value, decimals, isEditing]);
 
   const apply = () => {
     const parsed = Number(draft);
@@ -84,6 +87,8 @@ function EditableMetric({
   return <div className="editable-metric">
     <span>{label}</span>
     <input type="number" value={draft} step={step} min={min} max={max} disabled={disabled}
+      onFocus={() => setIsEditing(true)}
+      onBlur={() => { setIsEditing(false); apply(); }}
       onChange={(event) => setDraft(event.target.value)}
       onKeyDown={(event) => {
         if (event.key === "Enter") {
@@ -94,6 +99,18 @@ function EditableMetric({
       }} />
     <em>{suffix}</em>
     <button type="button" disabled={disabled} onClick={apply}>Apply</button>
+  </div>;
+}
+
+function ReadonlyMetric({ label, value, suffix, decimals = 2 }: {
+  label: string;
+  value: number;
+  suffix: string;
+  decimals?: number;
+}) {
+  return <div className="readonly-metric">
+    <span>{label}</span>
+    <output>{decimals === 0 ? Math.round(value) : value.toFixed(decimals)} {suffix}</output>
   </div>;
 }
 
@@ -190,9 +207,10 @@ export function OrbitSettingsPanel(props: Props) {
                       planet.speedProcessingError ? "FAILED" : "READY"}</span>
                 </div>
                 <div className="effective-values">
-                  <EditableMetric label="USER SPEED" value={planet.speed} decimals={2} suffix="x"
+                  <EditableMetric label="BASE SPEED" value={planet.speed} decimals={2} suffix="x"
                     step={0.01} min={0.05} max={8}
                     onApply={(value) => props.onPlanetSpeedCommit(planet.id, value)} />
+                  <ReadonlyMetric label="LIVE SPEED" value={finalMovementSpeed} suffix="x" />
                   <EditableMetric label="USER PITCH" value={planet.pitchCents} decimals={0} suffix="cents"
                     step={1} min={-3600} max={3600}
                     onApply={(value) => props.onPlanetPitchCommit(planet.id, value)} />

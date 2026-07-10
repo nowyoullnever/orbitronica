@@ -8,7 +8,7 @@ import { TransportControls } from "./components/TransportControls";
 import { parseProject, serializeProject } from "./project/projectSerializer";
 import type {
   ContextMenuState, HistorySnapshot, Orbit, OrbitMode, Planet, Selection,
-  SequenceRetriggerMode, Tool, TriggerBar
+  SequenceRetriggerMode, Tool, TriggerBar, ViewportState
 } from "./state/types";
 import {
   TAU, getOrbitTapeRate, getTapeStyleRuntimeRateOnly, isFullLoopBar, orbitAngleAtPoint, rateToCents
@@ -25,6 +25,7 @@ const MIN_DIRECT_ORBIT_RADIUS = 40;
 const MAX_DIRECT_ORBIT_RADIUS = 1000;
 const ORBIT_COLORS = ["#5b625d", "#a65f54", "#4f759b", "#7a6995", "#6e8b62", "#b17b45"];
 const emptySelection: Selection = { orbitId: null, planetId: null, barId: null };
+const defaultViewport: ViewportState = { zoom: 1, offsetX: 0, offsetY: 0 };
 const supportedAudio = (file: File) => /\.(wav|mp3|ogg)$/i.test(file.name) ||
   ["audio/wav", "audio/x-wav", "audio/mpeg", "audio/ogg"].includes(file.type);
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -82,6 +83,7 @@ export default function App() {
   const [isDirty, setIsDirty] = useState(false);
   const [cancelSignal, setCancelSignal] = useState(0);
   const [clipboard, setClipboard] = useState<AppClipboard>(null);
+  const [viewport, setViewport] = useState<ViewportState>(defaultViewport);
   const uploadPoint = useRef({ x: 450, y: 350 });
   const fileInput = useRef<HTMLInputElement>(null);
   const undoStack = useRef<HistorySnapshot[]>([]);
@@ -502,6 +504,7 @@ export default function App() {
       setProjectName(project.projectName);
       setProjectPath(result.path);
       setIsPlaying(false);
+      setViewport(defaultViewport);
       setIsDirty(false);
       undoStack.current = [];
       redoStack.current = [];
@@ -724,7 +727,7 @@ export default function App() {
       <CanvasStage
         orbits={orbits} planets={planets} bars={bars} selection={selection}
         selectedTool={selectedTool} isPlaying={isPlaying} isDragOver={isDragOver}
-        cancelSignal={cancelSignal}
+        cancelSignal={cancelSignal} viewport={viewport} onViewportChange={setViewport}
         onSelect={setSelection} onBeginMutation={pushHistory}
         onAddPlanet={(orbitId, angle) => {
           pushHistory();
