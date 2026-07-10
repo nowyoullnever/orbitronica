@@ -2,6 +2,13 @@ import type { Orbit } from "../state/types";
 
 export const TAU = Math.PI * 2;
 export const FULL_LOOP_EPSILON = 0.0001;
+export const SPLICE_MAX_PIECES = 32;
+
+export function normalizeSpliceCount(count: number) {
+  if (!Number.isFinite(count) || Math.abs(count) < 2) return 0;
+  const even = Math.min(SPLICE_MAX_PIECES, Math.max(-SPLICE_MAX_PIECES, Math.round(count / 2) * 2));
+  return even;
+}
 
 export function normalizeAngle(angle: number) {
   return ((angle % TAU) + TAU) % TAU;
@@ -65,7 +72,7 @@ export function isFullLoopBar(bar: { lengthRadians: number }) {
 export function spliceBarSpecs(
   spliceCount: number, startAngleOffset = 0
 ): { angle: number; lengthRadians: number; startAngle: number }[] {
-  const pieces = Math.abs(Math.round(spliceCount));
+  const pieces = Math.abs(normalizeSpliceCount(spliceCount));
   if (pieces < 2) return [];
   const pieceLength = TAU / pieces;
   const phase = spliceCount > 0 ? 0 : 1;

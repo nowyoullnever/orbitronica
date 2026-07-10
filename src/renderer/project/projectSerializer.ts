@@ -26,7 +26,9 @@ export function serializeProject(
       processingPitchCents: undefined,
       pitchProcessRequestId: undefined
     })),
-    bars: bars.map((bar) => ({ ...bar })),
+    // Splice bars are derived from each orbit's splice settings on load; only manual bars
+    // belong in the durable project state.
+    bars: bars.filter((bar) => bar.source !== "splice").map((bar) => ({ ...bar })),
     lastLoopBarLengthRadians,
     ui: { ...selection }
   };

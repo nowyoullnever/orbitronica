@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Orbit, OrbitMode, Planet, SequenceRetriggerMode } from "../state/types";
 import {
-  getOrbitTapeRate, getPlanetEffectiveSpeed, getTapeStyleRuntimeRateOnly, rateToCents
+  getOrbitTapeRate, getPlanetEffectiveSpeed, getTapeStyleRuntimeRateOnly, rateToCents, SPLICE_MAX_PIECES
 } from "../utils/geometry";
 
 type Props = {
@@ -148,7 +148,7 @@ export function OrbitSettingsPanel(props: Props) {
             {(orbit.spliceCount ?? 0) === 0 ? "OFF"
               : `${(orbit.spliceCount ?? 0) > 0 ? "+" : ""}${orbit.spliceCount} pcs`}
           </output></span>
-            <input type="range" min="-32" max="32" step="2" value={orbit.spliceCount ?? 0}
+            <input type="range" min={-SPLICE_MAX_PIECES} max={SPLICE_MAX_PIECES} step="2" value={orbit.spliceCount ?? 0}
               onChange={(event) => props.onSpliceCount(Number(event.target.value))}
               onDoubleClick={() => props.onSpliceCount(0)} />
           </label>}

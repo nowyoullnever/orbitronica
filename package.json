@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron . --dev\"",
     "build": "tsc -b && vite build && electron-builder --dir",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
     "preview": "vite preview",
     "start": "electron ."
   },

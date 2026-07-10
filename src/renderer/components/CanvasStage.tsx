@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ContextMenuState, Orbit, Planet, Selection, Tool, TriggerBar, ViewportState } from "../state/types";
 import {
   TAU, arePlanetCirclesColliding, ellipsePoint, findNearestOrbit, getPlanetEffectiveSpeed,
-  isAngleInsideBar, isFullLoopBar, normalizeAngle, orbitAngleAtPoint
+  isAngleInsideBar, isFullLoopBar, normalizeAngle, orbitAngleAtPoint, SPLICE_MAX_PIECES
 } from "../utils/geometry";
 import { angularDistance } from "../utils/triggerDetection";
 
@@ -22,7 +22,6 @@ const MAX_RADIUS = 1000;
 // Splice dragbar: a vertical track sitting just outside an orbit's right edge. The knob
 // rests at the centre (count 0) and drags up (positive / bar-first) or down (negative /
 // gap-first). Each 2 pieces of splice shift the knob SPLICE_STEP_PIXELS world units.
-const SPLICE_MAX_PIECES = 32;
 const SPLICE_HANDLE_MARGIN = 28;
 const SPLICE_TRACK_HALF = 68;
 const SPLICE_STEP_PIXELS = SPLICE_TRACK_HALF / (SPLICE_MAX_PIECES / 2);
@@ -239,6 +238,7 @@ export function CanvasStage(props: Props) {
     const reach = SPLICE_HANDLE_HIT / zoom;
     for (let index = props.orbits.length - 1; index >= 0; index--) {
       const orbit = props.orbits[index];
+      if (orbit.mode !== "loop") continue;
       if (Math.abs(x - spliceTrackX(orbit)) <= reach &&
         y >= orbit.y - SPLICE_TRACK_HALF - reach && y <= orbit.y + SPLICE_TRACK_HALF + reach) {
         return orbit;
@@ -263,7 +263,7 @@ export function CanvasStage(props: Props) {
     const reach = SPLICE_START_HIT / zoom;
     for (let index = props.orbits.length - 1; index >= 0; index--) {
       const orbit = props.orbits[index];
-      if ((orbit.spliceCount ?? 0) === 0) continue;
+      if (orbit.mode !== "loop" || (orbit.spliceCount ?? 0) === 0) continue;
       const marker = spliceStartMarkerPoint(orbit);
       if (Math.hypot(marker.x - x, marker.y - y) <= reach) return orbit;
     }
@@ -287,7 +287,7 @@ export function CanvasStage(props: Props) {
     for (let index = props.bars.length - 1; index >= 0; index--) {
       const bar = props.bars[index];
       const orbit = props.orbits.find((item) => item.id === bar.orbitId);
-      if (!orbit || orbit.mode !== "loop") continue;
+      if (!orbit || orbit.mode !== "loop" || bar.source === "splice") continue;
       const start = bar.angle - bar.lengthRadians / 2;
       const end = bar.angle + bar.lengthRadians / 2;
       if (Math.hypot(ellipsePoint(orbit, start).x - x, ellipsePoint(orbit, start).y - y) <= barEdgeHitRadius) {
@@ -300,7 +300,7 @@ export function CanvasStage(props: Props) {
     for (let index = props.bars.length - 1; index >= 0; index--) {
       const bar = props.bars[index];
       const orbit = props.orbits.find((item) => item.id === bar.orbitId);
-      if (!orbit) continue;
+      if (!orbit || bar.source === "splice") continue;
       const angle = orbitAngleAtPoint(orbit, x, y);
       const onLine = pointDistanceToOrbit(orbit, x, y) <= barBodyLineTolerance;
       const onBar = orbit.mode === "loop"
@@ -380,8 +380,7 @@ export function CanvasStage(props: Props) {
       const trackX = orbit.x + orbit.radiusX + SPLICE_HANDLE_MARGIN;
       const centerY = orbit.y;
       const count = orbit.spliceCount ?? 0;
-      const handleY = centerY -
-        Math.max(-SPLICE_TRACK_HALF, Math.min(SPLICE_TRACK_HALF, (count / 2) * SPLICE_STEP_PIXELS));
+      const handleY = spliceHandleY(orbit);
       const px = (value: number) => value / zoom;
       const active = orbit.id === stateRef.current.selection.orbitId;
       // Track.
@@ -443,7 +442,7 @@ export function CanvasStage(props: Props) {
 
       for (const bar of state.bars) {
         const orbit = state.orbits.find((item) => item.id === bar.orbitId);
-        if (!orbit) continue;
+        if (!orbit || (orbit.mode !== "loop" && bar.source === "splice")) continue;
         const selected = bar.id === state.selection.barId;
         if (orbit.mode === "loop") {
           context.beginPath();
@@ -471,7 +470,7 @@ export function CanvasStage(props: Props) {
       // Visual markers sit above bars but below moving planets.
       for (const bar of state.bars) {
         const orbit = state.orbits.find((item) => item.id === bar.orbitId);
-        if (!orbit || orbit.mode !== "loop" || !isFullLoopBar(bar)) continue;
+        if (!orbit || orbit.mode !== "loop" || bar.source === "splice" || !isFullLoopBar(bar)) continue;
         context.strokeStyle = "#ffffff";
         context.lineWidth = 3;
         context.lineCap = "round";
@@ -509,6 +508,8 @@ export function CanvasStage(props: Props) {
       if (state.selectedTool === "splicer") {
         const zoom = state.viewport.zoom || 1;
         for (const orbit of state.orbits) {
+          // Splicing only applies to loop orbits, matching where the dragbar is interactive.
+          if (orbit.mode !== "loop") continue;
           drawSpliceDragbar(context, orbit, zoom);
           // A grabbable start-point arrow, drawn only where a splice actually exists.
           if ((orbit.spliceCount ?? 0) !== 0) {
@@ -567,7 +568,8 @@ export function CanvasStage(props: Props) {
         updates.set(planet.id, {
           angle, collisionCooldownRemaining, collisionSpeedMultiplier, collisionFlashRemaining
         });
-        for (const bar of state.bars.filter((item) => item.orbitId === orbit.id)) {
+        for (const bar of state.bars.filter((item) =>
+          item.orbitId === orbit.id && (orbit.mode === "loop" || item.source !== "splice"))) {
           const key = `${planet.id}:${bar.id}`;
           if (orbit.mode === "loop") {
             const inside = state.isPlaying && !orbit.isPaused && planet.isActive &&
