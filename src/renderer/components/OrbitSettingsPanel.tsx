@@ -14,6 +14,7 @@ type Props = {
   onSave: () => void;
   onOpen: () => void;
   onMode: (mode: OrbitMode) => void;
+  onSpliceCount: (count: number) => void;
   onName: (name: string) => void;
   onColor: (color: string) => void;
   onVolume: (volume: number) => void;
@@ -143,6 +144,14 @@ export function OrbitSettingsPanel(props: Props) {
             <input className="color-input" type="color" value={orbit.color}
               onChange={(event) => props.onColor(event.target.value)} />
           </label>
+          {orbit.mode === "loop" && <label><span>SPLICE <output>
+            {(orbit.spliceCount ?? 0) === 0 ? "OFF"
+              : `${(orbit.spliceCount ?? 0) > 0 ? "+" : ""}${orbit.spliceCount} pcs`}
+          </output></span>
+            <input type="range" min="-32" max="32" step="2" value={orbit.spliceCount ?? 0}
+              onChange={(event) => props.onSpliceCount(Number(event.target.value))}
+              onDoubleClick={() => props.onSpliceCount(0)} />
+          </label>}
           <div className="toggle-row">
             <label><input type="checkbox" checked={!orbit.isPaused} onChange={props.onPause} /> Active</label>
             <label><input type="checkbox" checked={orbit.isMuted}

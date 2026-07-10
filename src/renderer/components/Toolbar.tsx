@@ -3,7 +3,8 @@ import type { Tool } from "../state/types";
 const tools: { id: Tool; icon: string; label: string; hint: string }[] = [
   { id: "select", icon: "↖", label: "Select", hint: "Select an orbit" },
   { id: "planet", icon: "●", label: "Planet", hint: "Place a moving planet" },
-  { id: "bar", icon: "╱", label: "Bar", hint: "Place a trigger bar" }
+  { id: "bar", icon: "╱", label: "Bar", hint: "Place a trigger bar" },
+  { id: "splicer", icon: "⌗", label: "Splicer", hint: "Splice an orbit into alternating bars" }
 ];
 
 export function Toolbar({ selected, onSelect }: { selected: Tool; onSelect: (tool: Tool) => void }) {

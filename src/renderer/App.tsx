@@ -11,7 +11,8 @@ import type {
   SequenceRetriggerMode, Tool, TriggerBar, ViewportState
 } from "./state/types";
 import {
-  TAU, getOrbitTapeRate, getTapeStyleRuntimeRateOnly, isFullLoopBar, orbitAngleAtPoint, rateToCents
+  TAU, getOrbitTapeRate, getTapeStyleRuntimeRateOnly, isFullLoopBar, normalizeAngle, orbitAngleAtPoint,
+  rateToCents, spliceBarSpecs
 } from "./utils/geometry";
 
 const id = () => crypto.randomUUID();
@@ -23,12 +24,18 @@ const MIN_DIRECT_RATE = .05;
 const MAX_DIRECT_RATE = 8;
 const MIN_DIRECT_ORBIT_RADIUS = 40;
 const MAX_DIRECT_ORBIT_RADIUS = 1000;
+const SPLICE_MAX_PIECES = 32;
 const ORBIT_COLORS = ["#5b625d", "#a65f54", "#4f759b", "#7a6995", "#6e8b62", "#b17b45"];
 const emptySelection: Selection = { orbitId: null, planetId: null, barId: null };
 const defaultViewport: ViewportState = { zoom: 1, offsetX: 0, offsetY: 0 };
 const supportedAudio = (file: File) => /\.(wav|mp3|ogg)$/i.test(file.name) ||
   ["audio/wav", "audio/x-wav", "audio/mpeg", "audio/ogg"].includes(file.type);
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+// Splice counts are signed even integers; magnitudes below 2 mean "no splice".
+const clampSpliceCount = (count: number) => {
+  const even = clamp(Math.round(count / 2) * 2, -SPLICE_MAX_PIECES, SPLICE_MAX_PIECES);
+  return Math.abs(even) < 2 ? 0 : even;
+};
 
 type CopiedPlanetData = Pick<Planet, "speed" | "volume" | "pitchCents" | "direction" | "isActive">;
 type AppClipboard = {
@@ -199,6 +206,41 @@ export default function App() {
       setBars((current) => current.filter((bar) => bar.orbitId !== orbitId));
       setSelection(emptySelection);
     }
+  }
+
+  // Rebuild an orbit's splice bars from a signed even count and start angle. Manual bars
+  // are left untouched; only bars tagged source "splice" are replaced. History is pushed by
+  // the caller (canvas drag start or the settings panel) so a whole gesture is one undo step.
+  function regenerateSpliceBars(orbitId: string, count: number, startAngle: number) {
+    // Old splice bars get fresh ids, so silence any loop still keyed to them first.
+    for (const bar of stateRef.current.bars) {
+      if (bar.orbitId === orbitId && bar.source === "splice") audioEngine.stopAllActivePlaybacksForBar(bar.id);
+    }
+    setBars((current) => {
+      const kept = current.filter((bar) => !(bar.orbitId === orbitId && bar.source === "splice"));
+      const generated: TriggerBar[] = spliceBarSpecs(count, startAngle).map((spec) => ({
+        id: id(), orbitId, angle: spec.angle, lengthRadians: spec.lengthRadians,
+        startAngle: spec.startAngle, kind: "play", source: "splice"
+      }));
+      return [...kept, ...generated];
+    });
+  }
+
+  function setOrbitSpliceCount(orbitId: string, rawCount: number) {
+    const count = clampSpliceCount(rawCount);
+    const startAngle = stateRef.current.orbits.find((orbit) => orbit.id === orbitId)?.spliceStartAngle ?? 0;
+    setOrbits((current) => current.map((orbit) =>
+      orbit.id === orbitId ? { ...orbit, spliceCount: count } : orbit));
+    regenerateSpliceBars(orbitId, count, startAngle);
+  }
+
+  function setOrbitSpliceStart(orbitId: string, rawAngle: number) {
+    const orbit = stateRef.current.orbits.find((item) => item.id === orbitId);
+    if (!orbit) return;
+    const startAngle = normalizeAngle(rawAngle);
+    setOrbits((current) => current.map((item) =>
+      item.id === orbitId ? { ...item, spliceStartAngle: startAngle } : item));
+    regenerateSpliceBars(orbitId, clampSpliceCount(orbit.spliceCount ?? 0), startAngle);
   }
 
   function duplicateOrbit(orbitId = stateRef.current.selection.orbitId) {
@@ -805,6 +847,8 @@ export default function App() {
             setLastLoopBarLengthRadians(Math.min(TAU - .0001, Math.max(MIN_BAR_LENGTH_RADIANS, lengthRadians)));
           }
         }}
+        onSetSpliceCount={setOrbitSpliceCount}
+        onSetSpliceStart={setOrbitSpliceStart}
         onContextMenu={(next) => { setMenu(next); uploadPoint.current = { x: next.canvasX, y: next.canvasY }; }}
         onDropFiles={(files, point) => void handleFiles(files, point)} onDragState={setIsDragOver}
       />
@@ -816,6 +860,11 @@ export default function App() {
       onProjectName={(name) => { setProjectName(name); setIsDirty(true); }}
       onSave={() => void saveProject()} onOpen={() => void openProject()}
       onMode={(mode) => selectedOrbit && setOrbitMode(selectedOrbit.id, mode)}
+      onSpliceCount={(count) => {
+        if (!selectedOrbit) return;
+        pushParameterHistory();
+        setOrbitSpliceCount(selectedOrbit.id, count);
+      }}
       onName={(name) => selectedOrbit && updateOrbit(selectedOrbit.id, { name })}
       onColor={(color) => {
         if (!selectedOrbit) return;

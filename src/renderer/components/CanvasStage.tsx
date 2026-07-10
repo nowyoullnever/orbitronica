@@ -19,6 +19,17 @@ const MAX_BAR = TAU;
 const FULL_LOOP_SNAP_THRESHOLD = TAU * .03;
 const MIN_RADIUS = 40;
 const MAX_RADIUS = 1000;
+// Splice dragbar: a vertical track sitting just outside an orbit's right edge. The knob
+// rests at the centre (count 0) and drags up (positive / bar-first) or down (negative /
+// gap-first). Each 2 pieces of splice shift the knob SPLICE_STEP_PIXELS world units.
+const SPLICE_MAX_PIECES = 32;
+const SPLICE_HANDLE_MARGIN = 28;
+const SPLICE_TRACK_HALF = 68;
+const SPLICE_STEP_PIXELS = SPLICE_TRACK_HALF / (SPLICE_MAX_PIECES / 2);
+const SPLICE_HANDLE_HIT = 13;
+// Radial distance of the start-arrow marker from the orbit line, and its grab radius.
+const SPLICE_START_MARKER_OFFSET = 11;
+const SPLICE_START_HIT = 12;
 const SEQUENCE_BASE_CYCLE_DURATION = 4;
 const COLLISION_SLOWDOWN = .4;
 const COLLISION_COOLDOWN_SECONDS = .25;
@@ -58,6 +69,8 @@ type Drag =
   | { type: "move-orbit"; orbit: Orbit; startX: number; startY: number }
   | { type: "bar-start" | "bar-end"; bar: TriggerBar; orbit: Orbit; fixedAngle: number; acc?: number; prevRaw?: number }
   | { type: "move-bar"; bar: TriggerBar; orbit: Orbit }
+  | { type: "splice"; orbit: Orbit }
+  | { type: "splice-start"; orbit: Orbit }
   | { type: "pan-viewport"; startX: number; startY: number; viewport: ViewportState };
 
 type Props = {
@@ -84,6 +97,8 @@ type Props = {
   onMoveOrbit: (orbitId: string, x: number, y: number) => void;
   onEditBar: (barId: string, angle: number, lengthRadians: number, startAngle: number) => void;
   onBarLengthEditEnd: (barId: string, lengthRadians: number) => void;
+  onSetSpliceCount: (orbitId: string, count: number) => void;
+  onSetSpliceStart: (orbitId: string, angle: number) => void;
   onDropFiles: (files: File[], point: { x: number; y: number }) => void;
   onDragState: (over: boolean) => void;
 };
@@ -213,6 +228,48 @@ export function CanvasStage(props: Props) {
     return Math.hypot(point.x - x, point.y - y);
   }
 
+  const spliceTrackX = (orbit: Orbit) => orbit.x + orbit.radiusX + SPLICE_HANDLE_MARGIN;
+  const spliceHandleY = (orbit: Orbit) =>
+    orbit.y - clamp(((orbit.spliceCount ?? 0) / 2) * SPLICE_STEP_PIXELS, -SPLICE_TRACK_HALF, SPLICE_TRACK_HALF);
+  const spliceCountFromWorldY = (orbit: Orbit, worldY: number) =>
+    Math.round((orbit.y - worldY) / SPLICE_STEP_PIXELS) * 2;
+
+  function orbitAtSpliceHandle(x: number, y: number) {
+    const zoom = stateRef.current.viewport.zoom || 1;
+    const reach = SPLICE_HANDLE_HIT / zoom;
+    for (let index = props.orbits.length - 1; index >= 0; index--) {
+      const orbit = props.orbits[index];
+      if (Math.abs(x - spliceTrackX(orbit)) <= reach &&
+        y >= orbit.y - SPLICE_TRACK_HALF - reach && y <= orbit.y + SPLICE_TRACK_HALF + reach) {
+        return orbit;
+      }
+    }
+    return null;
+  }
+
+  function spliceStartMarkerPoint(orbit: Orbit) {
+    const point = ellipsePoint(orbit, orbit.spliceStartAngle ?? 0);
+    const dx = point.x - orbit.x;
+    const dy = point.y - orbit.y;
+    const magnitude = Math.hypot(dx, dy) || 1;
+    return {
+      x: point.x + (dx / magnitude) * SPLICE_START_MARKER_OFFSET,
+      y: point.y + (dy / magnitude) * SPLICE_START_MARKER_OFFSET
+    };
+  }
+
+  function orbitAtSpliceStart(x: number, y: number) {
+    const zoom = stateRef.current.viewport.zoom || 1;
+    const reach = SPLICE_START_HIT / zoom;
+    for (let index = props.orbits.length - 1; index >= 0; index--) {
+      const orbit = props.orbits[index];
+      if ((orbit.spliceCount ?? 0) === 0) continue;
+      const marker = spliceStartMarkerPoint(orbit);
+      if (Math.hypot(marker.x - x, marker.y - y) <= reach) return orbit;
+    }
+    return null;
+  }
+
   function hitTestCanvas(x: number, y: number): HitTestResult {
     const zoom = stateRef.current.viewport.zoom || 1;
     const barEdgeHitRadius = BAR_EDGE_HIT_RADIUS / zoom;
@@ -291,8 +348,10 @@ export function CanvasStage(props: Props) {
       context.lineTo(point.x + nx * length / 2, point.y + ny * length / 2);
       context.stroke();
     };
-    const drawAudioStartMarker = (context: CanvasRenderingContext2D, orbit: Orbit) => {
-      const point = ellipsePoint(orbit, 0);
+    const drawStartArrow = (
+      context: CanvasRenderingContext2D, orbit: Orbit, angle: number, color: string, scale = 1
+    ) => {
+      const point = ellipsePoint(orbit, angle);
       const dx = point.x - orbit.x;
       const dy = point.y - orbit.y;
       const magnitude = Math.hypot(dx, dy) || 1;
@@ -301,17 +360,61 @@ export function CanvasStage(props: Props) {
       const tx = -ny;
       const ty = nx;
       // Keep the marker outside even the selected loop bar's thickest edge.
-      const markerX = point.x + nx * 11;
-      const markerY = point.y + ny * 11;
-      context.strokeStyle = "#11120f";
-      context.lineWidth = 1.5;
+      const markerX = point.x + nx * SPLICE_START_MARKER_OFFSET;
+      const markerY = point.y + ny * SPLICE_START_MARKER_OFFSET;
+      const wing = 3 * scale;
+      const tip = 2 * scale;
+      context.strokeStyle = color;
+      context.lineWidth = 1.5 * scale;
       context.lineCap = "round";
       context.lineJoin = "round";
       context.beginPath();
-      context.moveTo(markerX + nx * 3 + tx * 3, markerY + ny * 3 + ty * 3);
-      context.lineTo(markerX - nx * 2, markerY - ny * 2);
-      context.lineTo(markerX + nx * 3 - tx * 3, markerY + ny * 3 - ty * 3);
+      context.moveTo(markerX + nx * wing + tx * wing, markerY + ny * wing + ty * wing);
+      context.lineTo(markerX - nx * tip, markerY - ny * tip);
+      context.lineTo(markerX + nx * wing - tx * wing, markerY + ny * wing - ty * wing);
       context.stroke();
+    };
+    const drawAudioStartMarker = (context: CanvasRenderingContext2D, orbit: Orbit) =>
+      drawStartArrow(context, orbit, 0, "#11120f", 1);
+    const drawSpliceDragbar = (context: CanvasRenderingContext2D, orbit: Orbit, zoom: number) => {
+      const trackX = orbit.x + orbit.radiusX + SPLICE_HANDLE_MARGIN;
+      const centerY = orbit.y;
+      const count = orbit.spliceCount ?? 0;
+      const handleY = centerY -
+        Math.max(-SPLICE_TRACK_HALF, Math.min(SPLICE_TRACK_HALF, (count / 2) * SPLICE_STEP_PIXELS));
+      const px = (value: number) => value / zoom;
+      const active = orbit.id === stateRef.current.selection.orbitId;
+      // Track.
+      context.strokeStyle = "#c3c2bb";
+      context.lineWidth = px(2);
+      context.lineCap = "round";
+      context.beginPath();
+      context.moveTo(trackX, centerY - SPLICE_TRACK_HALF);
+      context.lineTo(trackX, centerY + SPLICE_TRACK_HALF);
+      context.stroke();
+      // Centre (zero) tick.
+      context.strokeStyle = "#9a9b92";
+      context.lineWidth = px(1.5);
+      context.beginPath();
+      context.moveTo(trackX - px(5), centerY);
+      context.lineTo(trackX + px(5), centerY);
+      context.stroke();
+      // Knob.
+      context.beginPath();
+      context.arc(trackX, handleY, px(6), 0, TAU);
+      context.fillStyle = active ? "#171813" : "#3f413a";
+      context.fill();
+      context.strokeStyle = "#ffffff";
+      context.lineWidth = px(1.5);
+      context.stroke();
+      // Count label.
+      context.fillStyle = "#2e302a";
+      context.font = `${px(11)}px "MapoFlowerIsland", sans-serif`;
+      context.textAlign = "left";
+      context.textBaseline = "middle";
+      context.fillText(count > 0 ? `+${count}` : String(count), trackX + px(11), handleY);
+      context.textAlign = "start";
+      context.textBaseline = "alphabetic";
     };
     const draw = (time: number) => {
       const canvas = canvasRef.current!;
@@ -400,6 +503,17 @@ export function CanvasStage(props: Props) {
         if (planet.id === state.selection.planetId) {
           context.beginPath(); context.arc(point.x, point.y, PLANET_RADIUS + 3, 0, TAU);
           context.strokeStyle = "#777870"; context.lineWidth = 1; context.stroke();
+        }
+      }
+
+      if (state.selectedTool === "splicer") {
+        const zoom = state.viewport.zoom || 1;
+        for (const orbit of state.orbits) {
+          drawSpliceDragbar(context, orbit, zoom);
+          // A grabbable start-point arrow, drawn only where a splice actually exists.
+          if ((orbit.spliceCount ?? 0) !== 0) {
+            drawStartArrow(context, orbit, orbit.spliceStartAngle ?? 0, orbit.color, 1.9);
+          }
         }
       }
 
@@ -529,6 +643,12 @@ export function CanvasStage(props: Props) {
 
   function cursorFor(hit: HitTestResult, x: number, y: number) {
     if (drag?.type === "pan-viewport") return "grabbing";
+    if (drag?.type === "splice") return "ns-resize";
+    if (drag?.type === "splice-start") return "grabbing";
+    if (props.selectedTool === "splicer") {
+      if (orbitAtSpliceStart(x, y)) return "grab";
+      return orbitAtSpliceHandle(x, y) ? "ns-resize" : "crosshair";
+    }
     if (drag?.type === "move-orbit") return "move";
     if (drag?.type === "move-bar") return "grabbing";
     if (drag?.type === "resize-orbit") return orbitResizeCursor(drag.orbit, x, y);
@@ -552,7 +672,32 @@ export function CanvasStage(props: Props) {
       event.currentTarget.style.cursor = "grabbing";
       return;
     }
-    if (event.button !== 0 || props.selectedTool !== "select") return;
+    if (event.button !== 0) return;
+    if (props.selectedTool === "splicer") {
+      const worldPoint = screenToWorld(localPoint(event));
+      const startOrbit = orbitAtSpliceStart(worldPoint.x, worldPoint.y);
+      if (startOrbit) {
+        props.onSelect({ orbitId: startOrbit.id, planetId: null, barId: null });
+        props.onBeginMutation();
+        props.onSetSpliceStart(startOrbit.id, orbitAngleAtPoint(startOrbit, worldPoint.x, worldPoint.y));
+        setDrag({ type: "splice-start", orbit: startOrbit });
+        return;
+      }
+      const handleOrbit = orbitAtSpliceHandle(worldPoint.x, worldPoint.y);
+      if (handleOrbit) {
+        props.onSelect({ orbitId: handleOrbit.id, planetId: null, barId: null });
+        props.onBeginMutation();
+        props.onSetSpliceCount(handleOrbit.id, spliceCountFromWorldY(handleOrbit, worldPoint.y));
+        setDrag({ type: "splice", orbit: handleOrbit });
+        return;
+      }
+      const hit = hitTestCanvas(worldPoint.x, worldPoint.y);
+      props.onSelect(hit.type === "empty"
+        ? { orbitId: null, planetId: null, barId: null }
+        : { orbitId: hit.orbitId, planetId: null, barId: null });
+      return;
+    }
+    if (props.selectedTool !== "select") return;
     const point = screenToWorld(localPoint(event));
     const hit = hitTestCanvas(point.x, point.y);
     if (hit.type === "planet") {
@@ -619,6 +764,10 @@ export function CanvasStage(props: Props) {
         drag.bar.id, angle, drag.bar.lengthRadians,
         normalizeAngle(angle - drag.bar.lengthRadians / 2)
       );
+    } else if (drag.type === "splice") {
+      props.onSetSpliceCount(drag.orbit.id, spliceCountFromWorldY(drag.orbit, point.y));
+    } else if (drag.type === "splice-start") {
+      props.onSetSpliceStart(drag.orbit.id, orbitAngleAtPoint(drag.orbit, point.x, point.y));
     } else {
       const mouseAngle = orbitAngleAtPoint(drag.orbit, point.x, point.y);
       const raw = drag.type === "bar-end"
@@ -643,7 +792,7 @@ export function CanvasStage(props: Props) {
   }
 
   function handleClick(event: React.MouseEvent<HTMLCanvasElement>) {
-    if (drag || props.selectedTool === "select") return;
+    if (drag || props.selectedTool === "select" || props.selectedTool === "splicer") return;
     const point = screenToWorld(localPoint(event));
     const orbit = findNearestOrbit(props.orbits, point.x, point.y, 14 / stateRef.current.viewport.zoom);
     if (!orbit) return;
