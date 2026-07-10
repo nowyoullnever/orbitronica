@@ -15,6 +15,8 @@ type ActivePlayback = {
 class AudioEngine {
   private context: AudioContext | null = null;
   private buffers = new Map<string, AudioBuffer>();
+  private waveformPeaks = new Map<string, Float32Array>();
+  private readonly waveformResolution = 1024;
   private processedBuffers = new Map<string, AudioBuffer>();
   private reverseBuffers = new Map<string, AudioBuffer>();
   private rawFiles = new Map<string, { fileName: string; bytes: Uint8Array }>();
@@ -61,6 +63,7 @@ class AudioEngine {
   private registerBuffer(orbitId: string, buffer: AudioBuffer, volume: number) {
     const context = this.getContext();
     this.buffers.set(orbitId, buffer);
+    this.waveformPeaks.delete(orbitId);
     const gain = context.createGain();
     gain.gain.value = volume;
     gain.connect(this.masterGain!);
@@ -78,6 +81,36 @@ class AudioEngine {
 
   getProjectAsset(orbitId: string) {
     return this.rawFiles.get(orbitId);
+  }
+
+  // Normalized per-bin peak amplitudes (0..1) for drawing the sample waveform.
+  // Computed once per buffer at a fixed resolution and cached; callers downsample further as needed.
+  getWaveformPeaks(orbitId: string): Float32Array | null {
+    const cached = this.waveformPeaks.get(orbitId);
+    if (cached) return cached;
+    const buffer = this.buffers.get(orbitId);
+    if (!buffer) return null;
+    const resolution = this.waveformResolution;
+    const peaks = new Float32Array(resolution);
+    const length = buffer.length;
+    const channels = Array.from({ length: buffer.numberOfChannels }, (_, ch) => buffer.getChannelData(ch));
+    let max = 0;
+    for (let bin = 0; bin < resolution; bin++) {
+      const start = Math.floor((bin / resolution) * length);
+      const end = Math.max(start + 1, Math.floor(((bin + 1) / resolution) * length));
+      let peak = 0;
+      for (const data of channels) {
+        for (let index = start; index < end && index < length; index++) {
+          const value = Math.abs(data[index]);
+          if (value > peak) peak = value;
+        }
+      }
+      peaks[bin] = peak;
+      if (peak > max) max = peak;
+    }
+    if (max > 0) for (let index = 0; index < resolution; index++) peaks[index] /= max;
+    this.waveformPeaks.set(orbitId, peaks);
+    return peaks;
   }
 
   setVolume(orbitId: string, volume: number) {
@@ -407,6 +440,7 @@ class AudioEngine {
   removeOrbit(orbitId: string) {
     this.stopAllActivePlaybacksForOrbit(orbitId);
     this.buffers.delete(orbitId);
+    this.waveformPeaks.delete(orbitId);
     for (const key of [...this.processedBuffers.keys()]) {
       if (key.startsWith(`${orbitId}:`)) this.processedBuffers.delete(key);
     }

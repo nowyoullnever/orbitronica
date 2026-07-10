@@ -5,6 +5,7 @@ import {
   isAngleInsideBar, isFullLoopBar, normalizeAngle, orbitAngleAtPoint
 } from "../utils/geometry";
 import { angularDistance } from "../utils/triggerDetection";
+import { audioEngine } from "../audio/audioEngine";
 
 const PLANET_RADIUS = 6;
 const PLANET_STROKE_WIDTH = 2;
@@ -28,6 +29,18 @@ const MIN_VIEWPORT_ZOOM = .15;
 const MAX_VIEWPORT_ZOOM = 4;
 const DEFAULT_WORLD_WIDTH = 4000;
 const DEFAULT_WORLD_HEIGHT = 3000;
+
+const WAVEFORM_HIGHLIGHT_WINDOW = .28;
+
+const parseHexColor = (hex: string) => {
+  const value = hex.replace("#", "");
+  const full = value.length === 3
+    ? value.split("").map((char) => char + char).join("")
+    : value;
+  const int = Number.parseInt(full, 16);
+  if (full.length !== 6 || Number.isNaN(int)) return { r: 74, g: 76, b: 70 };
+  return { r: (int >> 16) & 255, g: (int >> 8) & 255, b: int & 255 };
+};
 
 // lengthRadians is always the complete span from the start edge to the end edge.
 const clampBarLength = (lengthRadians: number) => {
@@ -291,6 +304,64 @@ export function CanvasStage(props: Props) {
       context.lineTo(point.x + nx * length / 2, point.y + ny * length / 2);
       context.stroke();
     };
+    // Overlay the loaded sample's waveform around the orbit: angle is the audio
+    // timeline, amplitude displaces radially in/out from the orbit line.
+    const drawWaveform = (
+      context: CanvasRenderingContext2D, orbit: Orbit, peaks: Float32Array, planetAngles: number[]
+    ) => {
+      const circumference = Math.PI * (orbit.radiusX + orbit.radiusY);
+      const spikeCount = Math.min(720, Math.max(160, Math.round(circumference / 4)));
+      const amplitudeScale = Math.max(14, Math.min(orbit.radiusX, orbit.radiusY) * .22);
+      const baseWidth = Math.max(.6, (circumference / spikeCount) * .55);
+      const segments: { x: number; y: number; nx: number; ny: number; half: number; angle: number }[] = [];
+      for (let index = 0; index < spikeCount; index++) {
+        const from = Math.floor((index / spikeCount) * peaks.length);
+        const to = Math.max(from + 1, Math.floor(((index + 1) / spikeCount) * peaks.length));
+        let amp = 0;
+        for (let p = from; p < to; p++) if (peaks[p] > amp) amp = peaks[p];
+        const angle = (index / spikeCount) * TAU;
+        const point = ellipsePoint(orbit, angle);
+        const dx = point.x - orbit.x;
+        const dy = point.y - orbit.y;
+        const magnitude = Math.hypot(dx, dy) || 1;
+        segments.push({ x: point.x, y: point.y, nx: dx / magnitude, ny: dy / magnitude, half: amp * amplitudeScale, angle });
+      }
+      context.save();
+      context.lineCap = "butt";
+      // Base pass: the full waveform in translucent gray, batched into one stroke.
+      context.strokeStyle = "rgba(74, 76, 70, .28)";
+      context.lineWidth = baseWidth;
+      context.beginPath();
+      for (const segment of segments) {
+        context.moveTo(segment.x - segment.nx * segment.half, segment.y - segment.ny * segment.half);
+        context.lineTo(segment.x + segment.nx * segment.half, segment.y + segment.ny * segment.half);
+      }
+      context.stroke();
+      // Highlight pass: spikes near a planet glow in the orbit's color and fade with distance.
+      if (planetAngles.length) {
+        const { r, g, b } = parseHexColor(orbit.color);
+        for (const segment of segments) {
+          let factor = 0;
+          for (const planetAngle of planetAngles) {
+            const distance = angularDistance(segment.angle, planetAngle);
+            if (distance < WAVEFORM_HIGHLIGHT_WINDOW) {
+              factor = Math.max(factor, 1 - distance / WAVEFORM_HIGHLIGHT_WINDOW);
+            }
+          }
+          if (factor <= 0) continue;
+          // Sharp spike at the planet, fading all the way to transparent at the window edge
+          // (no alpha floor) so the highlight blends smoothly back into the gray waveform.
+          const eased = factor * factor;
+          context.strokeStyle = `rgba(${r}, ${g}, ${b}, ${(.92 * eased).toFixed(3)})`;
+          context.lineWidth = baseWidth * (1 + eased * .8);
+          context.beginPath();
+          context.moveTo(segment.x - segment.nx * segment.half, segment.y - segment.ny * segment.half);
+          context.lineTo(segment.x + segment.nx * segment.half, segment.y + segment.ny * segment.half);
+          context.stroke();
+        }
+      }
+      context.restore();
+    };
     const drawAudioStartMarker = (context: CanvasRenderingContext2D, orbit: Orbit) => {
       const point = ellipsePoint(orbit, 0);
       const dx = point.x - orbit.x;
@@ -336,6 +407,18 @@ export function CanvasStage(props: Props) {
         context.globalAlpha = orbit.isPaused ? .48 : 1;
         context.stroke();
         context.globalAlpha = 1;
+      }
+
+      // Waveform overlay sits above the orbit line but below bars, markers, and planets.
+      const planetAnglesByOrbit = new Map<string, number[]>();
+      for (const planet of state.planets) {
+        const list = planetAnglesByOrbit.get(planet.orbitId);
+        if (list) list.push(planet.angle);
+        else planetAnglesByOrbit.set(planet.orbitId, [planet.angle]);
+      }
+      for (const orbit of state.orbits) {
+        const peaks = audioEngine.getWaveformPeaks(orbit.id);
+        if (peaks) drawWaveform(context, orbit, peaks, planetAnglesByOrbit.get(orbit.id) ?? []);
       }
 
       for (const bar of state.bars) {
