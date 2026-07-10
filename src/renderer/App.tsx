@@ -784,7 +784,8 @@ export default function App() {
           audioEngine.syncLoop(
             orbit.id, planet.id, bar.id, inside && canOrbitSound(orbit.id),
             getSampleStart(orbit) + angle / TAU * getSampleDuration(orbit), planet.volume,
-            getTapeStyleRuntimeRateOnly(orbit, planet), planet.speed, planet.pitchCents, planet.direction === -1
+            getTapeStyleRuntimeRateOnly(orbit, planet), planet.speed, planet.pitchCents,
+            planet.direction === -1, getSampleStart(orbit), getSampleEnd(orbit)
           );
         }}
         onSequencePlay={(orbit, planet, bar) => {

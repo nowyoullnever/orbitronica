@@ -234,7 +234,7 @@ class AudioEngine {
   syncLoop(
     orbitId: string, planetId: string, barId: string, inside: boolean,
     audioTime: number, planetVolume: number, tapeRate: number, userSpeed: number, pitchCents: number,
-    reverse = false
+    reverse = false, sampleStart = 0, sampleEnd = Infinity
   ) {
     const key = `loop:${planetId}:${barId}`;
     const current = this.active.get(key);
@@ -257,11 +257,23 @@ class AudioEngine {
     if (!created) return;
     // Match commit 3e8ee22 exactly when the user speed is unchanged:
     // the loop bar maps directly to the original audio timeline.
-    const processedOffset = this.hasUserSpeedChange(userSpeed)
-      ? audioTime / this.normalizedSpeed(userSpeed)
-      : audioTime;
+    const speedDivisor = this.hasUserSpeedChange(userSpeed) ? this.normalizedSpeed(userSpeed) : 1;
+    const processedOffset = audioTime / speedDivisor;
     const mappedTime = reverse ? created.buffer.duration - processedOffset : processedOffset;
     const safeOffset = Math.min(Math.max(mappedTime, 0), Math.max(0, created.buffer.duration - .001));
+    // Bound playback to the trimmed window so only that slice repeats instead of the
+    // audio running past sampleEnd into the rest of the sample. As the planet wraps
+    // past angle 0, the native loop wraps sampleEnd -> sampleStart in step.
+    const bufferDuration = created.buffer.duration;
+    const windowStart = Math.min(Math.max(sampleStart / speedDivisor, 0), bufferDuration);
+    const windowEnd = Math.min(Math.max(sampleEnd / speedDivisor, windowStart), bufferDuration);
+    const loopStart = reverse ? bufferDuration - windowEnd : windowStart;
+    const loopEnd = reverse ? bufferDuration - windowStart : windowEnd;
+    if (loopEnd - loopStart > .001) {
+      created.playback.source.loop = true;
+      created.playback.source.loopStart = loopStart;
+      created.playback.source.loopEnd = loopEnd;
+    }
     created.playback.source.start(created.context.currentTime, safeOffset);
     console.debug({
       orbitId, planetId, barId, pitchCents,
