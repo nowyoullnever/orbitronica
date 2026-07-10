@@ -31,6 +31,17 @@ const clampBarLength = (lengthRadians: number) => {
   return TAU - clamped <= FULL_LOOP_SNAP_THRESHOLD ? TAU : clamped;
 };
 
+// Accumulate the raw edge angle continuously so dragging an edge past the
+// opposite (fixed) edge keeps growing toward a full loop and stops at exactly
+// one turn, instead of wrapping back to zero and resetting the bar.
+const unwrapLength = (prevAcc: number | undefined, prevRaw: number | undefined, raw: number) => {
+  if (prevAcc === undefined || prevRaw === undefined) return raw;
+  let delta = raw - prevRaw;
+  if (delta > Math.PI) delta -= TAU;
+  else if (delta < -Math.PI) delta += TAU;
+  return Math.min(TAU, Math.max(0, prevAcc + delta));
+};
+
 type HitTestResult =
   | { type: "planet"; planetId: string; orbitId: string }
   | { type: "bar-edge"; barId: string; orbitId: string; edge: "start" | "end" }
@@ -42,7 +53,7 @@ type HitTestResult =
 type Drag =
   | { type: "resize-orbit"; orbit: Orbit }
   | { type: "move-orbit"; orbit: Orbit; startX: number; startY: number }
-  | { type: "bar-start" | "bar-end"; bar: TriggerBar; orbit: Orbit; fixedAngle: number }
+  | { type: "bar-start" | "bar-end"; bar: TriggerBar; orbit: Orbit; fixedAngle: number; acc?: number; prevRaw?: number }
   | { type: "move-bar"; bar: TriggerBar; orbit: Orbit };
 
 type Props = {
@@ -476,14 +487,19 @@ export function CanvasStage(props: Props) {
       );
     } else {
       const mouseAngle = orbitAngleAtPoint(drag.orbit, point.x, point.y);
+      const raw = drag.type === "bar-end"
+        ? normalizeAngle(mouseAngle - drag.fixedAngle)
+        : normalizeAngle(drag.fixedAngle - mouseAngle);
+      const acc = unwrapLength(drag.acc, drag.prevRaw, raw);
+      drag.acc = acc;
+      drag.prevRaw = raw;
+      const length = clampBarLength(acc);
       if (drag.type === "bar-end") {
-        const length = clampBarLength(normalizeAngle(mouseAngle - drag.fixedAngle));
         props.onEditBar(
           drag.bar.id, normalizeAngle(drag.fixedAngle + length / 2),
           length, normalizeAngle(drag.fixedAngle)
         );
       } else {
-        const length = clampBarLength(normalizeAngle(drag.fixedAngle - mouseAngle));
         const startAngle = normalizeAngle(drag.fixedAngle - length);
         props.onEditBar(
           drag.bar.id, normalizeAngle(startAngle + length / 2),
