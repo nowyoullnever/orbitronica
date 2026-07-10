@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import type { Orbit, OrbitMode, Planet, SequenceRetriggerMode } from "../state/types";
-import { centsToPlaybackRate, getPlanetEffectiveSpeed, getTapeStyleRuntimeRateOnly } from "../utils/geometry";
+import {
+  getOrbitTapeRate, getPlanetEffectiveSpeed, getTapeStyleRuntimeRateOnly, rateToCents
+} from "../utils/geometry";
 
 type Props = {
   orbit: Orbit | null;
@@ -102,6 +104,10 @@ export function OrbitSettingsPanel(props: Props) {
             {orbitPlanets.map((planet, index) => {
               const speedPreview = planet.pendingSpeed ?? planet.speed;
               const pitchPreview = planet.pendingPitchCents ?? planet.pitchCents;
+              const orbitTapeRate = getOrbitTapeRate(orbit);
+              const runtimeTapeRate = getTapeStyleRuntimeRateOnly(orbit, planet);
+              const finalMovementSpeed = getPlanetEffectiveSpeed(orbit, planet);
+              const finalPitchCents = planet.pitchCents + rateToCents(runtimeTapeRate);
               return <section className="planet-control" key={planet.id}>
                 <h3><i style={{ background: orbit.color }} />PLANET {index + 1}</h3>
                 <label className="reverse-toggle">
@@ -127,10 +133,13 @@ export function OrbitSettingsPanel(props: Props) {
                       planet.speedProcessingError ? "FAILED" : "READY"}</span>
                 </div>
                 <div className="effective-values">
-                  <span>EFFECTIVE <output>{getPlanetEffectiveSpeed(orbit, planet).toFixed(2)}x</output></span>
-                  <span>TAPE RATE <output>{getTapeStyleRuntimeRateOnly(orbit, planet).toFixed(2)}x</output></span>
-                  <span>COLLISION <output>{planet.collisionSpeedMultiplier.toFixed(2)}x</output></span>
-                  <span>PITCH <output>{centsToPlaybackRate(planet.pitchCents).toFixed(2)}x</output></span>
+                  <span>USER SPEED <output>{planet.speed.toFixed(2)}x</output></span>
+                  <span>USER PITCH <output>{planet.pitchCents > 0 ? "+" : ""}{planet.pitchCents} cents</output></span>
+                  <span>ORBIT TAPE <output>{orbitTapeRate.toFixed(2)}x</output></span>
+                  <span>COLLISION TAPE <output>{planet.collisionSpeedMultiplier.toFixed(2)}x</output></span>
+                  <span>RUNTIME TAPE <output>{runtimeTapeRate.toFixed(2)}x</output></span>
+                  <span>FINAL MOVEMENT <output>{finalMovementSpeed.toFixed(2)}x</output></span>
+                  <span>FINAL PITCH <output>{finalPitchCents > 0 ? "+" : ""}{Math.round(finalPitchCents)} cents</output></span>
                 </div>
                 <label><span>VOLUME <output>{Math.round(planet.volume * 100)}%</output></span>
                   <input type="range" min="0" max="1" step=".01" value={planet.volume}

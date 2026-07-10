@@ -35,6 +35,22 @@ const cleanPlanet = (planet: Planet): Planet => ({
   pitchProcessRequestId: undefined
 });
 
+const clearSpeedProcessing = (planet: Planet): Planet => ({
+  ...planet,
+  pendingSpeed: undefined,
+  isSpeedProcessing: false,
+  processingSpeed: undefined,
+  speedProcessRequestId: undefined
+});
+
+const clearPitchProcessing = (planet: Planet): Planet => ({
+  ...planet,
+  pendingPitchCents: undefined,
+  isPitchProcessing: false,
+  processingPitchCents: undefined,
+  pitchProcessRequestId: undefined
+});
+
 export default function App() {
   const [orbits, setOrbits] = useState<Orbit[]>([]);
   const [planets, setPlanets] = useState<Planet[]>([]);
@@ -206,6 +222,7 @@ export default function App() {
     const planet = stateRef.current.planets.find((item) => item.id === planetId);
     if (!planet) return;
     const speed = requestedSpeed ?? planet.pendingSpeed ?? planet.speed;
+    const pitchAtRequest = planet.pitchCents;
     if (planet.isSpeedProcessing && planet.processingSpeed === speed) return;
     if (Math.abs(speed - planet.speed) < .0001 && !planet.isSpeedProcessing) {
       setPlanets((current) => current.map((item) =>
@@ -216,7 +233,7 @@ export default function App() {
     const requestId = id();
     if (audioEngine.hasProcessedBuffer(planet.orbitId, planet.id, speed, planet.pitchCents)) {
       setPlanets((current) => current.map((item) =>
-        item.id === planetId ? { ...cleanPlanet(item), speed } : item));
+        item.id === planetId ? { ...clearSpeedProcessing(item), speed, speedProcessingError: undefined } : item));
       return;
     }
     setPlanets((current) => current.map((item) => item.id === planetId ? {
@@ -228,14 +245,19 @@ export default function App() {
       speedProcessingError: undefined
     } : item));
     try {
-      await audioEngine.processPlanetBuffer(planet.orbitId, planet.id, speed, planet.pitchCents);
-      const latest = stateRef.current.planets.find((item) => item.id === planetId);
+      await audioEngine.processPlanetBuffer(planet.orbitId, planet.id, speed, pitchAtRequest);
+      let latest = stateRef.current.planets.find((item) => item.id === planetId);
       if (latest?.speedProcessRequestId !== requestId) return;
+      if (latest.pitchCents !== pitchAtRequest) {
+        await audioEngine.processPlanetBuffer(latest.orbitId, latest.id, speed, latest.pitchCents);
+        latest = stateRef.current.planets.find((item) => item.id === planetId);
+        if (latest?.speedProcessRequestId !== requestId) return;
+      }
       setPlanets((current) => current.map((item) =>
-        item.id === planetId ? { ...cleanPlanet(item), speed } : item));
+        item.id === planetId ? { ...clearSpeedProcessing(item), speed, speedProcessingError: undefined } : item));
     } catch {
       setPlanets((current) => current.map((item) =>
-        item.id === planetId ? { ...cleanPlanet(item), speedProcessingError: "Speed processing failed" } : item));
+        item.id === planetId ? { ...clearSpeedProcessing(item), speedProcessingError: "Speed processing failed" } : item));
       flash("Speed processing failed; the previous speed remains active.");
     }
   }
@@ -249,6 +271,7 @@ export default function App() {
     const planet = stateRef.current.planets.find((item) => item.id === planetId);
     if (!planet) return;
     const pitchCents = requestedPitch ?? planet.pendingPitchCents ?? planet.pitchCents;
+    const speedAtRequest = planet.speed;
     if (planet.isPitchProcessing && planet.processingPitchCents === pitchCents) return;
     if (pitchCents === planet.pitchCents && !planet.isPitchProcessing) {
       setPlanets((current) => current.map((item) =>
@@ -259,7 +282,7 @@ export default function App() {
     const requestId = id();
     if (audioEngine.hasProcessedBuffer(planet.orbitId, planet.id, planet.speed, pitchCents)) {
       setPlanets((current) => current.map((item) =>
-        item.id === planetId ? { ...cleanPlanet(item), pitchCents } : item));
+        item.id === planetId ? { ...clearPitchProcessing(item), pitchCents } : item));
       return;
     }
     setPlanets((current) => current.map((item) => item.id === planetId ? {
@@ -267,13 +290,18 @@ export default function App() {
       processingPitchCents: pitchCents, pitchProcessRequestId: requestId
     } : item));
     try {
-      await audioEngine.processPlanetBuffer(planet.orbitId, planet.id, planet.speed, pitchCents);
-      const latest = stateRef.current.planets.find((item) => item.id === planetId);
+      await audioEngine.processPlanetBuffer(planet.orbitId, planet.id, speedAtRequest, pitchCents);
+      let latest = stateRef.current.planets.find((item) => item.id === planetId);
       if (latest?.pitchProcessRequestId !== requestId) return;
+      if (latest.speed !== speedAtRequest) {
+        await audioEngine.processPlanetBuffer(latest.orbitId, latest.id, latest.speed, pitchCents);
+        latest = stateRef.current.planets.find((item) => item.id === planetId);
+        if (latest?.pitchProcessRequestId !== requestId) return;
+      }
       setPlanets((current) => current.map((item) =>
-        item.id === planetId ? { ...cleanPlanet(item), pitchCents } : item));
+        item.id === planetId ? { ...clearPitchProcessing(item), pitchCents } : item));
     } catch {
-      setPlanets((current) => current.map((item) => item.id === planetId ? cleanPlanet(item) : item));
+      setPlanets((current) => current.map((item) => item.id === planetId ? clearPitchProcessing(item) : item));
       flash("Pitch processing failed; the previous pitch remains active.");
     }
   }
@@ -577,7 +605,14 @@ export default function App() {
         }}
         onSequenceStop={(orbitId) => audioEngine.stopActiveSequencePlaybacksForOrbit(orbitId)}
         onResizeOrbit={(orbitId, radiusX, radiusY) => setOrbits((current) =>
-          current.map((orbit) => orbit.id === orbitId ? { ...orbit, radiusX, radiusY } : orbit))}
+          current.map((orbit) => {
+            if (orbit.id !== orbitId) return orbit;
+            const resized = { ...orbit, radiusX, radiusY };
+            for (const planet of stateRef.current.planets.filter((item) => item.orbitId === orbitId)) {
+              audioEngine.setActivePlanetTapeRate(planet.id, getTapeStyleRuntimeRateOnly(resized, planet));
+            }
+            return resized;
+          }))}
         onMoveOrbit={(orbitId, x, y) => setOrbits((current) =>
           current.map((orbit) => orbit.id === orbitId ? { ...orbit, x, y } : orbit))}
         onEditBar={(barId, angle, lengthRadians, startAngle) => setBars((current) =>

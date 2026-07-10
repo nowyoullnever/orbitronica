@@ -64,24 +64,38 @@ export function getOrbitSizeScale(orbit: Orbit) {
   return initialSize <= 0 ? 1 : currentSize / initialSize;
 }
 
+export function getOrbitTapeRate(orbit: Orbit) {
+  if (orbit.mode === "sequence") return 1;
+  const currentSize = (orbit.radiusX + orbit.radiusY) / 2;
+  const initialSize = (orbit.initialRadiusX + orbit.initialRadiusY) / 2;
+  if (currentSize <= 0 || initialSize <= 0) return 1;
+  // Smaller loop orbit = faster/higher pitch. Larger loop orbit = slower/lower pitch.
+  return initialSize / currentSize;
+}
+
 export function getPlanetEffectiveSpeed(
   orbit: Orbit,
   planet: { speed: number; collisionSpeedMultiplier?: number }
 ) {
   const collision = planet.collisionSpeedMultiplier ?? 1;
-  if (orbit.mode === "sequence") return planet.speed * collision;
-  return planet.speed * collision / getOrbitSizeScale(orbit);
+  if (orbit.mode === "sequence") return planet.speed;
+  return planet.speed * getOrbitTapeRate(orbit) * collision;
 }
 
 export function centsToPlaybackRate(cents: number) {
   return Math.pow(2, cents / 1200);
 }
 
+export function rateToCents(rate: number) {
+  return rate > 0 ? 1200 * Math.log2(rate) : 0;
+}
+
 export function getTapeStyleRuntimeRateOnly(
-  _orbit: Orbit,
+  orbit: Orbit,
   planet: { collisionSpeedMultiplier?: number }
 ) {
-  return planet.collisionSpeedMultiplier ?? 1;
+  if (orbit.mode === "sequence") return 1;
+  return getOrbitTapeRate(orbit) * (planet.collisionSpeedMultiplier ?? 1);
 }
 
 // User speed is pitch-preserving and rendered into a processed buffer.
