@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { parseHexColor } from "../utils/color";
 
 type Props = {
@@ -20,6 +20,9 @@ type Drag =
 const MIN_REGION_SECONDS = 0.02;
 const HANDLE_HIT_PX = 9;
 const ZOOM_STEP = 0.85;
+// Dragging a handle within this margin of an edge auto-pans the zoomed view.
+const EDGE_PAN_MARGIN_PX = 26;
+const EDGE_PAN_MAX_PX_PER_FRAME = 10;
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -29,8 +32,12 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
   const [drag, setDrag] = useState<Drag>(null);
   // Visible time window [start, end] in seconds — the wheel zooms/pans this.
   const [view, setView] = useState(() => ({ start: 0, end: audioDuration || 1 }));
-  const liveRef = useRef({ view, audioDuration });
-  liveRef.current = { view, audioDuration };
+  const liveRef = useRef({ view, audioDuration, start, end, onChange });
+  liveRef.current = { view, audioDuration, start, end, onChange };
+  const dragRef = useRef<Drag>(null);
+  dragRef.current = drag;
+  const pointerXRef = useRef<number | null>(null);
+  const autoPanRef = useRef(0);
 
   const minViewWidth = Math.max(0.01, (audioDuration || 1) / 2000);
   const viewToX = (time: number, width: number) => ((time - view.start) / (view.end - view.start || 1)) * width;
@@ -171,23 +178,63 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
     else onChange(start, clamp(time, start + MIN_REGION_SECONDS, audioDuration));
   };
 
+  // While a handle is dragged to a viewport edge, scroll the view that way and keep the
+  // handle pinned to the pointer, so it can be pushed past the currently-visible window.
+  const autoPanTick = useCallback(() => {
+    const activeDrag = dragRef.current;
+    const canvas = canvasRef.current;
+    const pointerX = pointerXRef.current;
+    if (!activeDrag || activeDrag.type === "pan" || !canvas || pointerX === null) {
+      autoPanRef.current = 0;
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    const x = pointerX - rect.left;
+    const { view, audioDuration, start, end, onChange } = liveRef.current;
+    const width = view.end - view.start;
+    let direction = 0;
+    if (x < EDGE_PAN_MARGIN_PX && view.start > 0) direction = -1;
+    else if (x > rect.width - EDGE_PAN_MARGIN_PX && view.end < audioDuration) direction = 1;
+    if (direction !== 0) {
+      const penetration = clamp(
+        direction < 0 ? EDGE_PAN_MARGIN_PX - x : x - (rect.width - EDGE_PAN_MARGIN_PX),
+        0, EDGE_PAN_MARGIN_PX
+      ) / EDGE_PAN_MARGIN_PX;
+      const deltaTime = direction * ((penetration * EDGE_PAN_MAX_PX_PER_FRAME) / (rect.width || 1)) * width;
+      const nextStart = clamp(view.start + deltaTime, 0, Math.max(0, audioDuration - width));
+      if (nextStart !== view.start) {
+        setView({ start: nextStart, end: nextStart + width });
+        const time = nextStart + clamp(x / rect.width, 0, 1) * width;
+        if (activeDrag.type === "start") onChange(clamp(time, 0, end - MIN_REGION_SECONDS), end);
+        else onChange(start, clamp(time, start + MIN_REGION_SECONDS, audioDuration));
+      }
+    }
+    autoPanRef.current = requestAnimationFrame(autoPanTick);
+  }, []);
+
+  useEffect(() => () => cancelAnimationFrame(autoPanRef.current), []);
+
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     const x = event.clientX - rect.left;
     const nearStart = Math.abs(x - viewToX(start, rect.width));
     const nearEnd = Math.abs(x - viewToX(end, rect.width));
     event.currentTarget.setPointerCapture(event.pointerId);
+    pointerXRef.current = event.clientX;
     // Only grab a handle when the pointer is on it; anywhere else drags (pans) the view.
     if (Math.min(nearStart, nearEnd) <= HANDLE_HIT_PX) {
       const which = nearStart <= nearEnd ? "start" : "end";
+      dragRef.current = { type: which };
       setDrag({ type: which });
       applyDrag(which, timeAtClientX(event.clientX));
+      if (!autoPanRef.current) autoPanRef.current = requestAnimationFrame(autoPanTick);
     } else {
       setDrag({ type: "pan", anchorClientX: event.clientX, viewStart: view.start, viewEnd: view.end });
     }
   };
 
   const handlePointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    pointerXRef.current = event.clientX;
     const rect = event.currentTarget.getBoundingClientRect();
     if (!drag) {
       const near = Math.min(
@@ -212,6 +259,10 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
   const endDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (!drag) return;
     try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* not captured */ }
+    cancelAnimationFrame(autoPanRef.current);
+    autoPanRef.current = 0;
+    pointerXRef.current = null;
+    dragRef.current = null;
     setDrag(null);
   };
 
