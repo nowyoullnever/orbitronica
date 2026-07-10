@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { parseHexColor } from "../utils/color";
+import { normalizeSampleWindow } from "../utils/sampleTrim";
 
 type Props = {
   audioDuration: number;
@@ -16,8 +17,6 @@ type Drag =
   | { type: "pan"; anchorClientX: number; viewStart: number; viewEnd: number }
   | null;
 
-// Minimum trimmed region so the two handles can never cross or collapse.
-const MIN_REGION_SECONDS = 0.02;
 const HANDLE_HIT_PX = 9;
 const ZOOM_STEP = 0.85;
 // Dragging a handle within this margin of an edge auto-pans the zoomed view.
@@ -30,16 +29,21 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawRef = useRef<() => void>(() => {});
   const [drag, setDrag] = useState<Drag>(null);
+  const [draft, setDraft] = useState(() => normalizeSampleWindow(audioDuration, start, end));
   // Visible time window [start, end] in seconds — the wheel zooms/pans this.
   const [view, setView] = useState(() => ({ start: 0, end: audioDuration || 1 }));
-  const liveRef = useRef({ view, audioDuration, start, end, onChange });
-  liveRef.current = { view, audioDuration, start, end, onChange };
+  const liveRef = useRef({ view, audioDuration, draft });
+  liveRef.current = { view, audioDuration, draft };
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
   const dragRef = useRef<Drag>(null);
   dragRef.current = drag;
   const pointerXRef = useRef<number | null>(null);
   const autoPanRef = useRef(0);
 
-  const minViewWidth = Math.max(0.01, (audioDuration || 1) / 2000);
+  // One cached peak bin is the finest useful detail we have. Do not advertise
+  // further zoom by stretching the same aggregate peak across many pixels.
+  const minViewWidth = Math.max(0.01, (audioDuration || 1) / Math.max(1, peaks?.length ?? 1));
   const viewToX = (time: number, width: number) => ((time - view.start) / (view.end - view.start || 1)) * width;
 
   drawRef.current = () => {
@@ -51,8 +55,12 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
     const width = rect.width;
     const height = rect.height;
     const ratio = window.devicePixelRatio || 1;
-    canvas.width = Math.round(width * ratio);
-    canvas.height = Math.round(height * ratio);
+    const pixelWidth = Math.round(width * ratio);
+    const pixelHeight = Math.round(height * ratio);
+    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+      canvas.width = pixelWidth;
+      canvas.height = pixelHeight;
+    }
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, width, height);
 
@@ -60,8 +68,8 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
     const viewStart = view.start;
     const viewWidth = (view.end - view.start) || 1;
     const mid = height / 2;
-    const startX = ((start - viewStart) / viewWidth) * width;
-    const endX = ((end - viewStart) / viewWidth) * width;
+    const startX = ((draft.start - viewStart) / viewWidth) * width;
+    const endX = ((draft.end - viewStart) / viewWidth) * width;
     const { r, g, b } = parseHexColor(color);
 
     // Waveform over the visible window; bars inside the trimmed region take the orbit color.
@@ -78,7 +86,7 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
         // Keep a hairline at the center so silent (amp 0) regions read as a thin line, not a gap.
         const barHeight = Math.max(0.4, amp * (height * 0.44));
         const center = (t0 + t1) / 2;
-        const inside = center >= start && center <= end;
+        const inside = center >= draft.start && center <= draft.end;
         context.fillStyle = inside ? `rgba(${r}, ${g}, ${b}, .72)` : "rgba(74, 76, 70, .28)";
         context.fillRect(x, mid - barHeight, Math.max(0.75, width / bars), barHeight * 2);
       }
@@ -120,8 +128,12 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
     }
   };
 
-  // Redraw after every render (view / trim / color changes) with the latest props.
-  useEffect(() => { drawRef.current(); });
+  // Parent state changes at the transport tick rate; only redraw when visual input changes.
+  useEffect(() => { drawRef.current(); }, [audioDuration, color, draft, peaks, view]);
+
+  useEffect(() => {
+    if (!drag) setDraft(normalizeSampleWindow(audioDuration, start, end));
+  }, [audioDuration, drag, end, start]);
 
   // Keep the canvas sharp and correct across panel resizes.
   useEffect(() => {
@@ -175,8 +187,12 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
   };
 
   const applyDrag = (which: "start" | "end", time: number) => {
-    if (which === "start") onChange(clamp(time, 0, end - MIN_REGION_SECONDS), end);
-    else onChange(start, clamp(time, start + MIN_REGION_SECONDS, audioDuration));
+    const current = draftRef.current;
+    setDraft(normalizeSampleWindow(
+      audioDuration,
+      which === "start" ? time : current.start,
+      which === "end" ? time : current.end
+    ));
   };
 
   // While a handle is dragged to a viewport edge, scroll the view that way and keep the
@@ -191,7 +207,7 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
     }
     const rect = canvas.getBoundingClientRect();
     const x = pointerX - rect.left;
-    const { view, audioDuration, start, end, onChange } = liveRef.current;
+    const { view, audioDuration, draft } = liveRef.current;
     const width = view.end - view.start;
     let direction = 0;
     if (x < EDGE_PAN_MARGIN_PX && view.start > 0) direction = -1;
@@ -206,8 +222,11 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
       if (nextStart !== view.start) {
         setView({ start: nextStart, end: nextStart + width });
         const time = nextStart + clamp(x / rect.width, 0, 1) * width;
-        if (activeDrag.type === "start") onChange(clamp(time, 0, end - MIN_REGION_SECONDS), end);
-        else onChange(start, clamp(time, start + MIN_REGION_SECONDS, audioDuration));
+        setDraft(normalizeSampleWindow(
+          audioDuration,
+          activeDrag.type === "start" ? time : draft.start,
+          activeDrag.type === "end" ? time : draft.end
+        ));
       }
     }
     autoPanRef.current = requestAnimationFrame(autoPanTick);
@@ -218,8 +237,8 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     const x = event.clientX - rect.left;
-    const nearStart = Math.abs(x - viewToX(start, rect.width));
-    const nearEnd = Math.abs(x - viewToX(end, rect.width));
+    const nearStart = Math.abs(x - viewToX(draft.start, rect.width));
+    const nearEnd = Math.abs(x - viewToX(draft.end, rect.width));
     event.currentTarget.setPointerCapture(event.pointerId);
     pointerXRef.current = event.clientX;
     // Only grab a handle when the pointer is on it; anywhere else drags (pans) the view.
@@ -239,8 +258,8 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
     const rect = event.currentTarget.getBoundingClientRect();
     if (!drag) {
       const near = Math.min(
-        Math.abs(event.clientX - rect.left - viewToX(start, rect.width)),
-        Math.abs(event.clientX - rect.left - viewToX(end, rect.width))
+        Math.abs(event.clientX - rect.left - viewToX(draft.start, rect.width)),
+        Math.abs(event.clientX - rect.left - viewToX(draft.end, rect.width))
       );
       event.currentTarget.style.cursor = near <= HANDLE_HIT_PX ? "ew-resize" : "grab";
       return;
@@ -264,7 +283,9 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
     autoPanRef.current = 0;
     pointerXRef.current = null;
     dragRef.current = null;
+    const committed = draftRef.current;
     setDrag(null);
+    if (committed.start !== start || committed.end !== end) onChange(committed.start, committed.end);
   };
 
   return (

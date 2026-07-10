@@ -14,6 +14,7 @@ import {
   TAU, getOrbitTapeRate, getSampleDuration, getSampleEnd, getSampleStart,
   getTapeStyleRuntimeRateOnly, isFullLoopBar, orbitAngleAtPoint, rateToCents
 } from "./utils/geometry";
+import { normalizeSampleWindow } from "./utils/sampleTrim";
 
 const id = () => crypto.randomUUID();
 const MAX_HISTORY = 100;
@@ -150,6 +151,9 @@ export default function App() {
     setSelection(next.selection);
     for (const orbit of next.orbits) {
       audioEngine.setVolume(orbit.id, orbit.volume);
+      // A snapshot can alter a trim window while the native source is looping.
+      // Sources cannot change loopStart/loopEnd in place, so reconcile on next frame.
+      audioEngine.stopAllActivePlaybacksForOrbit(orbit.id);
       if (orbit.isPaused || orbit.isMuted) audioEngine.stopAllActivePlaybacksForOrbit(orbit.id);
     }
   }
@@ -828,9 +832,12 @@ export default function App() {
       waveformPeaks={selectedOrbit ? waveformPeaksByOrbit.get(selectedOrbit.id) : undefined}
       onSampleTrim={(orbitId, start, end) => {
         pushParameterHistory();
-        setOrbits((current) => current.map((orbit) =>
-          orbit.id === orbitId ? { ...orbit, sampleStart: start, sampleEnd: end } : orbit));
-        audioEngine.stopActiveLoopPlaybacksForOrbit(orbitId);
+        setOrbits((current) => current.map((orbit) => {
+          if (orbit.id !== orbitId) return orbit;
+          const window = normalizeSampleWindow(orbit.audioDuration, start, end);
+          return { ...orbit, sampleStart: window.start, sampleEnd: window.end };
+        }));
+        audioEngine.stopAllActivePlaybacksForOrbit(orbitId);
       }}
       hasPlanetClipboard={clipboard?.type === "planet"}
       onProjectName={(name) => { setProjectName(name); setIsDirty(true); }}

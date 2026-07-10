@@ -83,7 +83,7 @@ export type HistorySnapshot = {
 };
 
 export type SerializableProject = {
-  schemaVersion: 2;
+  schemaVersion: 3;
   appName: "Orbitonic";
   savedAt: string;
   projectName: string;

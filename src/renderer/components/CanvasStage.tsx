@@ -5,6 +5,7 @@ import {
   getSampleDuration, getSampleEnd, getSampleStart, isAngleInsideBar, isFullLoopBar,
   normalizeAngle, orbitAngleAtPoint
 } from "../utils/geometry";
+import { getLoopBarTransitions } from "../utils/sampleTrim";
 import { angularDistance } from "../utils/triggerDetection";
 import { parseHexColor } from "../utils/color";
 
@@ -119,6 +120,7 @@ export function CanvasStage(props: Props) {
   const frameRef = useRef(0);
   const triggerStates = useRef(new Map<string, boolean>());
   const runtimeAngles = useRef(new Map<string, number>());
+  const runtimeUnwrappedAngles = useRef(new Map<string, number>());
   const waveformGeometryCache = useRef(new Map<string, WaveformGeometry>());
   const stateRef = useRef(props);
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -566,8 +568,13 @@ export function CanvasStage(props: Props) {
       for (const planet of state.planets) {
         const orbit = orbitsById.get(planet.orbitId);
         if (!orbit) continue;
-        if (!state.isPlaying) runtimeAngles.current.set(planet.id, planet.angle);
+        if (!state.isPlaying) {
+          runtimeAngles.current.set(planet.id, planet.angle);
+          runtimeUnwrappedAngles.current.set(planet.id, planet.angle);
+        }
         let angle = runtimeAngles.current.get(planet.id) ?? planet.angle;
+        let unwrappedAngle = runtimeUnwrappedAngles.current.get(planet.id) ?? angle;
+        const previousUnwrappedAngle = unwrappedAngle;
         let collisionCooldownRemaining = Math.max(0, planet.collisionCooldownRemaining - delta);
         let collisionSpeedMultiplier = planet.collisionSpeedMultiplier +
           (1 - planet.collisionSpeedMultiplier) * Math.min(1, delta * COLLISION_RECOVERY_RATE);
@@ -577,9 +584,11 @@ export function CanvasStage(props: Props) {
         let direction = planet.direction;
         if (state.isPlaying && !orbit.isPaused && planet.isActive) {
           const baseDuration = orbit.mode === "loop" ? getSampleDuration(orbit) : SEQUENCE_BASE_CYCLE_DURATION;
-          angle = normalizeAngle(angle + delta * (TAU / baseDuration) *
-            getPlanetEffectiveSpeed(orbit, { ...planet, collisionSpeedMultiplier }) * direction);
+          unwrappedAngle += delta * (TAU / baseDuration) *
+            getPlanetEffectiveSpeed(orbit, { ...planet, collisionSpeedMultiplier }) * direction;
+          angle = normalizeAngle(unwrappedAngle);
           runtimeAngles.current.set(planet.id, angle);
+          runtimeUnwrappedAngles.current.set(planet.id, unwrappedAngle);
         }
         const next = {
           ...planet, angle, direction, collisionCooldownRemaining,
@@ -594,6 +603,12 @@ export function CanvasStage(props: Props) {
           if (orbit.mode === "loop") {
             const inside = state.isPlaying && !orbit.isPaused && planet.isActive &&
               bar.kind === "play" && isAngleInsideBar(angle, bar.angle, bar.lengthRadians);
+            const transitions = state.isPlaying && !orbit.isPaused && planet.isActive && bar.kind === "play"
+              ? getLoopBarTransitions(previousUnwrappedAngle, unwrappedAngle, bar.angle, bar.lengthRadians)
+              : [];
+            for (const transition of transitions) {
+              state.onLoopFrame(orbit, next, bar, transition.type === "enter", normalizeAngle(transition.angle));
+            }
             state.onLoopFrame(orbit, next, bar, inside, angle);
             triggerStates.current.set(key, inside);
           } else {

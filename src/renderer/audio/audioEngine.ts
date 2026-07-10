@@ -10,6 +10,8 @@ type ActivePlayback = {
   gainNode: GainNode;
   mode: "loop" | "sequence";
   isReverse: boolean;
+  loopWindowStart?: number;
+  loopWindowEnd?: number;
 };
 
 type WaveformListener = (orbitId: string, peaks: Float32Array | null) => void;
@@ -238,12 +240,18 @@ class AudioEngine {
   ) {
     const key = `loop:${planetId}:${barId}`;
     const current = this.active.get(key);
+    const speedDivisor = this.hasUserSpeedChange(userSpeed) ? this.normalizedSpeed(userSpeed) : 1;
     if (!inside) {
       if (current) this.stopPlayback(key);
       return;
     }
     if (current) {
-      if (current.isReverse !== reverse) {
+      const bufferDuration = current.source.buffer?.duration ?? 0;
+      const windowStart = Math.min(Math.max(sampleStart / speedDivisor, 0), bufferDuration);
+      const windowEnd = Math.min(Math.max(sampleEnd / speedDivisor, windowStart), bufferDuration);
+      const loopStart = reverse ? bufferDuration - windowEnd : windowStart;
+      const loopEnd = reverse ? bufferDuration - windowStart : windowEnd;
+      if (current.isReverse !== reverse || current.loopWindowStart !== loopStart || current.loopWindowEnd !== loopEnd) {
         this.stopPlayback(key);
       } else {
         current.gainNode.gain.setValueAtTime(planetVolume, this.getContext().currentTime);
@@ -257,7 +265,6 @@ class AudioEngine {
     if (!created) return;
     // Match commit 3e8ee22 exactly when the user speed is unchanged:
     // the loop bar maps directly to the original audio timeline.
-    const speedDivisor = this.hasUserSpeedChange(userSpeed) ? this.normalizedSpeed(userSpeed) : 1;
     const processedOffset = audioTime / speedDivisor;
     const mappedTime = reverse ? created.buffer.duration - processedOffset : processedOffset;
     const safeOffset = Math.min(Math.max(mappedTime, 0), Math.max(0, created.buffer.duration - .001));
@@ -273,6 +280,8 @@ class AudioEngine {
       created.playback.source.loop = true;
       created.playback.source.loopStart = loopStart;
       created.playback.source.loopEnd = loopEnd;
+      created.playback.loopWindowStart = loopStart;
+      created.playback.loopWindowEnd = loopEnd;
     }
     created.playback.source.start(created.context.currentTime, safeOffset);
     console.debug({

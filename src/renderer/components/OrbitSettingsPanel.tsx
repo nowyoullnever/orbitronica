@@ -5,6 +5,7 @@ import {
   getTapeStyleRuntimeRateOnly, rateToCents
 } from "../utils/geometry";
 import { SampleTrimEditor } from "./SampleTrimEditor";
+import { normalizeSampleWindow } from "../utils/sampleTrim";
 
 type Props = {
   orbit: Orbit | null;
@@ -151,12 +152,16 @@ export function OrbitSettingsPanel(props: Props) {
             <div className="effective-values">
               <EditableMetric label="START" value={getSampleStart(orbit)} decimals={2} suffix="sec"
                 step={0.01} min={0} max={orbit.audioDuration}
-                onApply={(value) =>
-                  props.onSampleTrim(orbit.id, Math.min(value, getSampleEnd(orbit) - 0.02), getSampleEnd(orbit))} />
+                onApply={(value) => {
+                  const window = normalizeSampleWindow(orbit.audioDuration, value, getSampleEnd(orbit));
+                  props.onSampleTrim(orbit.id, window.start, window.end);
+                }} />
               <EditableMetric label="END" value={getSampleEnd(orbit)} decimals={2} suffix="sec"
                 step={0.01} min={0} max={orbit.audioDuration}
-                onApply={(value) =>
-                  props.onSampleTrim(orbit.id, getSampleStart(orbit), Math.max(value, getSampleStart(orbit) + 0.02))} />
+                onApply={(value) => {
+                  const window = normalizeSampleWindow(orbit.audioDuration, getSampleStart(orbit), value);
+                  props.onSampleTrim(orbit.id, window.start, window.end);
+                }} />
               <ReadonlyMetric label="LENGTH" value={getSampleEnd(orbit) - getSampleStart(orbit)} suffix="sec" />
             </div>
           </div>

@@ -1,4 +1,5 @@
 import type { Orbit } from "../state/types";
+import { normalizeSampleWindow } from "./sampleTrim";
 
 export const TAU = Math.PI * 2;
 export const FULL_LOOP_EPSILON = 0.0001;
@@ -39,15 +40,15 @@ export function findNearestOrbit(orbits: Orbit[], x: number, y: number, toleranc
 
 // Effective playback window into the sample, clamped and defaulting to the full sample.
 export function getSampleStart(orbit: Orbit) {
-  return Math.min(Math.max(orbit.sampleStart ?? 0, 0), orbit.audioDuration);
+  return normalizeSampleWindow(orbit.audioDuration, orbit.sampleStart, orbit.sampleEnd).start;
 }
 
 export function getSampleEnd(orbit: Orbit) {
-  return Math.min(Math.max(orbit.sampleEnd ?? orbit.audioDuration, getSampleStart(orbit)), orbit.audioDuration);
+  return normalizeSampleWindow(orbit.audioDuration, orbit.sampleStart, orbit.sampleEnd).end;
 }
 
 export function getSampleDuration(orbit: Orbit) {
-  return Math.max(0.0001, getSampleEnd(orbit) - getSampleStart(orbit));
+  return Math.max(0.0001, normalizeSampleWindow(orbit.audioDuration, orbit.sampleStart, orbit.sampleEnd).duration);
 }
 
 export function getBarTimeRange(bar: { angle: number; lengthRadians: number }, orbit: Orbit) {
