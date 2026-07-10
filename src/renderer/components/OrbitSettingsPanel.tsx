@@ -24,6 +24,11 @@ type Props = {
   onDeleteOrbit: () => void;
   onPlanetSpeedPreview: (planetId: string, speed: number) => void;
   onPlanetSpeedCommit: (planetId: string, speed: number) => void;
+  onOrbitTapeRateApply: (orbitId: string, rate: number) => void;
+  onPlanetCollisionTapeApply: (planetId: string, rate: number) => void;
+  onPlanetRuntimeTapeApply: (planetId: string, rate: number) => void;
+  onPlanetFinalMovementApply: (planetId: string, rate: number) => void;
+  onPlanetFinalPitchApply: (planetId: string, cents: number) => void;
   onPlanetVolume: (planetId: string, volume: number) => void;
   onPlanetPitchPreview: (planetId: string, pitchCents: number) => void;
   onPlanetPitchCommit: (planetId: string, pitchCents: number) => void;
@@ -41,6 +46,52 @@ function NameEditor({ value, onCommit }: { value: string; onCommit: (value: stri
   };
   return <input value={draft} onChange={(event) => setDraft(event.target.value)}
     onBlur={commit} onKeyDown={(event) => event.key === "Enter" && event.currentTarget.blur()} />;
+}
+
+function formatMetric(value: number, decimals: number) {
+  return decimals === 0 ? String(Math.round(value)) : value.toFixed(decimals);
+}
+
+function EditableMetric({
+  label, value, decimals, suffix, step, min, max, disabled, onApply
+}: {
+  label: string;
+  value: number;
+  decimals: number;
+  suffix: string;
+  step: number;
+  min?: number;
+  max?: number;
+  disabled?: boolean;
+  onApply: (value: number) => void;
+}) {
+  const [draft, setDraft] = useState(formatMetric(value, decimals));
+  useEffect(() => setDraft(formatMetric(value, decimals)), [value, decimals]);
+
+  const apply = () => {
+    const parsed = Number(draft);
+    if (!Number.isFinite(parsed)) {
+      setDraft(formatMetric(value, decimals));
+      return;
+    }
+    const rounded = decimals === 0 ? Math.round(parsed) : Number(parsed.toFixed(decimals));
+    onApply(rounded);
+  };
+
+  return <div className="editable-metric">
+    <span>{label}</span>
+    <input type="number" value={draft} step={step} min={min} max={max} disabled={disabled}
+      onChange={(event) => setDraft(event.target.value)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          apply();
+          event.currentTarget.blur();
+        }
+      }} />
+    <em>{suffix}</em>
+    <button type="button" disabled={disabled} onClick={apply}>Apply</button>
+  </div>;
 }
 
 export function OrbitSettingsPanel(props: Props) {
@@ -116,7 +167,7 @@ export function OrbitSettingsPanel(props: Props) {
                   REVERSE DIRECTION
                 </label>
                 <label><span>SPEED PREVIEW <output>{speedPreview.toFixed(2)}x</output></span>
-                  <input type="range" min=".25" max="3" step=".05" value={speedPreview}
+                  <input type="range" min=".05" max="8" step=".01" value={speedPreview}
                     onChange={(event) => props.onPlanetSpeedPreview(planet.id, Number(event.target.value))}
                     onPointerUp={(event) => props.onPlanetSpeedCommit(planet.id, Number(event.currentTarget.value))}
                     onKeyUp={(event) => props.onPlanetSpeedCommit(planet.id, Number(event.currentTarget.value))}
@@ -133,13 +184,27 @@ export function OrbitSettingsPanel(props: Props) {
                       planet.speedProcessingError ? "FAILED" : "READY"}</span>
                 </div>
                 <div className="effective-values">
-                  <span>USER SPEED <output>{planet.speed.toFixed(2)}x</output></span>
-                  <span>USER PITCH <output>{planet.pitchCents > 0 ? "+" : ""}{planet.pitchCents} cents</output></span>
-                  <span>ORBIT TAPE <output>{orbitTapeRate.toFixed(2)}x</output></span>
-                  <span>COLLISION TAPE <output>{planet.collisionSpeedMultiplier.toFixed(2)}x</output></span>
-                  <span>RUNTIME TAPE <output>{runtimeTapeRate.toFixed(2)}x</output></span>
-                  <span>FINAL MOVEMENT <output>{finalMovementSpeed.toFixed(2)}x</output></span>
-                  <span>FINAL PITCH <output>{finalPitchCents > 0 ? "+" : ""}{Math.round(finalPitchCents)} cents</output></span>
+                  <EditableMetric label="USER SPEED" value={planet.speed} decimals={2} suffix="x"
+                    step={0.01} min={0.05} max={8}
+                    onApply={(value) => props.onPlanetSpeedCommit(planet.id, value)} />
+                  <EditableMetric label="USER PITCH" value={planet.pitchCents} decimals={0} suffix="cents"
+                    step={1} min={-3600} max={3600}
+                    onApply={(value) => props.onPlanetPitchCommit(planet.id, value)} />
+                  <EditableMetric label="ORBIT TAPE" value={orbitTapeRate} decimals={2} suffix="x"
+                    step={0.01} min={0.05} max={8} disabled={orbit.mode === "sequence"}
+                    onApply={(value) => props.onOrbitTapeRateApply(orbit.id, value)} />
+                  <EditableMetric label="COLLISION TAPE" value={planet.collisionSpeedMultiplier} decimals={2} suffix="x"
+                    step={0.01} min={0.05} max={8} disabled={orbit.mode === "sequence"}
+                    onApply={(value) => props.onPlanetCollisionTapeApply(planet.id, value)} />
+                  <EditableMetric label="RUNTIME TAPE" value={runtimeTapeRate} decimals={2} suffix="x"
+                    step={0.01} min={0.05} max={8} disabled={orbit.mode === "sequence"}
+                    onApply={(value) => props.onPlanetRuntimeTapeApply(planet.id, value)} />
+                  <EditableMetric label="FINAL MOVEMENT" value={finalMovementSpeed} decimals={2} suffix="x"
+                    step={0.01} min={0.05} max={64}
+                    onApply={(value) => props.onPlanetFinalMovementApply(planet.id, value)} />
+                  <EditableMetric label="FINAL PITCH" value={finalPitchCents} decimals={0} suffix="cents"
+                    step={1} min={-7200} max={7200}
+                    onApply={(value) => props.onPlanetFinalPitchApply(planet.id, value)} />
                 </div>
                 <label><span>VOLUME <output>{Math.round(planet.volume * 100)}%</output></span>
                   <input type="range" min="0" max="1" step=".01" value={planet.volume}
@@ -149,7 +214,7 @@ export function OrbitSettingsPanel(props: Props) {
                 <label><span>PITCH PREVIEW <output>
                   {pitchPreview > 0 ? "+" : ""}{pitchPreview} cents
                 </output></span>
-                  <input type="range" min="-1200" max="1200" step="10"
+                  <input type="range" min="-3600" max="3600" step="1"
                     value={pitchPreview}
                     onChange={(event) => props.onPlanetPitchPreview(planet.id, Number(event.target.value))}
                     onPointerUp={(event) => props.onPlanetPitchCommit(planet.id, Number(event.currentTarget.value))}

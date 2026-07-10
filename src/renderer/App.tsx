@@ -10,17 +10,24 @@ import type {
   ContextMenuState, HistorySnapshot, Orbit, OrbitMode, Planet, Selection,
   SequenceRetriggerMode, Tool, TriggerBar
 } from "./state/types";
-import { TAU, getTapeStyleRuntimeRateOnly, isFullLoopBar, orbitAngleAtPoint } from "./utils/geometry";
+import {
+  TAU, getOrbitTapeRate, getTapeStyleRuntimeRateOnly, isFullLoopBar, orbitAngleAtPoint, rateToCents
+} from "./utils/geometry";
 
 const id = () => crypto.randomUUID();
 const MAX_HISTORY = 100;
 const DEFAULT_LOOP_BAR_LENGTH_RADIANS = Math.PI / 12;
 const SEQUENCE_BAR_LENGTH_RADIANS = .04;
 const MIN_BAR_LENGTH_RADIANS = .01;
+const MIN_DIRECT_RATE = .05;
+const MAX_DIRECT_RATE = 8;
+const MIN_DIRECT_ORBIT_RADIUS = 40;
+const MAX_DIRECT_ORBIT_RADIUS = 1000;
 const ORBIT_COLORS = ["#5b625d", "#a65f54", "#4f759b", "#7a6995", "#6e8b62", "#b17b45"];
 const emptySelection: Selection = { orbitId: null, planetId: null, barId: null };
 const supportedAudio = (file: File) => /\.(wav|mp3|ogg)$/i.test(file.name) ||
   ["audio/wav", "audio/x-wav", "audio/mpeg", "audio/ogg"].includes(file.type);
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
 const cleanPlanet = (planet: Planet): Planet => ({
   ...planet,
@@ -481,6 +488,80 @@ export default function App() {
     }
   }
 
+  function applyOrbitTapeRate(orbitId: string, requestedRate: number) {
+    const orbit = stateRef.current.orbits.find((item) => item.id === orbitId);
+    if (!orbit) return;
+    if (orbit.mode === "sequence") {
+      flash("Sequence mode keeps orbit tape at 1.00x.");
+      return;
+    }
+    const rate = clamp(requestedRate, MIN_DIRECT_RATE, MAX_DIRECT_RATE);
+    const initialAverage = (orbit.initialRadiusX + orbit.initialRadiusY) / 2;
+    const currentAverage = (orbit.radiusX + orbit.radiusY) / 2;
+    if (initialAverage <= 0 || currentAverage <= 0) return;
+    const targetAverage = initialAverage / rate;
+    const scale = targetAverage / currentAverage;
+    const resized: Orbit = {
+      ...orbit,
+      radiusX: clamp(orbit.radiusX * scale, MIN_DIRECT_ORBIT_RADIUS, MAX_DIRECT_ORBIT_RADIUS),
+      radiusY: clamp(orbit.radiusY * scale, MIN_DIRECT_ORBIT_RADIUS, MAX_DIRECT_ORBIT_RADIUS)
+    };
+    pushHistory();
+    setOrbits((current) => current.map((item) => item.id === orbitId ? resized : item));
+    for (const planet of stateRef.current.planets.filter((item) => item.orbitId === orbitId)) {
+      audioEngine.setActivePlanetTapeRate(planet.id, getTapeStyleRuntimeRateOnly(resized, planet));
+    }
+  }
+
+  function applyPlanetCollisionTape(planetId: string, requestedRate: number) {
+    const planet = stateRef.current.planets.find((item) => item.id === planetId);
+    const orbit = stateRef.current.orbits.find((item) => item.id === planet?.orbitId);
+    if (!planet || !orbit) return;
+    if (orbit.mode === "sequence") {
+      flash("Sequence mode runtime tape stays at 1.00x.");
+      return;
+    }
+    const collisionSpeedMultiplier = clamp(requestedRate, MIN_DIRECT_RATE, MAX_DIRECT_RATE);
+    const nextPlanet = { ...planet, collisionSpeedMultiplier, collisionCooldownRemaining: 0 };
+    pushHistory();
+    setPlanets((current) => current.map((item) => item.id === planetId ? nextPlanet : item));
+    audioEngine.setActivePlanetTapeRate(planetId, getTapeStyleRuntimeRateOnly(orbit, nextPlanet));
+  }
+
+  function applyPlanetRuntimeTape(planetId: string, requestedRate: number) {
+    const planet = stateRef.current.planets.find((item) => item.id === planetId);
+    const orbit = stateRef.current.orbits.find((item) => item.id === planet?.orbitId);
+    if (!planet || !orbit) return;
+    if (orbit.mode === "sequence") {
+      flash("Sequence mode runtime tape stays at 1.00x.");
+      return;
+    }
+    const orbitTapeRate = getOrbitTapeRate(orbit);
+    if (orbitTapeRate <= 0) return;
+    applyPlanetCollisionTape(planetId, requestedRate / orbitTapeRate);
+  }
+
+  function applyPlanetFinalMovement(planetId: string, requestedRate: number) {
+    const planet = stateRef.current.planets.find((item) => item.id === planetId);
+    const orbit = stateRef.current.orbits.find((item) => item.id === planet?.orbitId);
+    if (!planet || !orbit) return;
+    const finalMovement = Math.max(MIN_DIRECT_RATE, requestedRate);
+    const runtimeTapeRate = getTapeStyleRuntimeRateOnly(orbit, planet);
+    const nextSpeed = orbit.mode === "sequence"
+      ? finalMovement
+      : runtimeTapeRate > 0 ? finalMovement / runtimeTapeRate : planet.speed;
+    void commitPlanetSpeed(planetId, clamp(nextSpeed, MIN_DIRECT_RATE, MAX_DIRECT_RATE));
+  }
+
+  function applyPlanetFinalPitch(planetId: string, requestedCents: number) {
+    const planet = stateRef.current.planets.find((item) => item.id === planetId);
+    const orbit = stateRef.current.orbits.find((item) => item.id === planet?.orbitId);
+    if (!planet || !orbit) return;
+    const runtimeTapeRate = getTapeStyleRuntimeRateOnly(orbit, planet);
+    const nextPitch = Math.round(requestedCents - rateToCents(runtimeTapeRate));
+    void commitPlanetPitch(planetId, clamp(nextPitch, -3600, 3600));
+  }
+
   function addContextBar(kind: "play" | "stop") {
     const orbit = orbits.find((item) => item.id === menu?.orbitId);
     if (!orbit || !menu) return;
@@ -658,6 +739,11 @@ export default function App() {
       onDeleteOrbit={deleteSelection}
       onPlanetSpeedPreview={previewPlanetSpeed}
       onPlanetSpeedCommit={(planetId, speed) => void commitPlanetSpeed(planetId, speed)}
+      onOrbitTapeRateApply={applyOrbitTapeRate}
+      onPlanetCollisionTapeApply={applyPlanetCollisionTape}
+      onPlanetRuntimeTapeApply={applyPlanetRuntimeTape}
+      onPlanetFinalMovementApply={applyPlanetFinalMovement}
+      onPlanetFinalPitchApply={applyPlanetFinalPitch}
       onPlanetVolume={(planetId, volume) => {
         pushParameterHistory(); audioEngine.setActivePlanetVolume(planetId, volume);
         setPlanets((current) => current.map((planet) => planet.id === planetId ? { ...planet, volume } : planet));

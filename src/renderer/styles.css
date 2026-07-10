@@ -160,11 +160,25 @@ input[type="range"]:disabled { opacity: .35; }
   display: grid; gap: 6px; margin: -3px 0 15px; padding: 9px;
   border-radius: 3px; background: #e8e7e1;
 }
-.effective-values span {
-  display: flex; justify-content: space-between;
+.editable-metric {
+  display: grid; grid-template-columns: 1fr 54px 25px 45px; gap: 5px; align-items: center;
+}
+.editable-metric span {
   color: #777870; font: 8px "MapoFlowerIsland", sans-serif; letter-spacing: .07em;
 }
-.effective-values output { color: #2e302a; }
+.editable-metric input {
+  min-width: 0; height: 22px; padding: 0 5px; border: 1px solid #cbc9c1; border-radius: 3px;
+  background: #f8f7f2; color: #2e302a; font: 8px "MapoFlowerIsland", sans-serif;
+}
+.editable-metric em {
+  color: #777870; font: normal 7px "MapoFlowerIsland", sans-serif; letter-spacing: .03em;
+}
+.editable-metric button {
+  height: 22px; padding: 0 5px; border: 1px solid #c5c3bb; border-radius: 3px;
+  background: #f8f7f2; cursor: pointer; color: #42433d; font: 7px "MapoFlowerIsland", sans-serif;
+}
+.editable-metric button:hover { background: #292a25; color: #fff; }
+.editable-metric input:disabled, .editable-metric button:disabled { opacity: .45; cursor: not-allowed; }
 .pitch-status {
   display: flex; justify-content: space-between; margin: -3px 0 13px;
   color: #777870; font: 7px "MapoFlowerIsland", sans-serif; letter-spacing: .06em;
