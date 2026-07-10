@@ -90,4 +90,5 @@ export type ContextMenuState = {
   canvasX: number;
   canvasY: number;
   orbitId: string | null;
+  planetId?: string | null;
 };

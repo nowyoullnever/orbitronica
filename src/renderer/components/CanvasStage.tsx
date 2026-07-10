@@ -525,8 +525,12 @@ export function CanvasStage(props: Props) {
         const point = localPoint(event);
         const hit = hitTestCanvas(point.x, point.y);
         const orbitId = hit.type === "empty" ? null : hit.orbitId;
-        props.onContextMenu({ x: event.clientX, y: event.clientY, canvasX: point.x, canvasY: point.y, orbitId });
-        if (orbitId) props.onSelect({ orbitId, planetId: null, barId: null });
+        const planetId = hit.type === "planet" ? hit.planetId : null;
+        props.onContextMenu({
+          x: event.clientX, y: event.clientY, canvasX: point.x, canvasY: point.y, orbitId, planetId
+        });
+        if (planetId && orbitId) props.onSelect({ orbitId, planetId, barId: null });
+        else if (orbitId) props.onSelect({ orbitId, planetId: null, barId: null });
       }}
       onDragEnter={(event) => { event.preventDefault(); props.onDragState(true); }}
       onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }}

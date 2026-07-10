@@ -9,6 +9,7 @@ type Props = {
   planets: Planet[];
   projectName: string;
   isDirty: boolean;
+  hasPlanetClipboard: boolean;
   onProjectName: (name: string) => void;
   onSave: () => void;
   onOpen: () => void;
@@ -33,6 +34,8 @@ type Props = {
   onPlanetPitchPreview: (planetId: string, pitchCents: number) => void;
   onPlanetPitchCommit: (planetId: string, pitchCents: number) => void;
   onPlanetReverse: (planetId: string, reverse: boolean) => void;
+  onCopyPlanet: (planetId: string) => void;
+  onPastePlanetToOrbit: (orbitId: string) => void;
   onDeletePlanet: (planetId: string) => void;
 };
 
@@ -145,6 +148,9 @@ export function OrbitSettingsPanel(props: Props) {
           </label>}
           <div className="panel-actions">
             <button onClick={props.onDuplicate}>Duplicate</button>
+            <button disabled={!props.hasPlanetClipboard} onClick={() => props.onPastePlanetToOrbit(orbit.id)}>
+              Paste Planet
+            </button>
             <button className="danger" onClick={props.onDeleteOrbit}>Delete Orbit</button>
           </div>
         </section>
@@ -230,7 +236,10 @@ export function OrbitSettingsPanel(props: Props) {
                   <span>{planet.isPitchProcessing ? "PROCESSING..." :
                     planet.pendingPitchCents !== undefined ? "NOT APPLIED" : "READY"}</span>
                 </div>
-                <button className="delete-planet" onClick={() => props.onDeletePlanet(planet.id)}>Delete Planet</button>
+                <div className="planet-actions">
+                  <button onClick={() => props.onCopyPlanet(planet.id)}>Copy Planet</button>
+                  <button className="danger" onClick={() => props.onDeletePlanet(planet.id)}>Delete Planet</button>
+                </div>
               </section>;
             })}
             {!orbitPlanets.length && <p className="no-planets">Use the Planet tool to add a playhead.</p>}

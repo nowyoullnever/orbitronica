@@ -29,6 +29,13 @@ const supportedAudio = (file: File) => /\.(wav|mp3|ogg)$/i.test(file.name) ||
   ["audio/wav", "audio/x-wav", "audio/mpeg", "audio/ogg"].includes(file.type);
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
+type CopiedPlanetData = Pick<Planet, "speed" | "volume" | "pitchCents" | "direction" | "isActive">;
+type AppClipboard = {
+  type: "planet";
+  sourceOrbitId: string;
+  data: CopiedPlanetData;
+} | null;
+
 const cleanPlanet = (planet: Planet): Planet => ({
   ...planet,
   pendingSpeed: undefined,
@@ -74,13 +81,16 @@ export default function App() {
   const [projectPath, setProjectPath] = useState<string>();
   const [isDirty, setIsDirty] = useState(false);
   const [cancelSignal, setCancelSignal] = useState(0);
+  const [clipboard, setClipboard] = useState<AppClipboard>(null);
   const uploadPoint = useRef({ x: 450, y: 350 });
   const fileInput = useRef<HTMLInputElement>(null);
   const undoStack = useRef<HistorySnapshot[]>([]);
   const redoStack = useRef<HistorySnapshot[]>([]);
   const parameterHistoryTimer = useRef<number>();
+  const clipboardRef = useRef<AppClipboard>(null);
   const stateRef = useRef({ orbits, planets, bars, selection, lastLoopBarLengthRadians });
   stateRef.current = { orbits, planets, bars, selection, lastLoopBarLengthRadians };
+  clipboardRef.current = clipboard;
 
   const selectedOrbit = useMemo(
     () => orbits.find((orbit) => orbit.id === selection.orbitId) ?? null,
@@ -115,7 +125,12 @@ export default function App() {
   function restoreSnapshot(next: HistorySnapshot) {
     const currentIds = new Set(stateRef.current.orbits.map((orbit) => orbit.id));
     const nextIds = new Set(next.orbits.map((orbit) => orbit.id));
+    const currentPlanetIds = new Set(stateRef.current.planets.map((planet) => planet.id));
+    const nextPlanetIds = new Set(next.planets.map((planet) => planet.id));
     for (const orbitId of currentIds) if (!nextIds.has(orbitId)) audioEngine.stopAllActivePlaybacksForOrbit(orbitId);
+    for (const planetId of currentPlanetIds) {
+      if (!nextPlanetIds.has(planetId)) audioEngine.stopAllActivePlaybacksForPlanet(planetId);
+    }
     setOrbits(next.orbits);
     setPlanets(next.planets);
     setBars(next.bars);
@@ -218,6 +233,79 @@ export default function App() {
         void audioEngine.processPlanetBuffer(newOrbitId, planet.id, planet.speed, planet.pitchCents);
       }
     }
+  }
+
+  function copyPlanet(planetId = stateRef.current.selection.planetId) {
+    if (!planetId) return;
+    const planet = stateRef.current.planets.find((item) => item.id === planetId);
+    if (!planet) return;
+    setClipboard({
+      type: "planet",
+      sourceOrbitId: planet.orbitId,
+      data: {
+        speed: planet.speed,
+        volume: planet.volume,
+        pitchCents: planet.pitchCents,
+        direction: planet.direction,
+        isActive: planet.isActive
+      }
+    });
+    flash("Planet copied.");
+  }
+
+  function findAvailablePlanetAngle(orbitId: string) {
+    const existingCount = stateRef.current.planets.filter((planet) => planet.orbitId === orbitId).length;
+    return ((existingCount * Math.PI) / 6) % TAU;
+  }
+
+  function pastePlanet(targetOrbitId?: string | null, requestedAngle?: number) {
+    const currentClipboard = clipboardRef.current;
+    if (currentClipboard?.type !== "planet") return;
+    const state = stateRef.current;
+    const targetId = targetOrbitId ??
+      state.selection.orbitId ??
+      (state.orbits.some((orbit) => orbit.id === currentClipboard.sourceOrbitId)
+        ? currentClipboard.sourceOrbitId : null);
+    if (!targetId || !state.orbits.some((orbit) => orbit.id === targetId)) {
+      flash("Select an orbit to paste the planet.");
+      return;
+    }
+    const copied = currentClipboard.data;
+    const planetId = id();
+    const newPlanet: Planet = {
+      id: planetId,
+      orbitId: targetId,
+      angle: requestedAngle ?? findAvailablePlanetAngle(targetId),
+      speed: copied.speed,
+      volume: copied.volume,
+      pitchCents: copied.pitchCents,
+      direction: copied.direction,
+      isActive: copied.isActive,
+      collisionSpeedMultiplier: 1,
+      collisionCooldownRemaining: 0,
+      collisionFlashRemaining: 0
+    };
+    pushHistory();
+    setPlanets((current) => [...current, newPlanet]);
+    setSelection({ orbitId: targetId, planetId, barId: null });
+    if (newPlanet.speed !== 1 || newPlanet.pitchCents) {
+      void audioEngine.processPlanetBuffer(
+        newPlanet.orbitId, newPlanet.id, newPlanet.speed, newPlanet.pitchCents
+      ).catch(() => flash("Pasted planet audio processing failed."));
+    }
+    flash("Planet pasted.");
+  }
+
+  function pastePlanetToSelectedOrbit() {
+    pastePlanet(stateRef.current.selection.orbitId);
+  }
+
+  function pastePlanetAtMenu() {
+    if (!menu?.orbitId) return pastePlanetToSelectedOrbit();
+    const orbit = stateRef.current.orbits.find((item) => item.id === menu.orbitId);
+    if (!orbit) return;
+    pastePlanet(orbit.id, orbitAngleAtPoint(orbit, menu.canvasX, menu.canvasY));
+    setMenu(null);
   }
 
   function previewPlanetSpeed(planetId: string, pendingSpeed: number) {
@@ -591,6 +679,14 @@ export default function App() {
       if (command && key === "z" && event.shiftKey) { event.preventDefault(); redo(); }
       else if ((command && key === "y")) { event.preventDefault(); redo(); }
       else if (command && key === "z") { event.preventDefault(); undo(); }
+      else if (command && key === "c" && stateRef.current.selection.planetId) {
+        event.preventDefault();
+        copyPlanet(stateRef.current.selection.planetId);
+      }
+      else if (command && key === "v" && clipboardRef.current?.type === "planet") {
+        event.preventDefault();
+        pastePlanet();
+      }
       else if (command && key === "d") { event.preventDefault(); duplicateOrbit(); }
       else if (command && key === "s") { event.preventDefault(); void saveProject(); }
       else if (command && key === "o") { event.preventDefault(); void openProject(); }
@@ -713,6 +809,7 @@ export default function App() {
 
     <OrbitSettingsPanel
       orbit={selectedOrbit} planets={planets} projectName={projectName} isDirty={isDirty}
+      hasPlanetClipboard={clipboard?.type === "planet"}
       onProjectName={(name) => { setProjectName(name); setIsDirty(true); }}
       onSave={() => void saveProject()} onOpen={() => void openProject()}
       onMode={(mode) => selectedOrbit && setOrbitMode(selectedOrbit.id, mode)}
@@ -756,6 +853,8 @@ export default function App() {
         setPlanets((current) => current.map((planet) =>
           planet.id === planetId ? { ...planet, direction: reverse ? -1 : 1 } : planet));
       }}
+      onCopyPlanet={copyPlanet}
+      onPastePlanetToOrbit={(orbitId) => pastePlanet(orbitId)}
       onDeletePlanet={deletePlanet}
     />
     <TransportControls isPlaying={isPlaying} isRecording={isRecording}
@@ -768,6 +867,7 @@ export default function App() {
       onRecord={() => void toggleRecording()} />
     {menu && <ContextMenu menu={menu}
       sequenceMode={orbits.find((orbit) => orbit.id === menu.orbitId)?.mode === "sequence"}
+      hasPlanetClipboard={clipboard?.type === "planet"}
       onUpload={() => { setMenu(null); fileInput.current?.click(); }}
       onToggleMode={() => {
         const orbit = orbits.find((item) => item.id === menu.orbitId);
@@ -776,6 +876,11 @@ export default function App() {
       }}
       onTogglePause={() => toggleOrbitPause()}
       onDuplicate={() => { duplicateOrbit(menu.orbitId); setMenu(null); }}
+      onCopyPlanet={() => {
+        if (menu.planetId) copyPlanet(menu.planetId);
+        setMenu(null);
+      }}
+      onPastePlanetHere={pastePlanetAtMenu}
       onAddPlayBar={() => addContextBar("play")} onAddStopBar={() => addContextBar("stop")} />}
     <input ref={fileInput} className="hidden-input" type="file" multiple
       accept=".wav,.mp3,.ogg,audio/wav,audio/mpeg,audio/ogg"
