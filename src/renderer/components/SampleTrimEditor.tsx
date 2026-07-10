@@ -75,7 +75,8 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
         let amp = 0;
         for (let p = p0; p < p1; p++) if (peaks[p] > amp) amp = peaks[p];
         const x = (index / bars) * width;
-        const barHeight = amp * (height * 0.44);
+        // Keep a hairline at the center so silent (amp 0) regions read as a thin line, not a gap.
+        const barHeight = Math.max(0.4, amp * (height * 0.44));
         const center = (t0 + t1) / 2;
         const inside = center >= start && center <= end;
         context.fillStyle = inside ? `rgba(${r}, ${g}, ${b}, .72)` : "rgba(74, 76, 70, .28)";
