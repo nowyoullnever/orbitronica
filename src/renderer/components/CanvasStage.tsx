@@ -5,7 +5,6 @@ import {
   isAngleInsideBar, isFullLoopBar, normalizeAngle, orbitAngleAtPoint
 } from "../utils/geometry";
 import { angularDistance } from "../utils/triggerDetection";
-import { audioEngine } from "../audio/audioEngine";
 
 const PLANET_RADIUS = 6;
 const PLANET_STROKE_WIDTH = 2;
@@ -73,10 +72,30 @@ type Drag =
   | { type: "move-bar"; bar: TriggerBar; orbit: Orbit }
   | { type: "pan-viewport"; startX: number; startY: number; viewport: ViewportState };
 
+type WaveformSegment = {
+  x: number;
+  y: number;
+  nx: number;
+  ny: number;
+  half: number;
+  angle: number;
+};
+
+type WaveformGeometry = {
+  peaks: Float32Array;
+  radiusX: number;
+  radiusY: number;
+  spikeCount: number;
+  baseWidth: number;
+  segments: WaveformSegment[];
+  basePath: Path2D;
+};
+
 type Props = {
   orbits: Orbit[];
   planets: Planet[];
   bars: TriggerBar[];
+  waveformPeaksByOrbit: ReadonlyMap<string, Float32Array>;
   selection: Selection;
   selectedTool: Tool;
   isPlaying: boolean;
@@ -106,6 +125,7 @@ export function CanvasStage(props: Props) {
   const frameRef = useRef(0);
   const triggerStates = useRef(new Map<string, boolean>());
   const runtimeAngles = useRef(new Map<string, number>());
+  const waveformGeometryCache = useRef(new Map<string, WaveformGeometry>());
   const stateRef = useRef(props);
   const [drag, setDrag] = useState<Drag | null>(null);
   stateRef.current = props;
@@ -304,56 +324,75 @@ export function CanvasStage(props: Props) {
       context.lineTo(point.x + nx * length / 2, point.y + ny * length / 2);
       context.stroke();
     };
-    // Overlay the loaded sample's waveform around the orbit: angle is the audio
-    // timeline, amplitude displaces radially in/out from the orbit line.
-    const drawWaveform = (
-      context: CanvasRenderingContext2D, orbit: Orbit, peaks: Float32Array, planetAngles: number[]
-    ) => {
+    const getWaveformGeometry = (orbit: Orbit, peaks: Float32Array) => {
       const circumference = Math.PI * (orbit.radiusX + orbit.radiusY);
       const spikeCount = Math.min(720, Math.max(160, Math.round(circumference / 4)));
       const amplitudeScale = Math.max(14, Math.min(orbit.radiusX, orbit.radiusY) * .22);
       const baseWidth = Math.max(.6, (circumference / spikeCount) * .55);
-      const segments: { x: number; y: number; nx: number; ny: number; half: number; angle: number }[] = [];
+      const cached = waveformGeometryCache.current.get(orbit.id);
+      if (cached && cached.peaks === peaks && cached.radiusX === orbit.radiusX &&
+        cached.radiusY === orbit.radiusY && cached.spikeCount === spikeCount) return cached;
+
+      const segments: WaveformSegment[] = [];
+      const basePath = new Path2D();
       for (let index = 0; index < spikeCount; index++) {
         const from = Math.floor((index / spikeCount) * peaks.length);
         const to = Math.max(from + 1, Math.floor(((index + 1) / spikeCount) * peaks.length));
         let amp = 0;
         for (let p = from; p < to; p++) if (peaks[p] > amp) amp = peaks[p];
         const angle = (index / spikeCount) * TAU;
-        const point = ellipsePoint(orbit, angle);
-        const dx = point.x - orbit.x;
-        const dy = point.y - orbit.y;
+        const x = Math.cos(angle) * orbit.radiusX;
+        const y = Math.sin(angle) * orbit.radiusY;
+        const dx = x;
+        const dy = y;
         const magnitude = Math.hypot(dx, dy) || 1;
-        segments.push({ x: point.x, y: point.y, nx: dx / magnitude, ny: dy / magnitude, half: amp * amplitudeScale, angle });
+        const segment = { x, y, nx: dx / magnitude, ny: dy / magnitude, half: amp * amplitudeScale, angle };
+        segments.push(segment);
+        basePath.moveTo(segment.x - segment.nx * segment.half, segment.y - segment.ny * segment.half);
+        basePath.lineTo(segment.x + segment.nx * segment.half, segment.y + segment.ny * segment.half);
       }
+      const geometry = { peaks, radiusX: orbit.radiusX, radiusY: orbit.radiusY, spikeCount, baseWidth, segments, basePath };
+      waveformGeometryCache.current.set(orbit.id, geometry);
+      return geometry;
+    };
+
+    // Overlay the loaded sample's waveform around the orbit: angle is the audio
+    // timeline, amplitude displaces radially in/out from the orbit line.
+    const drawWaveform = (
+      context: CanvasRenderingContext2D, orbit: Orbit, peaks: Float32Array, planetAngles: number[]
+    ) => {
+      const geometry = getWaveformGeometry(orbit, peaks);
       context.save();
+      context.translate(orbit.x, orbit.y);
       context.lineCap = "butt";
+      context.globalAlpha = orbit.isPaused ? .48 : 1;
       // Base pass: the full waveform in translucent gray, batched into one stroke.
       context.strokeStyle = "rgba(74, 76, 70, .28)";
-      context.lineWidth = baseWidth;
-      context.beginPath();
-      for (const segment of segments) {
-        context.moveTo(segment.x - segment.nx * segment.half, segment.y - segment.ny * segment.half);
-        context.lineTo(segment.x + segment.nx * segment.half, segment.y + segment.ny * segment.half);
-      }
-      context.stroke();
+      context.lineWidth = geometry.baseWidth;
+      context.stroke(geometry.basePath);
       // Highlight pass: spikes near a planet glow in the orbit's color and fade with distance.
       if (planetAngles.length) {
         const { r, g, b } = parseHexColor(orbit.color);
-        for (const segment of segments) {
-          let factor = 0;
-          for (const planetAngle of planetAngles) {
-            const distance = angularDistance(segment.angle, planetAngle);
-            if (distance < WAVEFORM_HIGHLIGHT_WINDOW) {
-              factor = Math.max(factor, 1 - distance / WAVEFORM_HIGHLIGHT_WINDOW);
-            }
+        const highlightFactors = new Map<number, number>();
+        const span = Math.ceil(WAVEFORM_HIGHLIGHT_WINDOW / TAU * geometry.spikeCount);
+        for (const planetAngle of planetAngles) {
+          const center = Math.round(normalizeAngle(planetAngle) / TAU * geometry.spikeCount) % geometry.spikeCount;
+          for (let offset = -span; offset <= span; offset++) {
+            const index = (center + offset + geometry.spikeCount) % geometry.spikeCount;
+            const distance = angularDistance(geometry.segments[index].angle, planetAngle);
+            if (distance >= WAVEFORM_HIGHLIGHT_WINDOW) continue;
+            const factor = 1 - distance / WAVEFORM_HIGHLIGHT_WINDOW;
+            if (factor > (highlightFactors.get(index) ?? 0)) highlightFactors.set(index, factor);
           }
-          if (factor <= 0) continue;
-          // Sharp spike at the planet, fading all the way to transparent at the window edge
-          // (no alpha floor) so the highlight blends smoothly back into the gray waveform.
+        }
+        // Sharp spike at the planet, fading all the way to transparent at the window edge
+        // (continuous alpha, no floor) so the highlight blends smoothly into the gray waveform.
+        // Only the spikes within the window are touched, so this stays cheap despite per-spike strokes.
+        for (const [index, factor] of highlightFactors) {
           const eased = factor * factor;
+          const segment = geometry.segments[index];
           context.strokeStyle = `rgba(${r}, ${g}, ${b}, ${(.92 * eased).toFixed(3)})`;
-          context.lineWidth = baseWidth * (1 + eased * .8);
+          context.lineWidth = geometry.baseWidth * (1 + eased * .8);
           context.beginPath();
           context.moveTo(segment.x - segment.nx * segment.half, segment.y - segment.ny * segment.half);
           context.lineTo(segment.x + segment.nx * segment.half, segment.y + segment.ny * segment.half);
@@ -416,8 +455,18 @@ export function CanvasStage(props: Props) {
         if (list) list.push(planet.angle);
         else planetAnglesByOrbit.set(planet.orbitId, [planet.angle]);
       }
+      const waveformOrbitIds = new Set(state.orbits.map((orbit) => orbit.id));
+      for (const orbitId of waveformGeometryCache.current.keys()) {
+        if (!waveformOrbitIds.has(orbitId)) waveformGeometryCache.current.delete(orbitId);
+      }
       for (const orbit of state.orbits) {
-        const peaks = audioEngine.getWaveformPeaks(orbit.id);
+        const amplitude = Math.max(14, Math.min(orbit.radiusX, orbit.radiusY) * .22);
+        const left = (orbit.x - orbit.radiusX - amplitude) * state.viewport.zoom + state.viewport.offsetX;
+        const right = (orbit.x + orbit.radiusX + amplitude) * state.viewport.zoom + state.viewport.offsetX;
+        const top = (orbit.y - orbit.radiusY - amplitude) * state.viewport.zoom + state.viewport.offsetY;
+        const bottom = (orbit.y + orbit.radiusY + amplitude) * state.viewport.zoom + state.viewport.offsetY;
+        if (right < 0 || left > rect.width || bottom < 0 || top > rect.height) continue;
+        const peaks = state.waveformPeaksByOrbit.get(orbit.id);
         if (peaks) drawWaveform(context, orbit, peaks, planetAnglesByOrbit.get(orbit.id) ?? []);
       }
 

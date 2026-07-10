@@ -84,6 +84,7 @@ export default function App() {
   const [cancelSignal, setCancelSignal] = useState(0);
   const [clipboard, setClipboard] = useState<AppClipboard>(null);
   const [viewport, setViewport] = useState<ViewportState>(defaultViewport);
+  const [waveformPeaksByOrbit, setWaveformPeaksByOrbit] = useState<Map<string, Float32Array>>(() => new Map());
   const uploadPoint = useRef({ x: 450, y: 350 });
   const fileInput = useRef<HTMLInputElement>(null);
   const undoStack = useRef<HistorySnapshot[]>([]);
@@ -93,6 +94,15 @@ export default function App() {
   const stateRef = useRef({ orbits, planets, bars, selection, lastLoopBarLengthRadians });
   stateRef.current = { orbits, planets, bars, selection, lastLoopBarLengthRadians };
   clipboardRef.current = clipboard;
+
+  useEffect(() => audioEngine.subscribeWaveformPeaks((orbitId, peaks) => {
+    setWaveformPeaksByOrbit((current) => {
+      const next = new Map(current);
+      if (peaks) next.set(orbitId, peaks);
+      else next.delete(orbitId);
+      return next;
+    });
+  }), []);
 
   const selectedOrbit = useMemo(
     () => orbits.find((orbit) => orbit.id === selection.orbitId) ?? null,
@@ -725,7 +735,7 @@ export default function App() {
         }}>Upload your first sound</button>
       </div>}
       <CanvasStage
-        orbits={orbits} planets={planets} bars={bars} selection={selection}
+        orbits={orbits} planets={planets} bars={bars} waveformPeaksByOrbit={waveformPeaksByOrbit} selection={selection}
         selectedTool={selectedTool} isPlaying={isPlaying} isDragOver={isDragOver}
         cancelSignal={cancelSignal} viewport={viewport} onViewportChange={setViewport}
         onSelect={setSelection} onBeginMutation={pushHistory}

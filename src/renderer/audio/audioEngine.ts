@@ -12,10 +12,14 @@ type ActivePlayback = {
   isReverse: boolean;
 };
 
+type WaveformListener = (orbitId: string, peaks: Float32Array | null) => void;
+
 class AudioEngine {
   private context: AudioContext | null = null;
   private buffers = new Map<string, AudioBuffer>();
   private waveformPeaks = new Map<string, Float32Array>();
+  private waveformPeakPromises = new WeakMap<AudioBuffer, Promise<Float32Array>>();
+  private waveformListeners = new Set<WaveformListener>();
   private readonly waveformResolution = 1024;
   private processedBuffers = new Map<string, AudioBuffer>();
   private reverseBuffers = new Map<string, AudioBuffer>();
@@ -64,6 +68,8 @@ class AudioEngine {
     const context = this.getContext();
     this.buffers.set(orbitId, buffer);
     this.waveformPeaks.delete(orbitId);
+    this.publishWaveformPeaks(orbitId, null);
+    void this.cacheWaveformPeaks(orbitId, buffer);
     const gain = context.createGain();
     gain.gain.value = volume;
     gain.connect(this.masterGain!);
@@ -83,13 +89,35 @@ class AudioEngine {
     return this.rawFiles.get(orbitId);
   }
 
-  // Normalized per-bin peak amplitudes (0..1) for drawing the sample waveform.
-  // Computed once per buffer at a fixed resolution and cached; callers downsample further as needed.
-  getWaveformPeaks(orbitId: string): Float32Array | null {
-    const cached = this.waveformPeaks.get(orbitId);
-    if (cached) return cached;
-    const buffer = this.buffers.get(orbitId);
-    if (!buffer) return null;
+  subscribeWaveformPeaks(listener: WaveformListener) {
+    this.waveformListeners.add(listener);
+    for (const [orbitId, peaks] of this.waveformPeaks) listener(orbitId, peaks);
+    return () => { this.waveformListeners.delete(listener); };
+  }
+
+  private publishWaveformPeaks(orbitId: string, peaks: Float32Array | null) {
+    for (const listener of this.waveformListeners) listener(orbitId, peaks);
+  }
+
+  private async cacheWaveformPeaks(orbitId: string, buffer: AudioBuffer) {
+    let peakPromise = this.waveformPeakPromises.get(buffer);
+    if (!peakPromise) {
+      peakPromise = this.computeWaveformPeaks(buffer);
+      this.waveformPeakPromises.set(buffer, peakPromise);
+    }
+    try {
+      const peaks = await peakPromise;
+      if (this.buffers.get(orbitId) !== buffer) return;
+      this.waveformPeaks.set(orbitId, peaks);
+      this.publishWaveformPeaks(orbitId, peaks);
+    } catch {
+      // A failed visualization must never affect audio playback.
+    }
+  }
+
+  // Normalized per-bin peak amplitudes (0..1). Work is yielded in small chunks so
+  // loading a long sample cannot monopolize the renderer that schedules playback.
+  private async computeWaveformPeaks(buffer: AudioBuffer): Promise<Float32Array> {
     const resolution = this.waveformResolution;
     const peaks = new Float32Array(resolution);
     const length = buffer.length;
@@ -107,9 +135,9 @@ class AudioEngine {
       }
       peaks[bin] = peak;
       if (peak > max) max = peak;
+      if ((bin + 1) % 16 === 0) await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
     }
     if (max > 0) for (let index = 0; index < resolution; index++) peaks[index] /= max;
-    this.waveformPeaks.set(orbitId, peaks);
     return peaks;
   }
 
@@ -441,6 +469,7 @@ class AudioEngine {
     this.stopAllActivePlaybacksForOrbit(orbitId);
     this.buffers.delete(orbitId);
     this.waveformPeaks.delete(orbitId);
+    this.publishWaveformPeaks(orbitId, null);
     for (const key of [...this.processedBuffers.keys()]) {
       if (key.startsWith(`${orbitId}:`)) this.processedBuffers.delete(key);
     }
