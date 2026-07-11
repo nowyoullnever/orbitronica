@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { ContextMenuState, Orbit, Planet, Selection, Tool, TriggerBar, ViewportState } from "../state/types";
 import {
-  TAU, arePlanetCirclesColliding, ellipsePoint, findNearestOrbit, getPlanetEffectiveSpeed,
+  TAU, ellipsePoint, findNearestOrbit, getPlanetEffectiveSpeed,
   getSampleDuration, getSampleEnd, getSampleStart, isAngleInsideBar, isFullLoopBar,
   normalizeAngle, orbitAngleAtPoint, SPLICE_MAX_PIECES
 } from "../utils/geometry";
+import { collisionPairKey, hasSweptCircleContact, isAngularlyApproaching } from "../utils/collision";
 import { getLoopBarTransitions } from "../utils/sampleTrim";
 import { angularDistance } from "../utils/triggerDetection";
 import { parseHexColor } from "../utils/color";
@@ -135,6 +136,7 @@ export function CanvasStage(props: Props) {
   const triggerStates = useRef(new Map<string, boolean>());
   const runtimeAngles = useRef(new Map<string, number>());
   const runtimeUnwrappedAngles = useRef(new Map<string, number>());
+  const collisionPairCooldowns = useRef(new Map<string, number>());
   const waveformGeometryCache = useRef(new Map<string, WaveformGeometry>());
   const stateRef = useRef(props);
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -679,7 +681,19 @@ export function CanvasStage(props: Props) {
       const state = stateRef.current;
       const updates = new Map<string, Partial<Planet>>();
       const dynamics = new Map<string, Planet>();
+      const motionSamples = new Map<string, {
+        previousPosition: { x: number; y: number };
+        currentPosition: { x: number; y: number };
+        previousUnwrappedAngle: number;
+        currentUnwrappedAngle: number;
+      }>();
       const orbitsById = new Map(state.orbits.map((orbit) => [orbit.id, orbit]));
+      if (!state.isPlaying) collisionPairCooldowns.current.clear();
+      else for (const [pair, remaining] of collisionPairCooldowns.current) {
+        const nextRemaining = remaining - delta;
+        if (nextRemaining > 0) collisionPairCooldowns.current.set(pair, nextRemaining);
+        else collisionPairCooldowns.current.delete(pair);
+      }
       for (const planet of state.planets) {
         const orbit = orbitsById.get(planet.orbitId);
         if (!orbit) continue;
@@ -690,7 +704,7 @@ export function CanvasStage(props: Props) {
         let angle = runtimeAngles.current.get(planet.id) ?? planet.angle;
         let unwrappedAngle = runtimeUnwrappedAngles.current.get(planet.id) ?? angle;
         const previousUnwrappedAngle = unwrappedAngle;
-        let collisionCooldownRemaining = Math.max(0, planet.collisionCooldownRemaining - delta);
+        const previousPosition = ellipsePoint(orbit, previousUnwrappedAngle);
         let collisionSpeedMultiplier = planet.collisionSpeedMultiplier +
           (1 - planet.collisionSpeedMultiplier) * Math.min(1, delta * COLLISION_RECOVERY_RATE);
         collisionSpeedMultiplier = Math.min(1, Math.max(.1, collisionSpeedMultiplier));
@@ -706,12 +720,18 @@ export function CanvasStage(props: Props) {
           runtimeUnwrappedAngles.current.set(planet.id, unwrappedAngle);
         }
         const next = {
-          ...planet, angle, direction, collisionCooldownRemaining,
+          ...planet, angle, direction,
           collisionSpeedMultiplier, collisionFlashRemaining
         };
         dynamics.set(planet.id, next);
+        motionSamples.set(planet.id, {
+          previousPosition,
+          currentPosition: ellipsePoint(orbit, unwrappedAngle),
+          previousUnwrappedAngle,
+          currentUnwrappedAngle: unwrappedAngle
+        });
         updates.set(planet.id, {
-          angle, collisionCooldownRemaining, collisionSpeedMultiplier, collisionFlashRemaining
+          angle, collisionSpeedMultiplier, collisionFlashRemaining
         });
         for (const bar of state.bars.filter((item) =>
           item.orbitId === orbit.id && (orbit.mode === "loop" || item.source !== "splice"))) {
@@ -742,42 +762,70 @@ export function CanvasStage(props: Props) {
         const orbit = orbitsById.get(planet.orbitId);
         return state.isPlaying && planet.isActive && Boolean(orbit);
       });
+      const contactPairs: Array<{ key: string; a: Planet; b: Planet }> = [];
       for (let left = 0; left < collisionPlanets.length; left++) {
         for (let right = left + 1; right < collisionPlanets.length; right++) {
           const a = collisionPlanets[left], b = collisionPlanets[right];
-          if (a.collisionCooldownRemaining > 0 || b.collisionCooldownRemaining > 0) continue;
+          const pair = collisionPairKey(a.id, b.id);
+          if (collisionPairCooldowns.current.has(pair)) continue;
           const orbitA = orbitsById.get(a.orbitId);
           const orbitB = orbitsById.get(b.orbitId);
-          if (!orbitA || !orbitB) continue;
-          const positionA = ellipsePoint(orbitA, a.angle);
-          const positionB = ellipsePoint(orbitB, b.angle);
-          if (arePlanetCirclesColliding(positionA, positionB, PLANET_RADIUS, PLANET_RADIUS)) {
-            const collidedA: Planet = {
-              ...a,
-              direction: (a.direction * -1) as 1 | -1,
-              collisionSpeedMultiplier: COLLISION_SLOWDOWN,
-              collisionCooldownRemaining: COLLISION_COOLDOWN_SECONDS,
-              collisionFlashRemaining: COLLISION_FLASH_SECONDS
-            };
-            const collidedB: Planet = {
-              ...b,
-              direction: (b.direction * -1) as 1 | -1,
-              collisionSpeedMultiplier: COLLISION_SLOWDOWN,
-              collisionCooldownRemaining: COLLISION_COOLDOWN_SECONDS,
-              collisionFlashRemaining: COLLISION_FLASH_SECONDS
-            };
-            collisionPlanets[left] = collidedA;
-            collisionPlanets[right] = collidedB;
-            dynamics.set(a.id, collidedA);
-            dynamics.set(b.id, collidedB);
-            updates.set(a.id, { ...updates.get(a.id), ...collidedA });
-            updates.set(b.id, { ...updates.get(b.id), ...collidedB });
+          const motionA = motionSamples.get(a.id);
+          const motionB = motionSamples.get(b.id);
+          if (!orbitA || !orbitB || !motionA || !motionB) continue;
+          // Only bounce when the two planets are actually moving toward each other this
+          // tick. Without this, planets sitting close together stay overlapped and flip
+          // direction repeatedly, gluing them together in a periodic forward/reverse cycle.
+          //
+          // On the SAME orbit, measure approach by the angular gap, not screen distance:
+          // orbits are ellipses, so two planets holding a fixed angular gap still see their
+          // straight-line distance grow and shrink as they travel. Using screen distance
+          // there produces phantom "approaching" for planets that move in lockstep, so they
+          // never separate on the orbit and oscillate forever. Cross-orbit pairs have no
+          // shared angle, so their swept screen-space motion determines contact.
+          let colliding: boolean;
+          if (a.orbitId === b.orbitId) {
+            colliding = isAngularlyApproaching(
+              motionA.previousUnwrappedAngle, motionA.currentUnwrappedAngle,
+              motionB.previousUnwrappedAngle, motionB.currentUnwrappedAngle
+            ) && hasSweptCircleContact(
+              motionA.previousPosition, motionA.currentPosition,
+              motionB.previousPosition, motionB.currentPosition,
+              PLANET_RADIUS
+            );
+          } else {
+            colliding = hasSweptCircleContact(
+              motionA.previousPosition, motionA.currentPosition,
+              motionB.previousPosition, motionB.currentPosition,
+              PLANET_RADIUS
+            );
           }
+          if (colliding) contactPairs.push({ key: pair, a, b });
         }
+      }
+      const contactedPlanetIds = new Set<string>();
+      for (const { key, a, b } of contactPairs) {
+        collisionPairCooldowns.current.set(key, COLLISION_COOLDOWN_SECONDS);
+        contactedPlanetIds.add(a.id);
+        contactedPlanetIds.add(b.id);
+      }
+      for (const planet of collisionPlanets) {
+        if (!contactedPlanetIds.has(planet.id)) continue;
+        const collided: Planet = {
+          ...planet,
+          direction: (planet.direction * -1) as 1 | -1,
+          collisionSpeedMultiplier: COLLISION_SLOWDOWN,
+          collisionFlashRemaining: COLLISION_FLASH_SECONDS
+        };
+        dynamics.set(planet.id, collided);
+        updates.set(planet.id, { ...updates.get(planet.id), ...collided });
       }
       if (updates.size) state.onMovePlanets(updates);
     }, 10);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearInterval(timer);
+      collisionPairCooldowns.current.clear();
+    };
   }, []);
 
   const localPoint = (event: React.MouseEvent<HTMLCanvasElement> | React.DragEvent<HTMLCanvasElement>) => {

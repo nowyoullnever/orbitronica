@@ -52,7 +52,6 @@ export type Planet = {
   isActive: boolean;
   direction: 1 | -1;
   collisionSpeedMultiplier: number;
-  collisionCooldownRemaining: number;
   collisionFlashRemaining: number;
   name?: string;
 };
