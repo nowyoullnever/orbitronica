@@ -297,7 +297,7 @@ export default function App() {
       planetIdMap.set(planet.id, newId);
       return {
         ...cleanPlanet(planet), id: newId, orbitId: newOrbitId,
-        collisionSpeedMultiplier: 1, collisionCooldownRemaining: 0, collisionFlashRemaining: 0
+        collisionSpeedMultiplier: 1, collisionFlashRemaining: 0
       };
     });
     const copiedBars = stateRef.current.bars.filter((bar) => bar.orbitId === source.id && bar.source !== "splice")
@@ -364,7 +364,6 @@ export default function App() {
       direction: copied.direction,
       isActive: copied.isActive,
       collisionSpeedMultiplier: 1,
-      collisionCooldownRemaining: 0,
       collisionFlashRemaining: 0
     };
     pushHistory();
@@ -575,7 +574,6 @@ export default function App() {
         pitchCents: planet.pitchCents ?? 0,
         direction: planet.direction ?? 1,
         collisionSpeedMultiplier: planet.collisionSpeedMultiplier ?? 1,
-        collisionCooldownRemaining: 0,
         collisionFlashRemaining: 0
       }));
       setOrbits(restoredOrbits);
@@ -698,7 +696,7 @@ export default function App() {
       return;
     }
     const collisionSpeedMultiplier = clamp(requestedRate, MIN_DIRECT_RATE, MAX_DIRECT_RATE);
-    const nextPlanet = { ...planet, collisionSpeedMultiplier, collisionCooldownRemaining: 0 };
+    const nextPlanet = { ...planet, collisionSpeedMultiplier };
     pushHistory();
     setPlanets((current) => current.map((item) => item.id === planetId ? nextPlanet : item));
     audioEngine.setActivePlanetTapeRate(planetId, getTapeStyleRuntimeRateOnly(orbit, nextPlanet));
@@ -819,7 +817,7 @@ export default function App() {
           const planetId = id();
           setPlanets((current) => [...current, {
             id: planetId, orbitId, angle, speed: 1, volume: 1, pitchCents: 0, isActive: true,
-            direction: 1, collisionSpeedMultiplier: 1, collisionCooldownRemaining: 0,
+            direction: 1, collisionSpeedMultiplier: 1,
             collisionFlashRemaining: 0
           }]);
           setSelection({ orbitId, planetId, barId: null });
