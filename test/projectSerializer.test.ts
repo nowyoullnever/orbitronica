@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { serializeProject } from "../src/renderer/project/projectSerializer.ts";
+import { parseProject, serializeProject } from "../src/renderer/project/projectSerializer.ts";
 
 test("persists only manual bars because splice bars are derived", () => {
   const project = serializeProject("test", [], [], [
@@ -9,4 +9,9 @@ test("persists only manual bars because splice bars are derived", () => {
   ], 1, { orbitId: null, planetId: null, barId: null });
 
   assert.deepEqual(project.bars.map((bar) => bar.id), ["manual"]);
+});
+
+test("loads older projects without audio pan at center", () => {
+  const project = parseProject(JSON.stringify({ orbits: [], planets: [{}], bars: [] }));
+  assert.equal(project.planets[0].audioPan, 0);
 });

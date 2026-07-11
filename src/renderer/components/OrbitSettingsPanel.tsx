@@ -23,6 +23,7 @@ type Props = {
   onName: (name: string) => void;
   onColor: (color: string) => void;
   onVolume: (volume: number) => void;
+  onOrbitAudioPan: (audioPan: number) => void;
   onPause: () => void;
   onMute: (muted: boolean) => void;
   onSolo: (solo: boolean) => void;
@@ -37,6 +38,7 @@ type Props = {
   onPlanetFinalMovementApply: (planetId: string, rate: number) => void;
   onPlanetFinalPitchApply: (planetId: string, cents: number) => void;
   onPlanetVolume: (planetId: string, volume: number) => void;
+  onPlanetAudioPan: (planetId: string, audioPan: number) => void;
   onPlanetPitchPreview: (planetId: string, pitchCents: number) => void;
   onPlanetPitchCommit: (planetId: string, pitchCents: number) => void;
   onPlanetReverse: (planetId: string, reverse: boolean) => void;
@@ -120,6 +122,53 @@ function ReadonlyMetric({ label, value, suffix, decimals = 2 }: {
   </div>;
 }
 
+function AudioPanControl({ label, value, onChange }: { label: string; value: number; onChange: (audioPan: number) => void }) {
+  const [draft, setDraft] = useState(String(value));
+  const [isEditing, setIsEditing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isEditing) setDraft(String(value));
+  }, [value, isEditing]);
+
+  const applyDraft = (nextDraft: string) => {
+    setDraft(nextDraft);
+    if (!/^-?(?:\d+\.?\d*|\.\d+)$/.test(nextDraft)) {
+      setError("Please enter a valid number.");
+      return;
+    }
+    const parsed = Number(nextDraft);
+    if (parsed > 100) {
+      setError("Please enter a value less than or equal to 100.");
+      return;
+    }
+    if (parsed < -100) {
+      setError("Please enter a value greater than or equal to -100.");
+      return;
+    }
+    setError(null);
+    onChange(parsed);
+  };
+  const reset = () => {
+    setDraft("0");
+    setError(null);
+    onChange(0);
+  };
+
+  return <div className="audio-pan-control">
+    <label><span>{label} <output>{value > 0 ? "+" : ""}{value}</output></span>
+      <input type="range" min="-100" max="100" step="1" value={value}
+        onChange={(event) => { setDraft(event.target.value); setError(null); onChange(Number(event.target.value)); }}
+        onDoubleClick={reset} />
+    </label>
+    <input className="audio-pan-number" type="text" inputMode="decimal" value={draft} aria-label={`${label} value`}
+      onFocus={() => setIsEditing(true)}
+      onChange={(event) => applyDraft(event.target.value)}
+      onBlur={() => setIsEditing(false)}
+      onDoubleClick={reset} />
+    {error && <small className="audio-pan-error">{error}</small>}
+  </div>;
+}
+
 export function OrbitSettingsPanel(props: Props) {
   const { orbit, planets } = props;
   const orbitPlanets = orbit ? planets.filter((planet) => planet.orbitId === orbit.id) : [];
@@ -196,6 +245,7 @@ export function OrbitSettingsPanel(props: Props) {
               onChange={(event) => props.onVolume(Number(event.target.value))}
               onDoubleClick={() => props.onVolume(1)} />
           </label>
+          <AudioPanControl label="ORBIT PAN" value={orbit.audioPan} onChange={props.onOrbitAudioPan} />
           {orbit.mode === "sequence" && <label><span>SEQUENCE RETRIGGER</span>
             <select value={orbit.sequenceRetriggerMode}
               onChange={(event) => props.onRetriggerMode(event.target.value as SequenceRetriggerMode)}>
@@ -276,6 +326,7 @@ export function OrbitSettingsPanel(props: Props) {
                     onChange={(event) => props.onPlanetVolume(planet.id, Number(event.target.value))}
                     onDoubleClick={() => props.onPlanetVolume(planet.id, 1)} />
                 </label>
+                <AudioPanControl label="PAN" value={planet.audioPan} onChange={(audioPan) => props.onPlanetAudioPan(planet.id, audioPan)} />
                 <label><span>PITCH PREVIEW <output>
                   {pitchPreview > 0 ? "+" : ""}{pitchPreview} cents
                 </output></span>

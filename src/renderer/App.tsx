@@ -43,7 +43,7 @@ const createSpliceBars = (orbitId: string, count: number, startAngle: number): T
     source: "splice"
   }));
 
-type CopiedPlanetData = Pick<Planet, "speed" | "volume" | "pitchCents" | "direction" | "isActive">;
+type CopiedPlanetData = Pick<Planet, "speed" | "volume" | "audioPan" | "pitchCents" | "direction" | "isActive">;
 type AppClipboard = {
   type: "planet";
   sourceOrbitId: string;
@@ -327,6 +327,7 @@ export default function App() {
       data: {
         speed: planet.speed,
         volume: planet.volume,
+        audioPan: planet.audioPan,
         pitchCents: planet.pitchCents,
         direction: planet.direction,
         isActive: planet.isActive
@@ -360,6 +361,7 @@ export default function App() {
       angle: requestedAngle ?? findAvailablePlanetAngle(targetId),
       speed: copied.speed,
       volume: copied.volume,
+      audioPan: copied.audioPan,
       pitchCents: copied.pitchCents,
       direction: copied.direction,
       isActive: copied.isActive,
@@ -495,7 +497,7 @@ export default function App() {
         id: orbitId, name, audioName: file.name, audioDuration: buffer.duration,
         x: Math.max(180, point.x + offset * 24), y: Math.max(150, point.y + offset * 20),
         radiusX, radiusY, initialRadiusX: radiusX, initialRadiusY: radiusY,
-        mode: "loop", volume: 1, isPaused: false, isMuted: false, isSolo: false,
+        mode: "loop", volume: 1, audioPan: 0, isPaused: false, isMuted: false, isSolo: false,
         color: ORBIT_COLORS[orbits.length % ORBIT_COLORS.length], sequenceRetriggerMode: "overlap"
       };
       setOrbits((current) => [...current, orbit]);
@@ -552,6 +554,7 @@ export default function App() {
           color: raw.color ?? "#5b625d",
           isMuted: raw.isMuted ?? false,
           isSolo: raw.isSolo ?? false,
+          audioPan: raw.audioPan ?? 0,
           sequenceRetriggerMode: raw.sequenceRetriggerMode ?? "overlap",
           spliceCount: normalizeSpliceCount(raw.spliceCount ?? 0),
           spliceStartAngle: normalizeAngle(raw.spliceStartAngle ?? 0)
@@ -571,6 +574,7 @@ export default function App() {
         ...cleanPlanet(planet),
         speed: planet.speed ?? 1,
         volume: planet.volume ?? 1,
+        audioPan: planet.audioPan ?? 0,
         pitchCents: planet.pitchCents ?? 0,
         direction: planet.direction ?? 1,
         collisionSpeedMultiplier: planet.collisionSpeedMultiplier ?? 1,
@@ -816,7 +820,7 @@ export default function App() {
           pushHistory();
           const planetId = id();
           setPlanets((current) => [...current, {
-            id: planetId, orbitId, angle, speed: 1, volume: 1, pitchCents: 0, isActive: true,
+            id: planetId, orbitId, angle, speed: 1, volume: 1, audioPan: 0, pitchCents: 0, isActive: true,
             direction: 1, collisionSpeedMultiplier: 1,
             collisionFlashRemaining: 0
           }]);
@@ -856,6 +860,7 @@ export default function App() {
           audioEngine.syncLoop(
             orbit.id, planet.id, bar.id, inside && canOrbitSound(orbit.id),
             getSampleStart(orbit) + angle / TAU * getSampleDuration(orbit), planet.volume,
+            orbit.audioPan, planet.audioPan,
             getTapeStyleRuntimeRateOnly(orbit, planet), planet.speed, planet.pitchCents,
             planet.direction === -1, getSampleStart(orbit), getSampleEnd(orbit)
           );
@@ -863,7 +868,7 @@ export default function App() {
         onSequencePlay={(orbit, planet, bar) => {
           if (!canOrbitSound(orbit.id)) return;
           audioEngine.triggerSequence(
-            orbit.id, planet.id, bar.id, planet.volume, 1, planet.pitchCents,
+            orbit.id, planet.id, bar.id, planet.volume, orbit.audioPan, planet.audioPan, 1, planet.pitchCents,
             planet.direction === -1, orbit.sequenceRetriggerMode,
             getSampleStart(orbit), getSampleEnd(orbit)
           );
@@ -936,6 +941,13 @@ export default function App() {
           orbit.id === selectedOrbit.id ? { ...orbit, volume } : orbit));
         audioEngine.setVolume(selectedOrbit.id, volume);
       }}
+      onOrbitAudioPan={(audioPan) => {
+        if (!selectedOrbit) return;
+        pushParameterHistory();
+        audioEngine.setActiveOrbitAudioPan(selectedOrbit.id, audioPan);
+        setOrbits((current) => current.map((orbit) =>
+          orbit.id === selectedOrbit.id ? { ...orbit, audioPan } : orbit));
+      }}
       onPause={() => selectedOrbit && toggleOrbitPause(selectedOrbit.id)}
       onMute={(muted) => selectedOrbit && setOrbitMute(selectedOrbit.id, muted)}
       onSolo={(solo) => selectedOrbit && setOrbitSolo(selectedOrbit.id, solo)}
@@ -953,6 +965,12 @@ export default function App() {
       onPlanetVolume={(planetId, volume) => {
         pushParameterHistory(); audioEngine.setActivePlanetVolume(planetId, volume);
         setPlanets((current) => current.map((planet) => planet.id === planetId ? { ...planet, volume } : planet));
+      }}
+      onPlanetAudioPan={(planetId, audioPan) => {
+        pushParameterHistory();
+        audioEngine.setActivePlanetAudioPan(planetId, audioPan);
+        setPlanets((current) => current.map((planet) =>
+          planet.id === planetId ? { ...planet, audioPan } : planet));
       }}
       onPlanetPitchPreview={previewPlanetPitch}
       onPlanetPitchCommit={(planetId, cents) => void commitPlanetPitch(planetId, cents)}

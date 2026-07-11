@@ -3,7 +3,7 @@ import { normalizeSampleWindow } from "../utils/sampleTrim.ts";
 
 function serializeOrbit(orbit: Orbit): Orbit {
   const window = normalizeSampleWindow(orbit.audioDuration, orbit.sampleStart, orbit.sampleEnd);
-  return { ...orbit, sampleStart: window.start, sampleEnd: window.end };
+  return { ...orbit, audioPan: Number.isFinite(orbit.audioPan) ? orbit.audioPan : 0, sampleStart: window.start, sampleEnd: window.end };
 }
 
 export function serializeProject(
@@ -22,6 +22,7 @@ export function serializeProject(
     orbits: orbits.map(serializeOrbit),
     planets: planets.map((planet) => ({
       ...planet,
+      audioPan: Number.isFinite(planet.audioPan) ? planet.audioPan : 0,
       pendingSpeed: undefined,
       isSpeedProcessing: false,
       processingSpeed: undefined,
@@ -53,7 +54,7 @@ export function parseProject(text: string): SerializableProject {
     // v1/v2 projects omitted trim fields; normalizing makes those full-sample
     // windows explicit and repairs malformed imported values before state uses them.
     orbits: parsed.orbits.map(serializeOrbit),
-    planets: parsed.planets,
+    planets: parsed.planets.map((planet) => ({ ...planet, audioPan: Number.isFinite(planet.audioPan) ? planet.audioPan : 0 })),
     bars: parsed.bars,
     lastLoopBarLengthRadians: parsed.lastLoopBarLengthRadians ?? Math.PI / 12,
     ui: parsed.ui

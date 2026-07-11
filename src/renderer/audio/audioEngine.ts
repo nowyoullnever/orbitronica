@@ -1,5 +1,6 @@
 import { SimpleFilter, SoundTouch, WebAudioBufferSource } from "soundtouchjs";
 import type { SequenceRetriggerMode } from "../state/types";
+import { createFLStylePanNode, type FLStylePanNode } from "./flStylePan";
 
 type ActivePlayback = {
   id: string;
@@ -8,6 +9,8 @@ type ActivePlayback = {
   barId: string;
   source: AudioBufferSourceNode;
   gainNode: GainNode;
+  orbitPanNode: FLStylePanNode;
+  planetPanNode: FLStylePanNode;
   mode: "loop" | "sequence";
   isReverse: boolean;
   loopWindowStart?: number;
@@ -183,7 +186,7 @@ class AudioEngine {
 
   private createPlayback(
     id: string, orbitId: string, planetId: string, barId: string,
-    mode: "loop" | "sequence", planetVolume: number, tapeRate = 1,
+    mode: "loop" | "sequence", planetVolume: number, orbitAudioPan: number, planetAudioPan: number, tapeRate = 1,
     userSpeed = 1, pitchCents = 0, reverse = false
   ) {
     const context = this.getContext();
@@ -197,20 +200,26 @@ class AudioEngine {
     }
     const source = context.createBufferSource();
     const planetGain = context.createGain();
+    const orbitPanNode = createFLStylePanNode(context, playbackBuffer.numberOfChannels, orbitAudioPan);
+    const planetPanNode = createFLStylePanNode(context, 2, planetAudioPan);
     source.buffer = playbackBuffer;
     // User speed is rendered into the processed buffer to preserve pitch.
     // playbackRate is intentionally limited to immediate tape-style runtime effects.
     source.playbackRate.value = tapeRate;
     planetGain.gain.value = planetVolume;
-    source.connect(planetGain);
+    source.connect(orbitPanNode.input);
+    orbitPanNode.output.connect(planetPanNode.input);
+    planetPanNode.output.connect(planetGain);
     planetGain.connect(orbitGain);
     const playback: ActivePlayback = {
-      id, orbitId, planetId, barId, source, gainNode: planetGain, mode, isReverse: reverse
+      id, orbitId, planetId, barId, source, gainNode: planetGain, orbitPanNode, planetPanNode, mode, isReverse: reverse
     };
     this.active.set(id, playback);
     source.onended = () => {
       if (this.active.get(id)?.source === source) this.active.delete(id);
       try { planetGain.disconnect(); } catch { /* disconnected */ }
+      orbitPanNode.disconnect();
+      planetPanNode.disconnect();
     };
     return {
       playback,
@@ -235,7 +244,8 @@ class AudioEngine {
 
   syncLoop(
     orbitId: string, planetId: string, barId: string, inside: boolean,
-    audioTime: number, planetVolume: number, tapeRate: number, userSpeed: number, pitchCents: number,
+    audioTime: number, planetVolume: number, orbitAudioPan: number, planetAudioPan: number,
+    tapeRate: number, userSpeed: number, pitchCents: number,
     reverse = false, sampleStart = 0, sampleEnd = Infinity
   ) {
     const key = `loop:${planetId}:${barId}`;
@@ -263,7 +273,8 @@ class AudioEngine {
       }
     }
     const created = this.createPlayback(
-      key, orbitId, planetId, barId, "loop", planetVolume, tapeRate, userSpeed, pitchCents, reverse
+      key, orbitId, planetId, barId, "loop", planetVolume, orbitAudioPan, planetAudioPan,
+      tapeRate, userSpeed, pitchCents, reverse
     );
     if (!created) return;
     // Match commit 3e8ee22 exactly when the user speed is unchanged:
@@ -295,7 +306,7 @@ class AudioEngine {
   }
 
   triggerSequence(
-    orbitId: string, planetId: string, barId: string, planetVolume: number,
+    orbitId: string, planetId: string, barId: string, planetVolume: number, orbitAudioPan: number, planetAudioPan: number,
     tapeRate: number, pitchCents: number, reverse: boolean,
     retriggerMode: SequenceRetriggerMode, sampleStart = 0, sampleEnd = Infinity
   ) {
@@ -303,7 +314,8 @@ class AudioEngine {
     if (retriggerMode === "cut-previous") this.stopActiveSequencePlaybacksForOrbit(orbitId);
     const id = `sequence:${planetId}:${barId}:${crypto.randomUUID()}`;
     const created = this.createPlayback(
-      id, orbitId, planetId, barId, "sequence", planetVolume, tapeRate, 1, pitchCents, reverse
+      id, orbitId, planetId, barId, "sequence", planetVolume, orbitAudioPan, planetAudioPan,
+      tapeRate, 1, pitchCents, reverse
     );
     if (created) {
       // Play only the trimmed window. Pitch shifting preserves length, so the
@@ -328,6 +340,8 @@ class AudioEngine {
     this.active.delete(id);
     try { playback.source.stop(); } catch { /* already stopped */ }
     try { playback.gainNode.disconnect(); } catch { /* disconnected */ }
+    playback.orbitPanNode.disconnect();
+    playback.planetPanNode.disconnect();
   }
 
   stopAllActivePlaybacks() {
@@ -374,6 +388,18 @@ class AudioEngine {
     const context = this.getContext();
     for (const playback of this.active.values()) {
       if (playback.planetId === planetId) playback.gainNode.gain.setValueAtTime(volume, context.currentTime);
+    }
+  }
+
+  setActiveOrbitAudioPan(orbitId: string, audioPan: number) {
+    for (const playback of this.active.values()) {
+      if (playback.orbitId === orbitId) playback.orbitPanNode.setPan(audioPan);
+    }
+  }
+
+  setActivePlanetAudioPan(planetId: string, audioPan: number) {
+    for (const playback of this.active.values()) {
+      if (playback.planetId === planetId) playback.planetPanNode.setPan(audioPan);
     }
   }
 
