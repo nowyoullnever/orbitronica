@@ -52,14 +52,40 @@ button { color: inherit; }
   letter-spacing: .17em;
   font-weight: 500;
 }
-.topline small { margin-left: 18px; color: #989890; font: 9px "MapoFlowerIsland", sans-serif; letter-spacing: .12em; }
-.topline i { margin-left: auto; font: normal 9px "MapoFlowerIsland", sans-serif; letter-spacing: .12em; color: #999; }
-.topline i::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #aaa; margin-right: 7px; }
-.topline i.live { color: #3d6e51; }
-.topline i.live::before { background: #4b9967; box-shadow: 0 0 0 3px #d9eadf; }
+.topline small {
+  min-width: 0;
+  margin-left: 18px;
+  overflow: hidden;
+  color: #989890;
+  font: 9px "MapoFlowerIsland", sans-serif;
+  letter-spacing: .12em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topline-status {
+  flex: none;
+  margin-left: auto;
+  font: normal 9px "MapoFlowerIsland", sans-serif;
+  letter-spacing: .12em;
+  color: #999;
+}
+.topline-status::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #aaa;
+  margin-right: 7px;
+}
+.topline-status.live { color: #3d6e51; }
+.topline-status.live::before { background: #4b9967; box-shadow: 0 0 0 3px #d9eadf; }
+.topline-status.recording { color: #a54237; }
+.topline-status.recording::before { background: #c64e47; box-shadow: 0 0 0 3px #f0d8d4; }
 
 .master-controls {
-  margin-left: auto;
+  flex: none;
+  margin-left: 18px;
   display: flex;
   align-items: center;
   gap: 18px;

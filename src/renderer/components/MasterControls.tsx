@@ -3,42 +3,74 @@ import { audioEngine } from "../audio/audioEngine";
 
 // Meter width maps linearly to amplitude. The track gradient (styles.css) turns
 // yellow at -6 dBFS (amplitude 10^(-6/20) ~= 50.1%) and red at -1 dBFS (~89.1%).
-const CLIP_HOLD_FRAMES = 72; // how long the clip light stays lit (~1.2s)
+const METER_INTERVAL_MS = 1000 / 30;
+const CLIP_HOLD_MS = 1200;
 
 // Stereo final-output level meter: L on top, R on bottom. Each channel polls its
 // own analyser peak, paints a smoothed bar, and lights a clip marker past 0 dBFS.
-function MasterMeter() {
+function MasterMeter({ isActive }: { isActive: boolean }) {
   const maskRefs = [useRef<HTMLDivElement>(null), useRef<HTMLDivElement>(null)];
   const clipRefs = [useRef<HTMLDivElement>(null), useRef<HTMLDivElement>(null)];
 
   useEffect(() => {
-    let frame = 0;
     const smoothed = [0, 0];
-    const clipHold = [0, 0];
+    const clipUntil = [0, 0];
+    const lastMask = [100, 100];
+    const lastLit = [false, false];
+    let timer: number | undefined;
+    const reset = () => {
+      for (let channel = 0; channel < 2; channel++) {
+        smoothed[channel] = 0;
+        clipUntil[channel] = 0;
+        lastMask[channel] = 100;
+        lastLit[channel] = false;
+        const mask = maskRefs[channel].current;
+        if (mask) mask.style.width = "100%";
+        clipRefs[channel].current?.classList.remove("lit");
+      }
+    };
     const tick = () => {
       const levels = audioEngine.getMasterLevels();
       const raw = [levels.left, levels.right];
+      const now = performance.now();
       for (let channel = 0; channel < 2; channel++) {
         const level = raw[channel];
         // Fast attack, slow release keeps the bar readable rather than flickering.
         smoothed[channel] = level > smoothed[channel]
           ? level : smoothed[channel] * 0.82 + level * 0.18;
         const filled = Math.min(1, smoothed[channel]);
+        const maskWidth = (1 - filled) * 100;
         const mask = maskRefs[channel].current;
-        if (mask) mask.style.width = `${(1 - filled) * 100}%`;
-        // A peak at or above 0 dBFS (amplitude >= 1) is a clip; hold the light briefly.
-        if (level >= 1) clipHold[channel] = CLIP_HOLD_FRAMES;
-        else if (clipHold[channel] > 0) clipHold[channel]--;
+        if (mask && Math.abs(maskWidth - lastMask[channel]) >= .1) {
+          mask.style.width = `${maskWidth}%`;
+          lastMask[channel] = maskWidth;
+        }
+        if (level >= 1) clipUntil[channel] = now + CLIP_HOLD_MS;
+        const lit = clipUntil[channel] > now;
         const clip = clipRefs[channel].current;
-        if (clip) clip.classList.toggle("lit", clipHold[channel] > 0);
+        if (clip && lit !== lastLit[channel]) {
+          clip.classList.toggle("lit", lit);
+          lastLit[channel] = lit;
+        }
       }
-      frame = window.requestAnimationFrame(tick);
     };
-    frame = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(frame);
-    // Refs are stable; the effect intentionally runs once.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    const syncTimer = () => {
+      if (timer !== undefined) window.clearInterval(timer);
+      timer = undefined;
+      if (!isActive || document.visibilityState !== "visible") {
+        reset();
+        return;
+      }
+      tick();
+      timer = window.setInterval(tick, METER_INTERVAL_MS);
+    };
+    document.addEventListener("visibilitychange", syncTimer);
+    syncTimer();
+    return () => {
+      document.removeEventListener("visibilitychange", syncTimer);
+      if (timer !== undefined) window.clearInterval(timer);
+    };
+  }, [isActive]);
 
   return <div className="master-meter" title="Final output level (L / R)">
     {["L", "R"].map((label, channel) => <div className="master-meter-row" key={label}>
@@ -102,14 +134,15 @@ function Knob({ label, value, min, max, defaultValue, format, onChange }: {
   </div>;
 }
 
-export function MasterControls({ volume, pan, onVolume, onPan }: {
+export function MasterControls({ volume, pan, isActive, onVolume, onPan }: {
   volume: number;
   pan: number;
+  isActive: boolean;
   onVolume: (value: number) => void;
   onPan: (value: number) => void;
 }) {
   return <div className="master-controls">
-    <MasterMeter />
+    <MasterMeter isActive={isActive} />
     <Knob label="VOL" value={volume} min={0} max={1} defaultValue={1}
       format={(value) => `${Math.round(value * 100)}%`} onChange={onVolume} />
     <Knob label="PAN" value={pan} min={-1} max={1} defaultValue={0}

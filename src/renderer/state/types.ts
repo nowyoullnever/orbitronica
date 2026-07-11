@@ -85,6 +85,11 @@ export type MultiSelection = {
   planetIds: string[];
 };
 
+export type MasterMix = {
+  volume: number;
+  pan: number;
+};
+
 export type ViewportState = {
   zoom: number;
   offsetX: number;
@@ -96,10 +101,12 @@ export type HistorySnapshot = {
   planets: Planet[];
   bars: TriggerBar[];
   selection: Selection;
+  multiSelection: MultiSelection;
+  master: MasterMix;
 };
 
 export type SerializableProject = {
-  schemaVersion: 3;
+  schemaVersion: 4;
   appName: "Orbitonic";
   savedAt: string;
   projectName: string;
@@ -107,6 +114,7 @@ export type SerializableProject = {
   planets: Planet[];
   bars: TriggerBar[];
   lastLoopBarLengthRadians: number;
+  master: MasterMix;
   ui?: Selection;
 };
 

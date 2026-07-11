@@ -35,6 +35,8 @@ class AudioEngine {
   private meterAnalyserR: AnalyserNode | null = null;
   private meterBufferL: Float32Array | null = null;
   private meterBufferR: Float32Array | null = null;
+  private masterVolume = 1;
+  private masterPan = 0;
   private recordingDestination: MediaStreamAudioDestinationNode | null = null;
   private recorder: MediaRecorder | null = null;
   private recordingChunks: Blob[] = [];
@@ -44,6 +46,8 @@ class AudioEngine {
       this.context = new AudioContext();
       this.masterGain = this.context.createGain();
       this.masterPanner = this.context.createStereoPanner();
+      this.masterGain.gain.value = this.masterVolume;
+      this.masterPanner.pan.value = this.masterPan;
       // Final chain: orbit gains -> master volume -> master pan -> output.
       this.masterGain.connect(this.masterPanner);
       this.masterPanner.connect(this.context.destination);
@@ -66,13 +70,17 @@ class AudioEngine {
   }
 
   setMasterVolume(volume: number) {
-    const context = this.getContext();
-    this.masterGain!.gain.setValueAtTime(Math.max(0, volume), context.currentTime);
+    this.masterVolume = Number.isFinite(volume) ? Math.min(1, Math.max(0, volume)) : 1;
+    if (this.context && this.masterGain) {
+      this.masterGain.gain.setValueAtTime(this.masterVolume, this.context.currentTime);
+    }
   }
 
   setMasterPan(pan: number) {
-    const context = this.getContext();
-    this.masterPanner!.pan.setValueAtTime(Math.min(1, Math.max(-1, pan)), context.currentTime);
+    this.masterPan = Number.isFinite(pan) ? Math.min(1, Math.max(-1, pan)) : 0;
+    if (this.context && this.masterPanner) {
+      this.masterPanner.pan.setValueAtTime(this.masterPan, this.context.currentTime);
+    }
   }
 
   private channelPeak(analyser: AnalyserNode | null, buffer: Float32Array | null) {
@@ -561,6 +569,15 @@ class AudioEngine {
     this.rawFiles.delete(orbitId);
     this.orbitGains.get(orbitId)?.disconnect();
     this.orbitGains.delete(orbitId);
+  }
+
+  pruneOrbits(retainedOrbitIds: ReadonlySet<string>) {
+    const candidates = new Set([
+      ...this.buffers.keys(), ...this.rawFiles.keys(), ...this.orbitGains.keys(), ...this.waveformPeaks.keys()
+    ]);
+    for (const orbitId of candidates) {
+      if (!retainedOrbitIds.has(orbitId)) this.removeOrbit(orbitId);
+    }
   }
 }
 

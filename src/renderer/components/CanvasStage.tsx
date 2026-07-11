@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ContextMenuState, MultiSelection, Orbit, Planet, Selection, Tool, TriggerBar, ViewportState } from "../state/types";
 import {
   TAU, ellipsePoint, findNearestOrbit, getPlanetEffectiveSpeed,
@@ -8,6 +8,7 @@ import {
 import { collisionPairKey, hasSweptCircleContact, isAngularlyApproaching } from "../utils/collision";
 import { getLoopBarTransitions } from "../utils/sampleTrim";
 import { angularDistance } from "../utils/triggerDetection";
+import { collectMarqueeSelection } from "../utils/selection";
 import { parseHexColor } from "../utils/color";
 
 const PLANET_RADIUS = 6;
@@ -77,8 +78,8 @@ type HitTestResult =
 type Drag =
   | { type: "resize-orbit"; orbit: Orbit }
   | { type: "move-orbit"; orbit: Orbit; startX: number; startY: number }
-  | { type: "bar-start" | "bar-end"; bar: TriggerBar; orbit: Orbit; fixedAngle: number; acc?: number; prevRaw?: number }
-  | { type: "move-bar"; bar: TriggerBar; orbit: Orbit }
+  | { type: "bar-start" | "bar-end"; bar: TriggerBar; orbit: Orbit; fixedAngle: number; mutated: boolean; acc?: number; prevRaw?: number }
+  | { type: "move-bar"; bar: TriggerBar; orbit: Orbit; mutated: boolean }
   | { type: "splice"; orbit: Orbit }
   | { type: "splice-start"; orbit: Orbit }
   | { type: "marquee"; sx: number; sy: number; x: number; y: number }
@@ -147,12 +148,18 @@ export function CanvasStage(props: Props) {
   const collisionPairCooldowns = useRef(new Map<string, number>());
   const waveformGeometryCache = useRef(new Map<string, WaveformGeometry>());
   const stateRef = useRef(props);
+  const multiSelectionSets = useMemo(() => ({
+    orbitIds: new Set(props.multiSelection.orbitIds),
+    planetIds: new Set(props.multiSelection.planetIds)
+  }), [props.multiSelection.orbitIds, props.multiSelection.planetIds]);
+  const multiSelectionSetsRef = useRef(multiSelectionSets);
   const [drag, setDrag] = useState<Drag | null>(null);
   // Live marquee rectangle (world coords), read by the render loop each frame.
   const marqueeRef = useRef<{ sx: number; sy: number; x: number; y: number } | null>(null);
   // Set when a bar-tool drag begins so the trailing click doesn't also place a new bar.
   const suppressClickRef = useRef(false);
   stateRef.current = props;
+  multiSelectionSetsRef.current = multiSelectionSets;
 
   const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -550,8 +557,8 @@ export function CanvasStage(props: Props) {
       const context = canvas.getContext("2d")!;
       const rect = canvas.getBoundingClientRect();
       const state = stateRef.current;
-      const multiOrbitIds = new Set(state.multiSelection.orbitIds);
-      const multiPlanetIds = new Set(state.multiSelection.planetIds);
+      const multiOrbitIds = multiSelectionSetsRef.current.orbitIds;
+      const multiPlanetIds = multiSelectionSetsRef.current.planetIds;
       context.clearRect(0, 0, rect.width, rect.height);
       context.save();
       context.translate(state.viewport.offsetX, state.viewport.offsetY);
@@ -906,13 +913,14 @@ export function CanvasStage(props: Props) {
     const bar = props.bars.find((item) => item.id === hit.barId)!;
     const orbit = props.orbits.find((item) => item.id === hit.orbitId)!;
     props.onSelect({ orbitId: hit.orbitId, planetId: null, barId: hit.barId });
-    props.onBeginMutation();
-    if (hit.type === "bar-body") setDrag({ type: "move-bar", bar, orbit });
+    if (hit.type === "bar-body") setDrag({ type: "move-bar", bar, orbit, mutated: false });
     else {
       const fixedAngle = hit.edge === "start"
         ? normalizeAngle(bar.angle + bar.lengthRadians / 2)
         : normalizeAngle(bar.angle - bar.lengthRadians / 2);
-      setDrag({ type: hit.edge === "start" ? "bar-start" : "bar-end", bar, orbit, fixedAngle });
+      setDrag({
+        type: hit.edge === "start" ? "bar-start" : "bar-end", bar, orbit, fixedAngle, mutated: false
+      });
     }
   }
 
@@ -1024,6 +1032,9 @@ export function CanvasStage(props: Props) {
       );
     } else if (drag.type === "move-bar") {
       const angle = orbitAngleAtPoint(drag.orbit, point.x, point.y);
+      if (angularDistance(angle, drag.bar.angle) <= .0001) return;
+      if (!drag.mutated) props.onBeginMutation();
+      setDrag({ ...drag, mutated: true });
       props.onEditBar(
         drag.bar.id, angle, drag.bar.lengthRadians,
         normalizeAngle(angle - drag.bar.lengthRadians / 2)
@@ -1042,7 +1053,12 @@ export function CanvasStage(props: Props) {
         : normalizeAngle(drag.fixedAngle - mouseAngle);
       const acc = unwrapLength(drag.acc, drag.prevRaw, raw);
       const length = clampBarLength(acc);
-      setDrag({ ...drag, acc, prevRaw: raw });
+      if (Math.abs(length - drag.bar.lengthRadians) <= .0001) {
+        setDrag({ ...drag, acc, prevRaw: raw });
+        return;
+      }
+      if (!drag.mutated) props.onBeginMutation();
+      setDrag({ ...drag, acc, prevRaw: raw, mutated: true });
       if (drag.type === "bar-end") {
         props.onEditBar(
           drag.bar.id, normalizeAngle(drag.fixedAngle + length / 2),
@@ -1075,26 +1091,7 @@ export function CanvasStage(props: Props) {
       props.onBarLengthEditEnd(drag.bar.id, current?.lengthRadians ?? drag.bar.lengthRadians);
     }
     if (drag?.type === "marquee") {
-      const x0 = Math.min(drag.sx, drag.x), x1 = Math.max(drag.sx, drag.x);
-      const y0 = Math.min(drag.sy, drag.y), y1 = Math.max(drag.sy, drag.y);
-      const orbitIds: string[] = [];
-      const planetIds: string[] = [];
-      // Orbits qualify only when their whole bounding box is inside the box.
-      for (const orbit of props.orbits) {
-        if (orbit.x - orbit.radiusX >= x0 && orbit.x + orbit.radiusX <= x1 &&
-          orbit.y - orbit.radiusY >= y0 && orbit.y + orbit.radiusY <= y1) {
-          orbitIds.push(orbit.id);
-        }
-      }
-      // Planets qualify when their center falls inside the box.
-      for (const planet of props.planets) {
-        const orbit = props.orbits.find((item) => item.id === planet.orbitId);
-        if (!orbit) continue;
-        const center = ellipsePoint(orbit, planet.angle);
-        if (center.x >= x0 && center.x <= x1 && center.y >= y0 && center.y <= y1) {
-          planetIds.push(planet.id);
-        }
-      }
+      const { orbitIds, planetIds } = collectMarqueeSelection(props.orbits, props.planets, drag);
       props.onMarqueeSelect(orbitIds, planetIds);
       marqueeRef.current = null;
     }

@@ -1,9 +1,18 @@
-import type { Orbit, Planet, Selection, SerializableProject, TriggerBar } from "../state/types";
+import type { MasterMix, Orbit, Planet, Selection, SerializableProject, TriggerBar } from "../state/types";
 import { normalizeSampleWindow } from "../utils/sampleTrim.ts";
 
 function serializeOrbit(orbit: Orbit): Orbit {
   const window = normalizeSampleWindow(orbit.audioDuration, orbit.sampleStart, orbit.sampleEnd);
   return { ...orbit, sampleStart: window.start, sampleEnd: window.end };
+}
+
+export function normalizeMasterMix(master?: Partial<MasterMix> | null): MasterMix {
+  const volume = typeof master?.volume === "number" && Number.isFinite(master.volume) ? master.volume : 1;
+  const pan = typeof master?.pan === "number" && Number.isFinite(master.pan) ? master.pan : 0;
+  return {
+    volume: Math.min(1, Math.max(0, volume)),
+    pan: Math.min(1, Math.max(-1, pan))
+  };
 }
 
 export function serializeProject(
@@ -12,10 +21,11 @@ export function serializeProject(
   planets: Planet[],
   bars: TriggerBar[],
   lastLoopBarLengthRadians: number,
-  selection: Selection
+  selection: Selection,
+  master: MasterMix
 ): SerializableProject {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     appName: "Orbitonic",
     savedAt: new Date().toISOString(),
     projectName,
@@ -36,17 +46,18 @@ export function serializeProject(
     // belong in the durable project state.
     bars: bars.filter((bar) => bar.source !== "splice").map((bar) => ({ ...bar })),
     lastLoopBarLengthRadians,
+    master: normalizeMasterMix(master),
     ui: { ...selection }
   };
 }
 
 export function parseProject(text: string): SerializableProject {
-  const parsed = JSON.parse(text) as Partial<SerializableProject>;
+  const parsed = JSON.parse(text) as Partial<SerializableProject> & { master?: Partial<MasterMix> | null };
   if (!Array.isArray(parsed.orbits) || !Array.isArray(parsed.planets) || !Array.isArray(parsed.bars)) {
     throw new Error("This file is not a valid Orbitonic project.");
   }
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     appName: "Orbitonic",
     savedAt: parsed.savedAt ?? new Date().toISOString(),
     projectName: parsed.projectName ?? "Untitled Session",
@@ -56,6 +67,7 @@ export function parseProject(text: string): SerializableProject {
     planets: parsed.planets,
     bars: parsed.bars,
     lastLoopBarLengthRadians: parsed.lastLoopBarLengthRadians ?? Math.PI / 12,
+    master: normalizeMasterMix(parsed.master),
     ui: parsed.ui
   };
 }
