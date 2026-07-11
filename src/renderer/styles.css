@@ -278,6 +278,13 @@ button { color: inherit; }
 }
 input[type="range"] { width: 100%; accent-color: #292a25; }
 input[type="range"]:disabled { opacity: .35; }
+.audio-pan-control { margin-bottom: 18px; }
+.audio-pan-control label { margin-bottom: 8px; }
+.audio-pan-number {
+  width: 100%; height: 28px; padding: 0 8px; border: 1px solid #cccbc4; border-radius: 3px;
+  background: #f8f7f2; color: #292a25; font: 10px "MapoFlowerIsland", sans-serif;
+}
+.audio-pan-error { display: block; margin-top: 5px; color: #a9443f; font: 7px "MapoFlowerIsland", sans-serif; letter-spacing: .03em; }
 .orbit-status {
   flex: 0 0 auto; margin: -8px 0 24px; padding: 10px 0;
   border-top: 1px solid #d7d6d0; border-bottom: 1px solid #d7d6d0;

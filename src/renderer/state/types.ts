@@ -20,6 +20,7 @@ export type Orbit = {
   sampleEnd?: number;
   mode: OrbitMode;
   volume: number;
+  audioPan: number;
   isPaused: boolean;
   isMuted: boolean;
   isSolo: boolean;
@@ -46,6 +47,7 @@ export type Planet = {
   speedProcessRequestId?: string;
   speedProcessingError?: string;
   volume: number;
+  audioPan: number;
   pitchCents: number;
   pendingPitchCents?: number;
   isPitchProcessing?: boolean;

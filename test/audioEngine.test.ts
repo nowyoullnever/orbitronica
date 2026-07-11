@@ -4,6 +4,7 @@ import test from "node:test";
 class FakeParam {
   value = 0;
   setValueAtTime(value: number) { this.value = value; }
+  setTargetAtTime(value: number) { this.value = value; }
 }
 
 class FakeNode {
@@ -38,6 +39,7 @@ class FakeAudioContext {
   }
   createMediaStreamDestination() { return Object.assign(new FakeNode(), { stream: {} }); }
   createChannelSplitter() { return new FakeNode(); }
+  createChannelMerger() { return new FakeNode(); }
   createAnalyser() { return new FakeAnalyser(); }
   async decodeAudioData() { return { length: 0, numberOfChannels: 0 }; }
   async resume() { this.state = "running"; }

@@ -14,11 +14,16 @@ test("persists only manual bars because splice bars are derived", () => {
   assert.deepEqual(project.bars.map((bar) => bar.id), ["manual"]);
 });
 
+test("loads older projects without audio pan at center", () => {
+  const project = parseProject(JSON.stringify({ orbits: [], planets: [{}], bars: [] }));
+  assert.equal(project.planets[0].audioPan, 0);
+});
+
 test("round-trips master mix and waveform visibility", () => {
   const orbit: Orbit = {
     id: "orbit", name: "Orbit", audioName: "sample.wav", x: 10, y: 20,
     radiusX: 100, radiusY: 80, initialRadiusX: 100, initialRadiusY: 80,
-    audioDuration: 2, mode: "loop", volume: 1, isPaused: false, isMuted: false,
+    audioDuration: 2, mode: "loop", volume: 1, audioPan: 0, isPaused: false, isMuted: false,
     isSolo: false, color: "#000", sequenceRetriggerMode: "overlap", showWaveform: false
   };
   const serialized = serializeProject("mix", [orbit, { ...orbit, id: "legacy", showWaveform: undefined }], [], [],
