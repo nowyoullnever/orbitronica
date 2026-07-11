@@ -38,7 +38,7 @@ const COLLISION_SLOWDOWN = .4;
 const COLLISION_COOLDOWN_SECONDS = .25;
 const COLLISION_RECOVERY_RATE = 2.5;
 const COLLISION_FLASH_SECONDS = .12;
-const MIN_VIEWPORT_ZOOM = .15;
+const ABSOLUTE_MIN_VIEWPORT_ZOOM = .1;
 const MAX_VIEWPORT_ZOOM = 4;
 const DEFAULT_WORLD_WIDTH = 4000;
 const DEFAULT_WORLD_HEIGHT = 3000;
@@ -144,18 +144,42 @@ export function CanvasStage(props: Props) {
 
   const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
+  function getFitToWorkspaceZoom(canvasWidth: number, canvasHeight: number) {
+    if (canvasWidth <= 0 || canvasHeight <= 0) return ABSOLUTE_MIN_VIEWPORT_ZOOM;
+    return Math.min(canvasWidth / DEFAULT_WORLD_WIDTH, canvasHeight / DEFAULT_WORLD_HEIGHT);
+  }
+
+  function getDynamicMinZoom() {
+    const canvas = canvasRef.current;
+    if (!canvas) return ABSOLUTE_MIN_VIEWPORT_ZOOM;
+    const rect = canvas.getBoundingClientRect();
+    return Math.max(ABSOLUTE_MIN_VIEWPORT_ZOOM, getFitToWorkspaceZoom(rect.width, rect.height));
+  }
+
   function clampViewport(viewport: ViewportState) {
     const canvas = canvasRef.current;
-    if (!canvas) return viewport;
+    if (!canvas) {
+      return {
+        zoom: clamp(viewport.zoom, ABSOLUTE_MIN_VIEWPORT_ZOOM, MAX_VIEWPORT_ZOOM),
+        offsetX: viewport.offsetX,
+        offsetY: viewport.offsetY
+      };
+    }
     const rect = canvas.getBoundingClientRect();
-    const worldScreenWidth = DEFAULT_WORLD_WIDTH * viewport.zoom;
-    const worldScreenHeight = DEFAULT_WORLD_HEIGHT * viewport.zoom;
-    const minOffsetX = Math.min(0, rect.width - worldScreenWidth);
-    const minOffsetY = Math.min(0, rect.height - worldScreenHeight);
+    const minZoom = Math.max(ABSOLUTE_MIN_VIEWPORT_ZOOM, getFitToWorkspaceZoom(rect.width, rect.height));
+    const zoom = clamp(viewport.zoom, minZoom, MAX_VIEWPORT_ZOOM);
+    const worldScreenWidth = DEFAULT_WORLD_WIDTH * zoom;
+    const worldScreenHeight = DEFAULT_WORLD_HEIGHT * zoom;
+    const offsetX = worldScreenWidth <= rect.width
+      ? (rect.width - worldScreenWidth) / 2
+      : clamp(viewport.offsetX, rect.width - worldScreenWidth, 0);
+    const offsetY = worldScreenHeight <= rect.height
+      ? (rect.height - worldScreenHeight) / 2
+      : clamp(viewport.offsetY, rect.height - worldScreenHeight, 0);
     return {
-      zoom: clamp(viewport.zoom, MIN_VIEWPORT_ZOOM, MAX_VIEWPORT_ZOOM),
-      offsetX: clamp(viewport.offsetX, minOffsetX, 0),
-      offsetY: clamp(viewport.offsetY, minOffsetY, 0)
+      zoom,
+      offsetX,
+      offsetY
     };
   }
 
@@ -169,7 +193,7 @@ export function CanvasStage(props: Props) {
   function zoomViewportAtLocalPoint(localX: number, localY: number, factor: number) {
     const viewport = stateRef.current.viewport;
     const oldZoom = viewport.zoom;
-    const newZoom = clamp(oldZoom * factor, MIN_VIEWPORT_ZOOM, MAX_VIEWPORT_ZOOM);
+    const newZoom = clamp(oldZoom * factor, getDynamicMinZoom(), MAX_VIEWPORT_ZOOM);
     if (Math.abs(newZoom - oldZoom) < .0001) return;
     const worldX = (localX - viewport.offsetX) / oldZoom;
     const worldY = (localY - viewport.offsetY) / oldZoom;
@@ -188,7 +212,7 @@ export function CanvasStage(props: Props) {
   }
 
   function resetViewportZoom() {
-    props.onViewportChange({ zoom: 1, offsetX: 0, offsetY: 0 });
+    props.onViewportChange(clampViewport({ zoom: 1, offsetX: 0, offsetY: 0 }));
   }
 
   useEffect(() => {
@@ -200,6 +224,7 @@ export function CanvasStage(props: Props) {
       canvas.width = Math.round(rect.width * ratio);
       canvas.height = Math.round(rect.height * ratio);
       context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      props.onViewportChange(clampViewport(stateRef.current.viewport));
     };
     resize();
     const observer = new ResizeObserver(resize);
@@ -842,18 +867,18 @@ export function CanvasStage(props: Props) {
     return Math.cos(angle) * Math.sin(angle) >= 0 ? "nwse-resize" : "nesw-resize";
   }
 
-  function cursorFor(hit: HitTestResult, x: number, y: number) {
-    if (drag?.type === "pan-viewport") return "grabbing";
-    if (drag?.type === "splice") return "ns-resize";
-    if (drag?.type === "splice-start") return "grabbing";
+  function cursorFor(hit: HitTestResult, x: number, y: number, activeDrag = drag) {
+    if (activeDrag?.type === "pan-viewport") return "grabbing";
+    if (activeDrag?.type === "splice") return "ns-resize";
+    if (activeDrag?.type === "splice-start") return "grabbing";
     if (props.selectedTool === "splicer") {
       if (orbitAtSpliceStart(x, y)) return "grab";
       return orbitAtSpliceHandle(x, y) ? "ns-resize" : "crosshair";
     }
-    if (drag?.type === "move-orbit") return "move";
-    if (drag?.type === "move-bar") return "grabbing";
-    if (drag?.type === "resize-orbit") return orbitResizeCursor(drag.orbit, x, y);
-    if (drag) return "ew-resize";
+    if (activeDrag?.type === "move-orbit") return "move";
+    if (activeDrag?.type === "move-bar") return "grabbing";
+    if (activeDrag?.type === "resize-orbit") return orbitResizeCursor(activeDrag.orbit, x, y);
+    if (activeDrag) return "ew-resize";
     if (hit.type === "planet") return "pointer";
     if (hit.type === "bar-edge") return "ew-resize";
     if (hit.type === "bar-body") return "grab";
@@ -862,7 +887,7 @@ export function CanvasStage(props: Props) {
       return orbit ? orbitResizeCursor(orbit, x, y) : "ew-resize";
     }
     if (hit.type === "orbit-inside") return "move";
-    return props.selectedTool === "select" ? "default" : "crosshair";
+    return props.selectedTool === "select" ? "grab" : "crosshair";
   }
 
   function handleMouseDown(event: React.MouseEvent<HTMLCanvasElement>) {
@@ -899,7 +924,8 @@ export function CanvasStage(props: Props) {
       return;
     }
     if (props.selectedTool !== "select") return;
-    const point = screenToWorld(localPoint(event));
+    const screenPoint = localPoint(event);
+    const point = screenToWorld(screenPoint);
     const hit = hitTestCanvas(point.x, point.y);
     if (hit.type === "planet") {
       props.onSelect({ orbitId: hit.orbitId, planetId: hit.planetId, barId: null });
@@ -934,6 +960,9 @@ export function CanvasStage(props: Props) {
       return;
     }
     props.onSelect({ orbitId: null, planetId: null, barId: null });
+    event.preventDefault();
+    setDrag({ type: "pan-viewport", startX: screenPoint.x, startY: screenPoint.y, viewport: stateRef.current.viewport });
+    event.currentTarget.style.cursor = "grabbing";
   }
 
   function handleMouseMove(event: React.MouseEvent<HTMLCanvasElement>) {
@@ -1017,7 +1046,11 @@ export function CanvasStage(props: Props) {
       onClick={handleClick}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
-      onMouseUp={(event) => { finishDrag(); event.currentTarget.style.cursor = "default"; }}
+      onMouseUp={(event) => {
+        finishDrag();
+        const point = screenToWorld(localPoint(event));
+        event.currentTarget.style.cursor = cursorFor(hitTestCanvas(point.x, point.y), point.x, point.y, null);
+      }}
       onMouseLeave={finishDrag}
       onContextMenu={(event) => {
         event.preventDefault();
