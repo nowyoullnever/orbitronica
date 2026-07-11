@@ -15,9 +15,15 @@ test("FL-style pan preserves stereo at center and collects both channels at hard
   assert.deepEqual(apply(getFLStylePanMatrix(-100), 2, 3), { left: 5, right: 0 });
 });
 
-test("orbit and planet FL-style pans are applied sequentially rather than summed", () => {
-  const orbitPanned = apply(getFLStylePanMatrix(100), 2, 3);
-  assert.deepEqual(apply(getFLStylePanMatrix(-100), orbitPanned.left, orbitPanned.right), { left: 5, right: 0 });
-  const leftPanned = apply(getFLStylePanMatrix(-100), 2, 3);
-  assert.deepEqual(apply(getFLStylePanMatrix(100), leftPanned.left, leftPanned.right), { left: 0, right: 5 });
+test("planet pan is applied before the shared orbit-bus pan, rather than summed", () => {
+  const planetPanned = apply(getFLStylePanMatrix(-50), 2, 3);
+  const final = apply(getFLStylePanMatrix(50), planetPanned.left, planetPanned.right);
+  assert.deepEqual(final, { left: 1.75, right: 3.25 });
+  // Reversing these stages is a different result, proving their values are not added.
+  const orbitFirst = apply(getFLStylePanMatrix(50), 2, 3);
+  const wrongOrder = apply(getFLStylePanMatrix(-50), orbitFirst.left, orbitFirst.right);
+  assert.notDeepEqual(final, wrongOrder);
+
+  const hardPlanetLeft = apply(getFLStylePanMatrix(-100), 2, 3);
+  assert.deepEqual(apply(getFLStylePanMatrix(100), hardPlanetLeft.left, hardPlanetLeft.right), { left: 0, right: 5 });
 });

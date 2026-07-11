@@ -170,6 +170,7 @@ export default function App() {
     setSelection(next.selection);
     for (const orbit of next.orbits) {
       audioEngine.setVolume(orbit.id, orbit.volume);
+      audioEngine.setOrbitAudioPan(orbit.id, orbit.audioPan);
       // A snapshot can alter a trim window while the native source is looping.
       // Sources cannot change loopStart/loopEnd in place, so reconcile on next frame.
       audioEngine.stopAllActivePlaybacksForOrbit(orbit.id);
@@ -291,6 +292,7 @@ export default function App() {
       ...source, id: newOrbitId, name: `${source.name} Copy`, x: source.x + 40, y: source.y + 40,
       isMuted: false, isSolo: false
     };
+    audioEngine.setOrbitAudioPan(newOrbitId, duplicate.audioPan);
     const planetIdMap = new Map<string, string>();
     const copiedPlanets = stateRef.current.planets.filter((planet) => planet.orbitId === source.id).map((planet) => {
       const newId = id();
@@ -564,6 +566,7 @@ export default function App() {
           const buffer = await audioEngine.decodeBytes(orbit.id, orbit.audioName, asset.bytes, orbit.volume);
           orbit.audioDuration = buffer.duration;
           orbit.isMissingAudio = false;
+          audioEngine.setOrbitAudioPan(orbit.id, orbit.audioPan);
         } else {
           orbit.isMissingAudio = true;
           missing.push(asset?.error ?? orbit.audioPath ?? orbit.audioName);
@@ -860,7 +863,7 @@ export default function App() {
           audioEngine.syncLoop(
             orbit.id, planet.id, bar.id, inside && canOrbitSound(orbit.id),
             getSampleStart(orbit) + angle / TAU * getSampleDuration(orbit), planet.volume,
-            orbit.audioPan, planet.audioPan,
+            planet.audioPan,
             getTapeStyleRuntimeRateOnly(orbit, planet), planet.speed, planet.pitchCents,
             planet.direction === -1, getSampleStart(orbit), getSampleEnd(orbit)
           );
@@ -868,7 +871,7 @@ export default function App() {
         onSequencePlay={(orbit, planet, bar) => {
           if (!canOrbitSound(orbit.id)) return;
           audioEngine.triggerSequence(
-            orbit.id, planet.id, bar.id, planet.volume, orbit.audioPan, planet.audioPan, 1, planet.pitchCents,
+            orbit.id, planet.id, bar.id, planet.volume, planet.audioPan, 1, planet.pitchCents,
             planet.direction === -1, orbit.sequenceRetriggerMode,
             getSampleStart(orbit), getSampleEnd(orbit)
           );
@@ -944,7 +947,7 @@ export default function App() {
       onOrbitAudioPan={(audioPan) => {
         if (!selectedOrbit) return;
         pushParameterHistory();
-        audioEngine.setActiveOrbitAudioPan(selectedOrbit.id, audioPan);
+        audioEngine.setOrbitAudioPan(selectedOrbit.id, audioPan);
         setOrbits((current) => current.map((orbit) =>
           orbit.id === selectedOrbit.id ? { ...orbit, audioPan } : orbit));
       }}

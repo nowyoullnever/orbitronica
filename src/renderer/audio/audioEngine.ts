@@ -8,13 +8,18 @@ type ActivePlayback = {
   planetId: string;
   barId: string;
   source: AudioBufferSourceNode;
-  gainNode: GainNode;
-  orbitPanNode: FLStylePanNode;
+  planetGainNode: GainNode;
   planetPanNode: FLStylePanNode;
   mode: "loop" | "sequence";
   isReverse: boolean;
   loopWindowStart?: number;
   loopWindowEnd?: number;
+};
+
+type OrbitAudioRuntime = {
+  input: GainNode;
+  panNode: FLStylePanNode;
+  gainNode: GainNode;
 };
 
 type WaveformListener = (orbitId: string, peaks: Float32Array | null) => void;
@@ -29,7 +34,7 @@ class AudioEngine {
   private processedBuffers = new Map<string, AudioBuffer>();
   private reverseBuffers = new Map<string, AudioBuffer>();
   private rawFiles = new Map<string, { fileName: string; bytes: Uint8Array }>();
-  private orbitGains = new Map<string, GainNode>();
+  private orbitRuntimes = new Map<string, OrbitAudioRuntime>();
   private active = new Map<string, ActivePlayback>();
   private masterGain: GainNode | null = null;
   private recordingDestination: MediaStreamAudioDestinationNode | null = null;
@@ -75,10 +80,14 @@ class AudioEngine {
     this.waveformPeaks.delete(orbitId);
     this.publishWaveformPeaks(orbitId, null);
     void this.cacheWaveformPeaks(orbitId, buffer);
-    const gain = context.createGain();
-    gain.gain.value = volume;
-    gain.connect(this.masterGain!);
-    this.orbitGains.set(orbitId, gain);
+    const input = context.createGain();
+    const panNode = createFLStylePanNode(context, 2, 0);
+    const gainNode = context.createGain();
+    gainNode.gain.value = volume;
+    input.connect(panNode.input);
+    panNode.output.connect(gainNode);
+    gainNode.connect(this.masterGain!);
+    this.orbitRuntimes.set(orbitId, { input, panNode, gainNode });
   }
 
   duplicateOrbitAudio(sourceOrbitId: string, newOrbitId: string, volume = 1) {
@@ -147,8 +156,8 @@ class AudioEngine {
   }
 
   setVolume(orbitId: string, volume: number) {
-    const gain = this.orbitGains.get(orbitId);
-    if (gain) gain.gain.setValueAtTime(volume, this.getContext().currentTime);
+    const runtime = this.orbitRuntimes.get(orbitId);
+    if (runtime) runtime.gainNode.gain.setValueAtTime(volume, this.getContext().currentTime);
   }
 
   private normalizedSpeed(speed: number) {
@@ -186,13 +195,13 @@ class AudioEngine {
 
   private createPlayback(
     id: string, orbitId: string, planetId: string, barId: string,
-    mode: "loop" | "sequence", planetVolume: number, orbitAudioPan: number, planetAudioPan: number, tapeRate = 1,
+    mode: "loop" | "sequence", planetVolume: number, planetAudioPan: number, tapeRate = 1,
     userSpeed = 1, pitchCents = 0, reverse = false
   ) {
     const context = this.getContext();
     const resolved = this.getPlaybackBuffer(orbitId, planetId, userSpeed, pitchCents);
-    const orbitGain = this.orbitGains.get(orbitId);
-    if (!resolved || !orbitGain) return null;
+    const orbitRuntime = this.orbitRuntimes.get(orbitId);
+    if (!resolved || !orbitRuntime) return null;
     let playbackBuffer = resolved.buffer;
     if (reverse) {
       const reverseKey = `${resolved.key}:reverse`;
@@ -200,25 +209,22 @@ class AudioEngine {
     }
     const source = context.createBufferSource();
     const planetGain = context.createGain();
-    const orbitPanNode = createFLStylePanNode(context, playbackBuffer.numberOfChannels, orbitAudioPan);
-    const planetPanNode = createFLStylePanNode(context, 2, planetAudioPan);
+    const planetPanNode = createFLStylePanNode(context, playbackBuffer.numberOfChannels, planetAudioPan);
     source.buffer = playbackBuffer;
     // User speed is rendered into the processed buffer to preserve pitch.
     // playbackRate is intentionally limited to immediate tape-style runtime effects.
     source.playbackRate.value = tapeRate;
     planetGain.gain.value = planetVolume;
-    source.connect(orbitPanNode.input);
-    orbitPanNode.output.connect(planetPanNode.input);
+    source.connect(planetPanNode.input);
     planetPanNode.output.connect(planetGain);
-    planetGain.connect(orbitGain);
+    planetGain.connect(orbitRuntime.input);
     const playback: ActivePlayback = {
-      id, orbitId, planetId, barId, source, gainNode: planetGain, orbitPanNode, planetPanNode, mode, isReverse: reverse
+      id, orbitId, planetId, barId, source, planetGainNode: planetGain, planetPanNode, mode, isReverse: reverse
     };
     this.active.set(id, playback);
     source.onended = () => {
       if (this.active.get(id)?.source === source) this.active.delete(id);
       try { planetGain.disconnect(); } catch { /* disconnected */ }
-      orbitPanNode.disconnect();
       planetPanNode.disconnect();
     };
     return {
@@ -244,7 +250,7 @@ class AudioEngine {
 
   syncLoop(
     orbitId: string, planetId: string, barId: string, inside: boolean,
-    audioTime: number, planetVolume: number, orbitAudioPan: number, planetAudioPan: number,
+    audioTime: number, planetVolume: number, planetAudioPan: number,
     tapeRate: number, userSpeed: number, pitchCents: number,
     reverse = false, sampleStart = 0, sampleEnd = Infinity
   ) {
@@ -267,13 +273,13 @@ class AudioEngine {
       if (current.isReverse !== reverse || current.loopWindowStart !== loopStart || current.loopWindowEnd !== loopEnd) {
         this.stopPlayback(key);
       } else {
-        current.gainNode.gain.setValueAtTime(planetVolume, this.getContext().currentTime);
+        current.planetGainNode.gain.setValueAtTime(planetVolume, this.getContext().currentTime);
         current.source.playbackRate.setValueAtTime(tapeRate, this.getContext().currentTime);
         return;
       }
     }
     const created = this.createPlayback(
-      key, orbitId, planetId, barId, "loop", planetVolume, orbitAudioPan, planetAudioPan,
+      key, orbitId, planetId, barId, "loop", planetVolume, planetAudioPan,
       tapeRate, userSpeed, pitchCents, reverse
     );
     if (!created) return;
@@ -306,7 +312,7 @@ class AudioEngine {
   }
 
   triggerSequence(
-    orbitId: string, planetId: string, barId: string, planetVolume: number, orbitAudioPan: number, planetAudioPan: number,
+    orbitId: string, planetId: string, barId: string, planetVolume: number, planetAudioPan: number,
     tapeRate: number, pitchCents: number, reverse: boolean,
     retriggerMode: SequenceRetriggerMode, sampleStart = 0, sampleEnd = Infinity
   ) {
@@ -314,7 +320,7 @@ class AudioEngine {
     if (retriggerMode === "cut-previous") this.stopActiveSequencePlaybacksForOrbit(orbitId);
     const id = `sequence:${planetId}:${barId}:${crypto.randomUUID()}`;
     const created = this.createPlayback(
-      id, orbitId, planetId, barId, "sequence", planetVolume, orbitAudioPan, planetAudioPan,
+      id, orbitId, planetId, barId, "sequence", planetVolume, planetAudioPan,
       tapeRate, 1, pitchCents, reverse
     );
     if (created) {
@@ -339,8 +345,7 @@ class AudioEngine {
     if (!playback) return;
     this.active.delete(id);
     try { playback.source.stop(); } catch { /* already stopped */ }
-    try { playback.gainNode.disconnect(); } catch { /* disconnected */ }
-    playback.orbitPanNode.disconnect();
+    try { playback.planetGainNode.disconnect(); } catch { /* disconnected */ }
     playback.planetPanNode.disconnect();
   }
 
@@ -387,14 +392,12 @@ class AudioEngine {
   setActivePlanetVolume(planetId: string, volume: number) {
     const context = this.getContext();
     for (const playback of this.active.values()) {
-      if (playback.planetId === planetId) playback.gainNode.gain.setValueAtTime(volume, context.currentTime);
+      if (playback.planetId === planetId) playback.planetGainNode.gain.setValueAtTime(volume, context.currentTime);
     }
   }
 
-  setActiveOrbitAudioPan(orbitId: string, audioPan: number) {
-    for (const playback of this.active.values()) {
-      if (playback.orbitId === orbitId) playback.orbitPanNode.setPan(audioPan);
-    }
+  setOrbitAudioPan(orbitId: string, audioPan: number) {
+    this.orbitRuntimes.get(orbitId)?.panNode.setPan(audioPan);
   }
 
   setActivePlanetAudioPan(planetId: string, audioPan: number) {
@@ -534,8 +537,13 @@ class AudioEngine {
       if (key.startsWith(`${orbitId}:`)) this.reverseBuffers.delete(key);
     }
     this.rawFiles.delete(orbitId);
-    this.orbitGains.get(orbitId)?.disconnect();
-    this.orbitGains.delete(orbitId);
+    const runtime = this.orbitRuntimes.get(orbitId);
+    if (runtime) {
+      try { runtime.input.disconnect(); } catch { /* already disconnected */ }
+      runtime.panNode.disconnect();
+      try { runtime.gainNode.disconnect(); } catch { /* already disconnected */ }
+    }
+    this.orbitRuntimes.delete(orbitId);
   }
 }
 
