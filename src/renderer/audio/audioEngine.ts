@@ -1,6 +1,6 @@
 import { SimpleFilter, SoundTouch, WebAudioBufferSource } from "soundtouchjs";
 import type { SequenceRetriggerMode } from "../state/types";
-import { createFLStylePanNode, type FLStylePanNode } from "./flStylePan";
+import { createFLStylePanNode, type FLStylePanNode } from "./flStylePan.ts";
 
 type ActivePlayback = {
   id: string;
@@ -37,6 +37,14 @@ class AudioEngine {
   private orbitRuntimes = new Map<string, OrbitAudioRuntime>();
   private active = new Map<string, ActivePlayback>();
   private masterGain: GainNode | null = null;
+  private masterPanner: StereoPannerNode | null = null;
+  private meterSplitter: ChannelSplitterNode | null = null;
+  private meterAnalyserL: AnalyserNode | null = null;
+  private meterAnalyserR: AnalyserNode | null = null;
+  private meterBufferL: Float32Array | null = null;
+  private meterBufferR: Float32Array | null = null;
+  private masterVolume = 1;
+  private masterPan = 0;
   private recordingDestination: MediaStreamAudioDestinationNode | null = null;
   private recorder: MediaRecorder | null = null;
   private recordingChunks: Blob[] = [];
@@ -45,11 +53,62 @@ class AudioEngine {
     if (!this.context) {
       this.context = new AudioContext();
       this.masterGain = this.context.createGain();
-      this.masterGain.connect(this.context.destination);
+      this.masterPanner = this.context.createStereoPanner();
+      this.masterGain.gain.value = this.masterVolume;
+      this.masterPanner.pan.value = this.masterPan;
+      // Final chain: orbit gains -> master volume -> master pan -> output.
+      this.masterGain.connect(this.masterPanner);
+      this.masterPanner.connect(this.context.destination);
       this.recordingDestination = this.context.createMediaStreamDestination();
-      this.masterGain.connect(this.recordingDestination);
+      this.masterPanner.connect(this.recordingDestination);
+      // Metering tap: split the final stereo signal so L/R are measured separately.
+      // Analysers are read-only taps, so their outputs stay unconnected.
+      this.meterSplitter = this.context.createChannelSplitter(2);
+      this.meterAnalyserL = this.context.createAnalyser();
+      this.meterAnalyserR = this.context.createAnalyser();
+      this.meterAnalyserL.fftSize = 1024;
+      this.meterAnalyserR.fftSize = 1024;
+      this.masterPanner.connect(this.meterSplitter);
+      this.meterSplitter.connect(this.meterAnalyserL, 0);
+      this.meterSplitter.connect(this.meterAnalyserR, 1);
+      this.meterBufferL = new Float32Array(this.meterAnalyserL.fftSize);
+      this.meterBufferR = new Float32Array(this.meterAnalyserR.fftSize);
     }
     return this.context;
+  }
+
+  setMasterVolume(volume: number) {
+    this.masterVolume = Number.isFinite(volume) ? Math.min(1, Math.max(0, volume)) : 1;
+    if (this.context && this.masterGain) {
+      this.masterGain.gain.setValueAtTime(this.masterVolume, this.context.currentTime);
+    }
+  }
+
+  setMasterPan(pan: number) {
+    this.masterPan = Number.isFinite(pan) ? Math.min(1, Math.max(-1, pan)) : 0;
+    if (this.context && this.masterPanner) {
+      this.masterPanner.pan.setValueAtTime(this.masterPan, this.context.currentTime);
+    }
+  }
+
+  private channelPeak(analyser: AnalyserNode | null, buffer: Float32Array | null) {
+    if (!analyser || !buffer) return 0;
+    analyser.getFloatTimeDomainData(buffer);
+    let peak = 0;
+    for (let index = 0; index < buffer.length; index++) {
+      const value = Math.abs(buffer[index]);
+      if (value > peak) peak = value;
+    }
+    return peak;
+  }
+
+  // Raw per-channel peak amplitudes of the final output. Values are NOT clamped:
+  // a peak above 1 means the signal crossed 0 dBFS, which the meter shows as a clip.
+  getMasterLevels() {
+    return {
+      left: this.channelPeak(this.meterAnalyserL, this.meterBufferL),
+      right: this.channelPeak(this.meterAnalyserR, this.meterBufferR)
+    };
   }
 
   async resume() {
@@ -544,6 +603,15 @@ class AudioEngine {
       try { runtime.gainNode.disconnect(); } catch { /* already disconnected */ }
     }
     this.orbitRuntimes.delete(orbitId);
+  }
+
+  pruneOrbits(retainedOrbitIds: ReadonlySet<string>) {
+    const candidates = new Set([
+      ...this.buffers.keys(), ...this.rawFiles.keys(), ...this.orbitRuntimes.keys(), ...this.waveformPeaks.keys()
+    ]);
+    for (const orbitId of candidates) {
+      if (!retainedOrbitIds.has(orbitId)) this.removeOrbit(orbitId);
+    }
   }
 }
 

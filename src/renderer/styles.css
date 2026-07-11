@@ -52,11 +52,137 @@ button { color: inherit; }
   letter-spacing: .17em;
   font-weight: 500;
 }
-.topline small { margin-left: 18px; color: #989890; font: 9px "MapoFlowerIsland", sans-serif; letter-spacing: .12em; }
-.topline i { margin-left: auto; font: normal 9px "MapoFlowerIsland", sans-serif; letter-spacing: .12em; color: #999; }
-.topline i::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #aaa; margin-right: 7px; }
-.topline i.live { color: #3d6e51; }
-.topline i.live::before { background: #4b9967; box-shadow: 0 0 0 3px #d9eadf; }
+.topline small {
+  min-width: 0;
+  margin-left: 18px;
+  overflow: hidden;
+  color: #989890;
+  font: 9px "MapoFlowerIsland", sans-serif;
+  letter-spacing: .12em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topline-status {
+  flex: none;
+  margin-left: auto;
+  font: normal 9px "MapoFlowerIsland", sans-serif;
+  letter-spacing: .12em;
+  color: #999;
+}
+.topline-status::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #aaa;
+  margin-right: 7px;
+}
+.topline-status.live { color: #3d6e51; }
+.topline-status.live::before { background: #4b9967; box-shadow: 0 0 0 3px #d9eadf; }
+.topline-status.recording { color: #a54237; }
+.topline-status.recording::before { background: #c64e47; box-shadow: 0 0 0 3px #f0d8d4; }
+
+.master-controls {
+  flex: none;
+  margin-left: 18px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.master-meter {
+  width: 148px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.master-meter-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.master-meter-ch {
+  width: 7px;
+  font: 8px "MapoFlowerIsland", sans-serif;
+  color: #a3a298;
+  letter-spacing: .04em;
+}
+.master-meter-track {
+  position: relative;
+  flex: 1;
+  height: 7px;
+  border-radius: 3px;
+  overflow: hidden;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, .12);
+  /* Green until -6 dBFS (50.1%), yellow until -1 dBFS (89.1%), red to 0 dBFS. */
+  background: linear-gradient(90deg,
+    #4b9967 0%, #4b9967 50.1%,
+    #d1a13f 50.1%, #d1a13f 89.1%,
+    #c05b4a 89.1%, #c05b4a 100%);
+}
+/* Overlays the unfilled (right) portion with the empty-track color, so the
+   gradient beneath keeps its absolute dB positions regardless of level. */
+.master-meter-mask {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 100%;
+  background: #e2e0d9;
+  border-radius: 0 3px 3px 0;
+}
+.master-meter-clip {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: #d9d7cf;
+  box-shadow: inset 0 0 0 1px #cbc9c1;
+}
+.master-meter-clip.lit {
+  background: #d13a2a;
+  box-shadow: 0 0 0 1px #d13a2a, 0 0 5px rgba(209, 58, 42, .7);
+}
+
+.master-knob {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  user-select: none;
+}
+.master-knob-dial {
+  position: relative;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 38%, #fbfaf6, #dedcd4);
+  border: 1px solid #c7c5bd;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .12), inset 0 1px 1px rgba(255, 255, 255, .8);
+  cursor: ns-resize;
+  touch-action: none;
+}
+.master-knob.dragging .master-knob-dial { border-color: #4b9967; }
+.master-knob-indicator {
+  position: absolute;
+  left: 50%;
+  top: 3px;
+  width: 2px;
+  height: 9px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: #4d4f47;
+  transform-origin: 50% 10px;
+}
+.master-knob.dragging .master-knob-indicator { background: #3d6e51; }
+.master-knob-label {
+  font: 8px "MapoFlowerIsland", sans-serif;
+  letter-spacing: .14em;
+  color: #8a897f;
+}
+.master-knob-value {
+  font: 8px "MapoFlowerIsland", sans-serif;
+  letter-spacing: .06em;
+  color: #55564e;
+}
 
 .toolbar {
   position: absolute;
