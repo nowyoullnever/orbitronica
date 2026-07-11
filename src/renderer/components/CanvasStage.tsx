@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { ContextMenuState, Orbit, Planet, Selection, Tool, TriggerBar, ViewportState } from "../state/types";
+import type { ContextMenuState, MultiSelection, Orbit, Planet, Selection, Tool, TriggerBar, ViewportState } from "../state/types";
 import {
   TAU, ellipsePoint, findNearestOrbit, getPlanetEffectiveSpeed,
   getSampleDuration, getSampleEnd, getSampleStart, isAngleInsideBar, isFullLoopBar,
@@ -16,6 +16,11 @@ const LOOP_BAR_WIDTH = 7.65;
 const LOOP_BAR_SELECTED_WIDTH = 9.35;
 const SEQUENCE_BAR_WIDTH = 6.8;
 const SEQUENCE_BAR_SELECTED_WIDTH = 8.5;
+// Blue accent used to make the current selection stand out (orbits, bars, planets).
+const SELECTION_COLOR = "#5b93f2";
+// Marquee modifier: Cmd on macOS, Ctrl elsewhere. Using Ctrl on macOS would also fire
+// the context menu, so we key off the platform's primary command modifier instead.
+const IS_MAC = typeof navigator !== "undefined" && navigator.userAgent.includes("Mac");
 const BAR_EDGE_HIT_RADIUS = 8;
 const ORBIT_LINE_TOLERANCE = 8;
 const MIN_BAR = .01;
@@ -76,6 +81,7 @@ type Drag =
   | { type: "move-bar"; bar: TriggerBar; orbit: Orbit }
   | { type: "splice"; orbit: Orbit }
   | { type: "splice-start"; orbit: Orbit }
+  | { type: "marquee"; sx: number; sy: number; x: number; y: number }
   | { type: "pan-viewport"; startX: number; startY: number; viewport: ViewportState };
 
 type WaveformSegment = {
@@ -105,6 +111,7 @@ type Props = {
   bars: TriggerBar[];
   waveformPeaksByOrbit: ReadonlyMap<string, Float32Array>;
   selection: Selection;
+  multiSelection: MultiSelection;
   selectedTool: Tool;
   isPlaying: boolean;
   isDragOver: boolean;
@@ -112,6 +119,7 @@ type Props = {
   viewport: ViewportState;
   onViewportChange: (viewport: ViewportState) => void;
   onSelect: (selection: Selection) => void;
+  onMarqueeSelect: (orbitIds: string[], planetIds: string[]) => void;
   onAddPlanet: (orbitId: string, angle: number) => void;
   onAddBar: (orbitId: string, angle: number) => void;
   onMovePlanets: (updates: Map<string, Partial<Planet>>) => void;
@@ -140,6 +148,10 @@ export function CanvasStage(props: Props) {
   const waveformGeometryCache = useRef(new Map<string, WaveformGeometry>());
   const stateRef = useRef(props);
   const [drag, setDrag] = useState<Drag | null>(null);
+  // Live marquee rectangle (world coords), read by the render loop each frame.
+  const marqueeRef = useRef<{ sx: number; sy: number; x: number; y: number } | null>(null);
+  // Set when a bar-tool drag begins so the trailing click doesn't also place a new bar.
+  const suppressClickRef = useRef(false);
   stateRef.current = props;
 
   const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -538,6 +550,8 @@ export function CanvasStage(props: Props) {
       const context = canvas.getContext("2d")!;
       const rect = canvas.getBoundingClientRect();
       const state = stateRef.current;
+      const multiOrbitIds = new Set(state.multiSelection.orbitIds);
+      const multiPlanetIds = new Set(state.multiSelection.planetIds);
       context.clearRect(0, 0, rect.width, rect.height);
       context.save();
       context.translate(state.viewport.offsetX, state.viewport.offsetY);
@@ -551,8 +565,10 @@ export function CanvasStage(props: Props) {
       for (const orbit of state.orbits) {
         context.beginPath();
         context.ellipse(orbit.x, orbit.y, orbit.radiusX, orbit.radiusY, 0, 0, TAU);
-        context.strokeStyle = orbit.isPaused ? "#c8c8c3" : orbit.mode === "sequence" ? "#376cc4" : orbit.color;
-        context.lineWidth = orbit.id === state.selection.orbitId ? 2 : 1;
+        const orbitSelected = orbit.id === state.selection.orbitId || multiOrbitIds.has(orbit.id);
+        context.strokeStyle = orbitSelected ? SELECTION_COLOR
+          : orbit.isPaused ? "#c8c8c3" : orbit.mode === "sequence" ? "#376cc4" : orbit.color;
+        context.lineWidth = orbitSelected ? 2.5 : 1;
         context.globalAlpha = orbit.isPaused ? .48 : 1;
         context.stroke();
         context.globalAlpha = 1;
@@ -570,6 +586,7 @@ export function CanvasStage(props: Props) {
         if (!waveformOrbitIds.has(orbitId)) waveformGeometryCache.current.delete(orbitId);
       }
       for (const orbit of state.orbits) {
+        if (orbit.showWaveform === false) continue;
         const amplitude = Math.max(14, Math.min(orbit.radiusX, orbit.radiusY) * .22);
         const left = (orbit.x - orbit.radiusX - amplitude) * state.viewport.zoom + state.viewport.offsetX;
         const right = (orbit.x + orbit.radiusX + amplitude) * state.viewport.zoom + state.viewport.offsetX;
@@ -592,7 +609,7 @@ export function CanvasStage(props: Props) {
             context.ellipse(orbit.x, orbit.y, orbit.radiusX, orbit.radiusY, 0,
               bar.angle - bar.lengthRadians / 2, bar.angle + bar.lengthRadians / 2);
           }
-          context.strokeStyle = selected ? "#171813" : "#464841";
+          context.strokeStyle = selected ? SELECTION_COLOR : "#464841";
           context.lineWidth = selected ? LOOP_BAR_SELECTED_WIDTH : LOOP_BAR_WIDTH;
           context.lineCap = "butt";
           context.stroke();
@@ -639,9 +656,9 @@ export function CanvasStage(props: Props) {
           context.stroke();
           context.globalAlpha = 1;
         }
-        if (planet.id === state.selection.planetId) {
-          context.beginPath(); context.arc(point.x, point.y, PLANET_RADIUS + 3, 0, TAU);
-          context.strokeStyle = "#777870"; context.lineWidth = 1; context.stroke();
+        if (planet.id === state.selection.planetId || multiPlanetIds.has(planet.id)) {
+          context.beginPath(); context.arc(point.x, point.y, PLANET_RADIUS + 3.5, 0, TAU);
+          context.strokeStyle = SELECTION_COLOR; context.lineWidth = 2; context.stroke();
         }
       }
 
@@ -658,6 +675,21 @@ export function CanvasStage(props: Props) {
         }
       }
 
+      const marquee = marqueeRef.current;
+      if (marquee) {
+        const x0 = Math.min(marquee.sx, marquee.x), y0 = Math.min(marquee.sy, marquee.y);
+        const width = Math.abs(marquee.x - marquee.sx), height = Math.abs(marquee.y - marquee.sy);
+        const zoom = state.viewport.zoom || 1;
+        context.save();
+        context.fillStyle = "rgba(55, 108, 196, .12)";
+        context.strokeStyle = "#376cc4";
+        context.lineWidth = 1 / zoom;
+        context.setLineDash([4 / zoom, 3 / zoom]);
+        context.fillRect(x0, y0, width, height);
+        context.strokeRect(x0, y0, width, height);
+        context.restore();
+      }
+
       context.restore();
       context.fillStyle = "rgba(46, 48, 42, .72)";
       context.font = '10px "MapoFlowerIsland", sans-serif';
@@ -670,6 +702,7 @@ export function CanvasStage(props: Props) {
 
   useEffect(() => {
     setDrag(null);
+    marqueeRef.current = null;
   }, [props.cancelSignal]);
 
   useEffect(() => {
@@ -844,6 +877,7 @@ export function CanvasStage(props: Props) {
 
   function cursorFor(hit: HitTestResult, x: number, y: number) {
     if (drag?.type === "pan-viewport") return "grabbing";
+    if (drag?.type === "marquee") return "crosshair";
     if (drag?.type === "splice") return "ns-resize";
     if (drag?.type === "splice-start") return "grabbing";
     if (props.selectedTool === "splicer") {
@@ -862,7 +896,24 @@ export function CanvasStage(props: Props) {
       return orbit ? orbitResizeCursor(orbit, x, y) : "ew-resize";
     }
     if (hit.type === "orbit-inside") return "move";
-    return props.selectedTool === "select" ? "default" : "crosshair";
+    return props.selectedTool === "select" ? "grab" : "crosshair";
+  }
+
+  // Select the bar and begin a resize (edge) or move (body) drag. Shared by the
+  // select and bar tools so bars can be reshaped without leaving the bar tool.
+  function startBarInteraction(hit: HitTestResult) {
+    if (hit.type !== "bar-edge" && hit.type !== "bar-body") return;
+    const bar = props.bars.find((item) => item.id === hit.barId)!;
+    const orbit = props.orbits.find((item) => item.id === hit.orbitId)!;
+    props.onSelect({ orbitId: hit.orbitId, planetId: null, barId: hit.barId });
+    props.onBeginMutation();
+    if (hit.type === "bar-body") setDrag({ type: "move-bar", bar, orbit });
+    else {
+      const fixedAngle = hit.edge === "start"
+        ? normalizeAngle(bar.angle + bar.lengthRadians / 2)
+        : normalizeAngle(bar.angle - bar.lengthRadians / 2);
+      setDrag({ type: hit.edge === "start" ? "bar-start" : "bar-end", bar, orbit, fixedAngle });
+    }
   }
 
   function handleMouseDown(event: React.MouseEvent<HTMLCanvasElement>) {
@@ -874,6 +925,8 @@ export function CanvasStage(props: Props) {
       return;
     }
     if (event.button !== 0) return;
+    // Clear any stale suppression (e.g. a prior drag that ended off-canvas with no click).
+    suppressClickRef.current = false;
     if (props.selectedTool === "splicer") {
       const worldPoint = screenToWorld(localPoint(event));
       const startOrbit = orbitAtSpliceStart(worldPoint.x, worldPoint.y);
@@ -898,6 +951,17 @@ export function CanvasStage(props: Props) {
         : { orbitId: hit.orbitId, planetId: null, barId: null });
       return;
     }
+    // Bar tool: allow reshaping an existing bar (edge = resize, body = move) without
+    // switching to the select tool. Anything else falls through to click-to-create.
+    if (props.selectedTool === "bar") {
+      const worldPoint = screenToWorld(localPoint(event));
+      const barHit = hitTestCanvas(worldPoint.x, worldPoint.y);
+      if (barHit.type === "bar-edge" || barHit.type === "bar-body") {
+        startBarInteraction(barHit);
+        suppressClickRef.current = true;
+      }
+      return;
+    }
     if (props.selectedTool !== "select") return;
     const point = screenToWorld(localPoint(event));
     const hit = hitTestCanvas(point.x, point.y);
@@ -906,17 +970,7 @@ export function CanvasStage(props: Props) {
       return;
     }
     if (hit.type === "bar-edge" || hit.type === "bar-body") {
-      const bar = props.bars.find((item) => item.id === hit.barId)!;
-      const orbit = props.orbits.find((item) => item.id === hit.orbitId)!;
-      props.onSelect({ orbitId: hit.orbitId, planetId: null, barId: hit.barId });
-      props.onBeginMutation();
-      if (hit.type === "bar-body") setDrag({ type: "move-bar", bar, orbit });
-      else {
-        const fixedAngle = hit.edge === "start"
-          ? normalizeAngle(bar.angle + bar.lengthRadians / 2)
-          : normalizeAngle(bar.angle - bar.lengthRadians / 2);
-        setDrag({ type: hit.edge === "start" ? "bar-start" : "bar-end", bar, orbit, fixedAngle });
-      }
+      startBarInteraction(hit);
       return;
     }
     if (hit.type === "orbit-line") {
@@ -933,7 +987,16 @@ export function CanvasStage(props: Props) {
       setDrag({ type: "move-orbit", orbit, startX: point.x, startY: point.y });
       return;
     }
+    // Empty space: Cmd (macOS) / Ctrl (Windows) + drag draws a marquee box selection;
+    // a plain drag pans the canvas, the default empty-space gesture.
     props.onSelect({ orbitId: null, planetId: null, barId: null });
+    if (IS_MAC ? event.metaKey : event.ctrlKey) {
+      marqueeRef.current = { sx: point.x, sy: point.y, x: point.x, y: point.y };
+      setDrag({ type: "marquee", sx: point.x, sy: point.y, x: point.x, y: point.y });
+    } else {
+      const screenPoint = localPoint(event);
+      setDrag({ type: "pan-viewport", startX: screenPoint.x, startY: screenPoint.y, viewport: props.viewport });
+    }
   }
 
   function handleMouseMove(event: React.MouseEvent<HTMLCanvasElement>) {
@@ -969,6 +1032,9 @@ export function CanvasStage(props: Props) {
       props.onSetSpliceCount(drag.orbit.id, spliceCountFromWorldY(drag.orbit, point.y));
     } else if (drag.type === "splice-start") {
       props.onSetSpliceStart(drag.orbit.id, orbitAngleAtPoint(drag.orbit, point.x, point.y));
+    } else if (drag.type === "marquee") {
+      marqueeRef.current = { sx: drag.sx, sy: drag.sy, x: point.x, y: point.y };
+      setDrag({ ...drag, x: point.x, y: point.y });
     } else {
       const mouseAngle = orbitAngleAtPoint(drag.orbit, point.x, point.y);
       const raw = drag.type === "bar-end"
@@ -993,6 +1059,7 @@ export function CanvasStage(props: Props) {
   }
 
   function handleClick(event: React.MouseEvent<HTMLCanvasElement>) {
+    if (suppressClickRef.current) { suppressClickRef.current = false; return; }
     if (drag || props.selectedTool === "select" || props.selectedTool === "splicer") return;
     const point = screenToWorld(localPoint(event));
     const orbit = findNearestOrbit(props.orbits, point.x, point.y, 14 / stateRef.current.viewport.zoom);
@@ -1006,6 +1073,30 @@ export function CanvasStage(props: Props) {
     if (drag?.type === "bar-start" || drag?.type === "bar-end") {
       const current = stateRef.current.bars.find((bar) => bar.id === drag.bar.id);
       props.onBarLengthEditEnd(drag.bar.id, current?.lengthRadians ?? drag.bar.lengthRadians);
+    }
+    if (drag?.type === "marquee") {
+      const x0 = Math.min(drag.sx, drag.x), x1 = Math.max(drag.sx, drag.x);
+      const y0 = Math.min(drag.sy, drag.y), y1 = Math.max(drag.sy, drag.y);
+      const orbitIds: string[] = [];
+      const planetIds: string[] = [];
+      // Orbits qualify only when their whole bounding box is inside the box.
+      for (const orbit of props.orbits) {
+        if (orbit.x - orbit.radiusX >= x0 && orbit.x + orbit.radiusX <= x1 &&
+          orbit.y - orbit.radiusY >= y0 && orbit.y + orbit.radiusY <= y1) {
+          orbitIds.push(orbit.id);
+        }
+      }
+      // Planets qualify when their center falls inside the box.
+      for (const planet of props.planets) {
+        const orbit = props.orbits.find((item) => item.id === planet.orbitId);
+        if (!orbit) continue;
+        const center = ellipsePoint(orbit, planet.angle);
+        if (center.x >= x0 && center.x <= x1 && center.y >= y0 && center.y <= y1) {
+          planetIds.push(planet.id);
+        }
+      }
+      props.onMarqueeSelect(orbitIds, planetIds);
+      marqueeRef.current = null;
     }
     setDrag(null);
   }
