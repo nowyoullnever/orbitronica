@@ -577,8 +577,10 @@ export default function App() {
     const orbitId = id();
     try {
       await audioEngine.resume();
-      const buffer = await audioEngine.decodeFile(orbitId, file);
+      // Snapshot before the audio exists: pushHistory() prunes audio for orbits absent
+      // from state/history, so decoding first would immediately drop this orbit's buffer.
       pushHistory();
+      const buffer = await audioEngine.decodeFile(orbitId, file);
       const radiusX = 145, radiusY = 90;
       const name = file.name.replace(/\.[^.]+$/, "");
       const orbit: Orbit = {
