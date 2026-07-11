@@ -2,6 +2,13 @@ import type { Orbit } from "../state/types";
 
 export const TAU = Math.PI * 2;
 export const FULL_LOOP_EPSILON = 0.0001;
+export const SPLICE_MAX_PIECES = 32;
+
+export function normalizeSpliceCount(count: number) {
+  if (!Number.isFinite(count) || Math.abs(count) < 2) return 0;
+  const even = Math.min(SPLICE_MAX_PIECES, Math.max(-SPLICE_MAX_PIECES, Math.round(count / 2) * 2));
+  return even;
+}
 
 export function normalizeAngle(angle: number) {
   return ((angle % TAU) + TAU) % TAU;
@@ -56,6 +63,30 @@ export function isAngleInsideBar(angle: number, center: number, lengthRadians: n
 
 export function isFullLoopBar(bar: { lengthRadians: number }) {
   return bar.lengthRadians >= TAU - FULL_LOOP_EPSILON;
+}
+
+// Slice a loop into `|spliceCount|` equal pieces that alternate bar / gap, and return
+// the bar pieces (half of them). A positive count places a bar on the piece at the start
+// angle; a negative count shifts the phase by one piece so the loop starts on a gap.
+// `startAngleOffset` rotates the whole pattern (the splice's start point).
+export function spliceBarSpecs(
+  spliceCount: number, startAngleOffset = 0
+): { angle: number; lengthRadians: number; startAngle: number }[] {
+  const pieces = Math.abs(normalizeSpliceCount(spliceCount));
+  if (pieces < 2) return [];
+  const pieceLength = TAU / pieces;
+  const phase = spliceCount > 0 ? 0 : 1;
+  const base = normalizeAngle(startAngleOffset);
+  const specs: { angle: number; lengthRadians: number; startAngle: number }[] = [];
+  for (let piece = phase; piece < pieces; piece += 2) {
+    const startAngle = normalizeAngle(base + piece * pieceLength);
+    specs.push({
+      startAngle,
+      lengthRadians: pieceLength,
+      angle: normalizeAngle(startAngle + pieceLength / 2)
+    });
+  }
+  return specs;
 }
 
 export function getOrbitSizeScale(orbit: Orbit) {

@@ -98,7 +98,7 @@ button { color: inherit; }
 .canvas-shell.receiving::after { border-color: #376cc4; color: #376cc4; background: rgba(55,108,196,.055); }
 .stage { position: absolute; width: 100%; height: 100%; display: block; }
 .stage.tool-select { cursor: default; }
-.stage.tool-planet, .stage.tool-bar { cursor: crosshair; }
+.stage.tool-planet, .stage.tool-bar, .stage.tool-splicer { cursor: crosshair; }
 
 .settings {
   position: absolute; z-index: 6; top: 0; right: 0; bottom: 0; width: var(--settings);

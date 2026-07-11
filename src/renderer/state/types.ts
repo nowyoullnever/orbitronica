@@ -1,4 +1,4 @@
-export type Tool = "select" | "planet" | "bar";
+export type Tool = "select" | "planet" | "bar" | "splicer";
 export type OrbitMode = "loop" | "sequence";
 export type SequenceRetriggerMode = "overlap" | "cut-previous" | "ignore-until-end";
 
@@ -22,6 +22,11 @@ export type Orbit = {
   color: string;
   sequenceRetriggerMode: SequenceRetriggerMode;
   isMissingAudio?: boolean;
+  // Signed even count of equal pieces the orbit is spliced into (bar/gap alternating).
+  // 0 = no splice. Positive starts with a bar at angle 0; negative starts with a gap.
+  spliceCount?: number;
+  // Angle (radians) where the splice pattern begins; rotates every splice piece. Default 0.
+  spliceStartAngle?: number;
 };
 
 export type Planet = {
@@ -57,6 +62,9 @@ export type TriggerBar = {
   kind: "play" | "stop";
   startTime?: number;
   endTime?: number;
+  // "splice" bars are generated from the orbit's spliceCount and regenerated together;
+  // absent/"manual" bars are placed by hand and never touched by the splicer.
+  source?: "manual" | "splice";
 };
 
 export type Selection = {

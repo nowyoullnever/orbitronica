@@ -11,7 +11,8 @@ import type {
   SequenceRetriggerMode, Tool, TriggerBar, ViewportState
 } from "./state/types";
 import {
-  TAU, getOrbitTapeRate, getTapeStyleRuntimeRateOnly, isFullLoopBar, orbitAngleAtPoint, rateToCents
+  TAU, getOrbitTapeRate, getTapeStyleRuntimeRateOnly, isFullLoopBar, normalizeAngle, normalizeSpliceCount,
+  orbitAngleAtPoint, rateToCents, spliceBarSpecs
 } from "./utils/geometry";
 
 const id = () => crypto.randomUUID();
@@ -29,6 +30,16 @@ const defaultViewport: ViewportState = { zoom: 1, offsetX: 0, offsetY: 0 };
 const supportedAudio = (file: File) => /\.(wav|mp3|ogg)$/i.test(file.name) ||
   ["audio/wav", "audio/x-wav", "audio/mpeg", "audio/ogg"].includes(file.type);
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const createSpliceBars = (orbitId: string, count: number, startAngle: number): TriggerBar[] =>
+  spliceBarSpecs(count, startAngle).map((spec, index) => ({
+    id: `${orbitId}:splice:${index}`,
+    orbitId,
+    angle: spec.angle,
+    lengthRadians: spec.lengthRadians,
+    startAngle: spec.startAngle,
+    kind: "play",
+    source: "splice"
+  }));
 
 type CopiedPlanetData = Pick<Planet, "speed" | "volume" | "pitchCents" | "direction" | "isActive">;
 type AppClipboard = {
@@ -133,6 +144,14 @@ export default function App() {
     for (const planetId of currentPlanetIds) {
       if (!nextPlanetIds.has(planetId)) audioEngine.stopAllActivePlaybacksForPlanet(planetId);
     }
+    const nextBarsById = new Map(next.bars.map((bar) => [bar.id, bar]));
+    for (const bar of stateRef.current.bars) {
+      const restored = nextBarsById.get(bar.id);
+      if (!restored || restored.angle !== bar.angle || restored.lengthRadians !== bar.lengthRadians ||
+        restored.startAngle !== bar.startAngle || restored.kind !== bar.kind) {
+        audioEngine.stopAllActivePlaybacksForBar(bar.id);
+      }
+    }
     setOrbits(next.orbits);
     setPlanets(next.planets);
     setBars(next.bars);
@@ -184,6 +203,11 @@ export default function App() {
   function deleteSelection() {
     const state = stateRef.current;
     if (state.selection.barId) {
+      const selectedBar = state.bars.find((bar) => bar.id === state.selection.barId);
+      if (selectedBar?.source === "splice") {
+        setSelection({ ...state.selection, barId: null });
+        return;
+      }
       pushHistory();
       audioEngine.stopAllActivePlaybacksForBar(state.selection.barId);
       setBars((current) => current.filter((bar) => bar.id !== state.selection.barId));
@@ -199,6 +223,43 @@ export default function App() {
       setBars((current) => current.filter((bar) => bar.orbitId !== orbitId));
       setSelection(emptySelection);
     }
+  }
+
+  // Reconcile the derived splice bars while leaving manual bars untouched. Stable IDs preserve
+  // active playback for a region whose identity survives a count/start-angle adjustment.
+  function regenerateSpliceBars(orbitId: string, count: number, startAngle: number) {
+    const generated = createSpliceBars(orbitId, count, startAngle);
+    const generatedIds = new Set(generated.map((bar) => bar.id));
+    for (const bar of stateRef.current.bars) {
+      if (bar.orbitId === orbitId && bar.source === "splice" && !generatedIds.has(bar.id)) {
+        audioEngine.stopAllActivePlaybacksForBar(bar.id);
+      }
+    }
+    setBars((current) => {
+      const kept = current.filter((bar) => !(bar.orbitId === orbitId && bar.source === "splice"));
+      return [...kept, ...generated];
+    });
+  }
+
+  function setOrbitSpliceCount(orbitId: string, rawCount: number) {
+    const orbit = stateRef.current.orbits.find((item) => item.id === orbitId);
+    if (!orbit || orbit.mode !== "loop") return;
+    const count = normalizeSpliceCount(rawCount);
+    if (count === normalizeSpliceCount(orbit.spliceCount ?? 0)) return;
+    const startAngle = orbit.spliceStartAngle ?? 0;
+    setOrbits((current) => current.map((orbit) =>
+      orbit.id === orbitId ? { ...orbit, spliceCount: count } : orbit));
+    regenerateSpliceBars(orbitId, count, startAngle);
+  }
+
+  function setOrbitSpliceStart(orbitId: string, rawAngle: number) {
+    const orbit = stateRef.current.orbits.find((item) => item.id === orbitId);
+    if (!orbit || orbit.mode !== "loop") return;
+    const startAngle = normalizeAngle(rawAngle);
+    if (Math.abs(startAngle - (orbit.spliceStartAngle ?? 0)) < .0001) return;
+    setOrbits((current) => current.map((item) =>
+      item.id === orbitId ? { ...item, spliceStartAngle: startAngle } : item));
+    regenerateSpliceBars(orbitId, normalizeSpliceCount(orbit.spliceCount ?? 0), startAngle);
   }
 
   function duplicateOrbit(orbitId = stateRef.current.selection.orbitId) {
@@ -224,11 +285,15 @@ export default function App() {
         collisionSpeedMultiplier: 1, collisionCooldownRemaining: 0, collisionFlashRemaining: 0
       };
     });
-    const copiedBars = stateRef.current.bars.filter((bar) => bar.orbitId === source.id)
+    const copiedBars = stateRef.current.bars.filter((bar) => bar.orbitId === source.id && bar.source !== "splice")
       .map((bar) => ({ ...bar, id: id(), orbitId: newOrbitId }));
     setOrbits((current) => [...current, duplicate]);
     setPlanets((current) => [...current, ...copiedPlanets]);
-    setBars((current) => [...current, ...copiedBars]);
+    setBars((current) => [
+      ...current,
+      ...copiedBars,
+      ...createSpliceBars(newOrbitId, normalizeSpliceCount(source.spliceCount ?? 0), source.spliceStartAngle ?? 0)
+    ]);
     setSelection({ orbitId: newOrbitId, planetId: null, barId: null });
     for (const planet of copiedPlanets) {
       if (planet.speed !== 1 || planet.pitchCents) {
@@ -473,7 +538,9 @@ export default function App() {
           color: raw.color ?? "#5b625d",
           isMuted: raw.isMuted ?? false,
           isSolo: raw.isSolo ?? false,
-          sequenceRetriggerMode: raw.sequenceRetriggerMode ?? "overlap"
+          sequenceRetriggerMode: raw.sequenceRetriggerMode ?? "overlap",
+          spliceCount: normalizeSpliceCount(raw.spliceCount ?? 0),
+          spliceStartAngle: normalizeAngle(raw.spliceStartAngle ?? 0)
         };
         const asset = assetMap.get(orbit.id);
         if (asset?.bytes) {
@@ -498,7 +565,10 @@ export default function App() {
       }));
       setOrbits(restoredOrbits);
       setPlanets(restoredPlanets);
-      setBars(project.bars);
+      const manualBars = project.bars.filter((bar) => bar.source !== "splice");
+      const spliceBars = restoredOrbits.flatMap((orbit) =>
+        createSpliceBars(orbit.id, orbit.spliceCount ?? 0, orbit.spliceStartAngle ?? 0));
+      setBars([...manualBars, ...spliceBars]);
       setSelection(project.ui ?? emptySelection);
       setLastLoopBarLengthRadians(project.lastLoopBarLengthRadians);
       setProjectName(project.projectName);
@@ -796,7 +866,9 @@ export default function App() {
         onMoveOrbit={(orbitId, x, y) => setOrbits((current) =>
           current.map((orbit) => orbit.id === orbitId ? { ...orbit, x, y } : orbit))}
         onEditBar={(barId, angle, lengthRadians, startAngle) => setBars((current) =>
-          current.map((bar) => bar.id === barId ? { ...bar, angle, lengthRadians, startAngle } : bar))}
+          current.map((bar) => bar.id === barId && bar.source !== "splice"
+            ? { ...bar, angle, lengthRadians, startAngle }
+            : bar))}
         onBarLengthEditEnd={(barId, lengthRadians) => {
           const bar = stateRef.current.bars.find((item) => item.id === barId);
           const orbit = stateRef.current.orbits.find((item) => item.id === bar?.orbitId);
@@ -805,6 +877,8 @@ export default function App() {
             setLastLoopBarLengthRadians(Math.min(TAU - .0001, Math.max(MIN_BAR_LENGTH_RADIANS, lengthRadians)));
           }
         }}
+        onSetSpliceCount={setOrbitSpliceCount}
+        onSetSpliceStart={setOrbitSpliceStart}
         onContextMenu={(next) => { setMenu(next); uploadPoint.current = { x: next.canvasX, y: next.canvasY }; }}
         onDropFiles={(files, point) => void handleFiles(files, point)} onDragState={setIsDragOver}
       />
@@ -816,6 +890,11 @@ export default function App() {
       onProjectName={(name) => { setProjectName(name); setIsDirty(true); }}
       onSave={() => void saveProject()} onOpen={() => void openProject()}
       onMode={(mode) => selectedOrbit && setOrbitMode(selectedOrbit.id, mode)}
+      onSpliceCount={(count) => {
+        if (!selectedOrbit) return;
+        pushParameterHistory();
+        setOrbitSpliceCount(selectedOrbit.id, count);
+      }}
       onName={(name) => selectedOrbit && updateOrbit(selectedOrbit.id, { name })}
       onColor={(color) => {
         if (!selectedOrbit) return;
