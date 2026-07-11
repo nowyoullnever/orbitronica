@@ -31,6 +31,8 @@ export type Orbit = {
   spliceCount?: number;
   // Angle (radians) where the splice pattern begins; rotates every splice piece. Default 0.
   spliceStartAngle?: number;
+  // Whether the sample waveform is drawn around the orbit. Undefined/true = shown.
+  showWaveform?: boolean;
 };
 
 export type Planet = {
@@ -76,6 +78,18 @@ export type Selection = {
   barId: string | null;
 };
 
+// Box/marquee selection: multiple orbits and planets picked at once. Kept separate
+// from the single Selection (which drives the settings panel); used for group delete.
+export type MultiSelection = {
+  orbitIds: string[];
+  planetIds: string[];
+};
+
+export type MasterMix = {
+  volume: number;
+  pan: number;
+};
+
 export type ViewportState = {
   zoom: number;
   offsetX: number;
@@ -87,10 +101,12 @@ export type HistorySnapshot = {
   planets: Planet[];
   bars: TriggerBar[];
   selection: Selection;
+  multiSelection: MultiSelection;
+  master: MasterMix;
 };
 
 export type SerializableProject = {
-  schemaVersion: 3;
+  schemaVersion: 4;
   appName: "Orbitonic";
   savedAt: string;
   projectName: string;
@@ -98,6 +114,7 @@ export type SerializableProject = {
   planets: Planet[];
   bars: TriggerBar[];
   lastLoopBarLengthRadians: number;
+  master: MasterMix;
   ui?: Selection;
 };
 

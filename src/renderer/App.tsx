@@ -2,12 +2,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { audioEngine } from "./audio/audioEngine";
 import { CanvasStage } from "./components/CanvasStage";
 import { ContextMenu } from "./components/ContextMenu";
+import { MasterControls } from "./components/MasterControls";
 import { OrbitSettingsPanel } from "./components/OrbitSettingsPanel";
 import { Toolbar } from "./components/Toolbar";
 import { TransportControls } from "./components/TransportControls";
 import { parseProject, serializeProject } from "./project/projectSerializer";
 import type {
-  ContextMenuState, HistorySnapshot, Orbit, OrbitMode, Planet, Selection,
+  ContextMenuState, HistorySnapshot, MultiSelection, Orbit, OrbitMode, Planet, Selection,
   SequenceRetriggerMode, Tool, TriggerBar, ViewportState
 } from "./state/types";
 import {
@@ -16,6 +17,9 @@ import {
   orbitAngleAtPoint, rateToCents, spliceBarSpecs
 } from "./utils/geometry";
 import { normalizeSampleWindow } from "./utils/sampleTrim";
+import {
+  clearSelectionState, emptyMultiSelection, emptySelection, selectMultipleState, selectSingleState
+} from "./utils/selection";
 
 const id = () => crypto.randomUUID();
 const MAX_HISTORY = 100;
@@ -27,7 +31,6 @@ const MAX_DIRECT_RATE = 8;
 const MIN_DIRECT_ORBIT_RADIUS = 40;
 const MAX_DIRECT_ORBIT_RADIUS = 1000;
 const ORBIT_COLORS = ["#5b625d", "#a65f54", "#4f759b", "#7a6995", "#6e8b62", "#b17b45"];
-const emptySelection: Selection = { orbitId: null, planetId: null, barId: null };
 const defaultViewport: ViewportState = { zoom: 1, offsetX: 0, offsetY: 0 };
 const supportedAudio = (file: File) => /\.(wav|mp3|ogg)$/i.test(file.name) ||
   ["audio/wav", "audio/x-wav", "audio/mpeg", "audio/ogg"].includes(file.type);
@@ -84,9 +87,12 @@ export default function App() {
   const [planets, setPlanets] = useState<Planet[]>([]);
   const [bars, setBars] = useState<TriggerBar[]>([]);
   const [selection, setSelection] = useState<Selection>(emptySelection);
+  const [multiSelection, setMultiSelection] = useState<MultiSelection>(emptyMultiSelection);
   const [selectedTool, setSelectedTool] = useState<Tool>("select");
   const [isPlaying, setIsPlaying] = useState(true);
   const [isRecording, setIsRecording] = useState(false);
+  const [masterVolume, setMasterVolume] = useState(1);
+  const [masterPan, setMasterPan] = useState(0);
   const [isDragOver, setIsDragOver] = useState(false);
   const [lastLoopBarLengthRadians, setLastLoopBarLengthRadians] = useState(DEFAULT_LOOP_BAR_LENGTH_RADIANS);
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
@@ -104,9 +110,16 @@ export default function App() {
   const redoStack = useRef<HistorySnapshot[]>([]);
   const parameterHistoryTimer = useRef<number>();
   const clipboardRef = useRef<AppClipboard>(null);
-  const stateRef = useRef({ orbits, planets, bars, selection, lastLoopBarLengthRadians });
-  stateRef.current = { orbits, planets, bars, selection, lastLoopBarLengthRadians };
+  const stateRef = useRef({
+    orbits, planets, bars, selection, multiSelection, lastLoopBarLengthRadians, masterVolume, masterPan
+  });
+  stateRef.current = {
+    orbits, planets, bars, selection, multiSelection, lastLoopBarLengthRadians, masterVolume, masterPan
+  };
   clipboardRef.current = clipboard;
+
+  useEffect(() => { audioEngine.setMasterVolume(masterVolume); }, [masterVolume]);
+  useEffect(() => { audioEngine.setMasterPan(masterPan); }, [masterPan]);
 
   useEffect(() => audioEngine.subscribeWaveformPeaks((orbitId, peaks) => {
     setWaveformPeaksByOrbit((current) => {
@@ -122,20 +135,52 @@ export default function App() {
     [orbits, selection.orbitId]
   );
 
+  function selectSingle(next: Selection) {
+    const state = selectSingleState(next);
+    setSelection(state.selection);
+    setMultiSelection(state.multiSelection);
+  }
+
+  function selectMultiple(orbitIds: string[], planetIds: string[]) {
+    const state = selectMultipleState(orbitIds, planetIds);
+    setSelection(state.selection);
+    setMultiSelection(state.multiSelection);
+  }
+
+  function clearSelection() {
+    const state = clearSelectionState();
+    setSelection(state.selection);
+    setMultiSelection(state.multiSelection);
+  }
+
   function snapshot(): HistorySnapshot {
     const state = stateRef.current;
     return {
       orbits: state.orbits.map((item) => ({ ...item })),
       planets: state.planets.map(cleanPlanet),
       bars: state.bars.map((item) => ({ ...item })),
-      selection: { ...state.selection }
+      selection: { ...state.selection },
+      multiSelection: {
+        orbitIds: [...state.multiSelection.orbitIds],
+        planetIds: [...state.multiSelection.planetIds]
+      },
+      master: { volume: state.masterVolume, pan: state.masterPan }
     };
+  }
+
+  function pruneUnreferencedAudio(currentOrbits = stateRef.current.orbits) {
+    const retained = new Set(currentOrbits.map((orbit) => orbit.id));
+    for (const history of [...undoStack.current, ...redoStack.current]) {
+      for (const orbit of history.orbits) retained.add(orbit.id);
+    }
+    audioEngine.pruneOrbits(retained);
   }
 
   function pushHistory() {
     undoStack.current.push(snapshot());
     if (undoStack.current.length > MAX_HISTORY) undoStack.current.shift();
     redoStack.current = [];
+    pruneUnreferencedAudio();
     setIsDirty(true);
   }
 
@@ -145,6 +190,25 @@ export default function App() {
     parameterHistoryTimer.current = window.setTimeout(() => {
       parameterHistoryTimer.current = undefined;
     }, 350);
+  }
+
+  function resetParameterHistoryWindow() {
+    window.clearTimeout(parameterHistoryTimer.current);
+    parameterHistoryTimer.current = undefined;
+  }
+
+  function changeMasterVolume(value: number) {
+    const next = clamp(value, 0, 1);
+    if (next === stateRef.current.masterVolume) return;
+    pushParameterHistory();
+    setMasterVolume(next);
+  }
+
+  function changeMasterPan(value: number) {
+    const next = clamp(value, -1, 1);
+    if (next === stateRef.current.masterPan) return;
+    pushParameterHistory();
+    setMasterPan(next);
   }
 
   function restoreSnapshot(next: HistorySnapshot) {
@@ -168,6 +232,9 @@ export default function App() {
     setPlanets(next.planets);
     setBars(next.bars);
     setSelection(next.selection);
+    setMultiSelection(next.multiSelection);
+    setMasterVolume(next.master.volume);
+    setMasterPan(next.master.pan);
     for (const orbit of next.orbits) {
       audioEngine.setVolume(orbit.id, orbit.volume);
       // A snapshot can alter a trim window while the native source is looping.
@@ -178,19 +245,23 @@ export default function App() {
   }
 
   function undo() {
+    resetParameterHistoryWindow();
     const previous = undoStack.current.pop();
     if (!previous) return;
     redoStack.current.push(snapshot());
     restoreSnapshot(previous);
+    pruneUnreferencedAudio(previous.orbits);
     setIsDirty(true);
     flash("Undone.");
   }
 
   function redo() {
+    resetParameterHistoryWindow();
     const next = redoStack.current.pop();
     if (!next) return;
     undoStack.current.push(snapshot());
     restoreSnapshot(next);
+    pruneUnreferencedAudio(next.orbits);
     setIsDirty(true);
     flash("Redone.");
   }
@@ -212,7 +283,9 @@ export default function App() {
     pushHistory();
     audioEngine.stopAllActivePlaybacksForPlanet(planetId);
     setPlanets((current) => current.filter((planet) => planet.id !== planetId));
-    setSelection((current) => current.planetId === planetId ? { ...current, planetId: null } : current);
+    if (stateRef.current.selection.planetId === planetId) {
+      selectSingle({ ...stateRef.current.selection, planetId: null });
+    }
   }
 
   function deleteSelection() {
@@ -220,13 +293,13 @@ export default function App() {
     if (state.selection.barId) {
       const selectedBar = state.bars.find((bar) => bar.id === state.selection.barId);
       if (selectedBar?.source === "splice") {
-        setSelection({ ...state.selection, barId: null });
+        selectSingle({ ...state.selection, barId: null });
         return;
       }
       pushHistory();
       audioEngine.stopAllActivePlaybacksForBar(state.selection.barId);
       setBars((current) => current.filter((bar) => bar.id !== state.selection.barId));
-      setSelection({ ...state.selection, barId: null });
+      selectSingle({ ...state.selection, barId: null });
     } else if (state.selection.planetId) {
       deletePlanet(state.selection.planetId);
     } else if (state.selection.orbitId) {
@@ -236,8 +309,25 @@ export default function App() {
       setOrbits((current) => current.filter((orbit) => orbit.id !== orbitId));
       setPlanets((current) => current.filter((planet) => planet.orbitId !== orbitId));
       setBars((current) => current.filter((bar) => bar.orbitId !== orbitId));
-      setSelection(emptySelection);
+      clearSelection();
     }
+  }
+
+  // Remove everything captured by a marquee box selection at once. Deleting an orbit
+  // takes its planets and bars with it; loose planets are removed on their own.
+  function deleteMultiSelection() {
+    const state = stateRef.current;
+    const orbitIds = new Set(state.multiSelection.orbitIds);
+    const planetIds = new Set(state.multiSelection.planetIds);
+    if (!orbitIds.size && !planetIds.size) return;
+    pushHistory();
+    for (const orbitId of orbitIds) audioEngine.stopAllActivePlaybacksForOrbit(orbitId);
+    for (const planetId of planetIds) audioEngine.stopAllActivePlaybacksForPlanet(planetId);
+    setOrbits((current) => current.filter((orbit) => !orbitIds.has(orbit.id)));
+    setPlanets((current) => current.filter((planet) =>
+      !planetIds.has(planet.id) && !orbitIds.has(planet.orbitId)));
+    setBars((current) => current.filter((bar) => !orbitIds.has(bar.orbitId)));
+    clearSelection();
   }
 
   // Reconcile the derived splice bars while leaving manual bars untouched. Stable IDs preserve
@@ -309,7 +399,7 @@ export default function App() {
       ...copiedBars,
       ...createSpliceBars(newOrbitId, normalizeSpliceCount(source.spliceCount ?? 0), source.spliceStartAngle ?? 0)
     ]);
-    setSelection({ orbitId: newOrbitId, planetId: null, barId: null });
+    selectSingle({ orbitId: newOrbitId, planetId: null, barId: null });
     for (const planet of copiedPlanets) {
       if (planet.speed !== 1 || planet.pitchCents) {
         void audioEngine.processPlanetBuffer(newOrbitId, planet.id, planet.speed, planet.pitchCents);
@@ -368,7 +458,7 @@ export default function App() {
     };
     pushHistory();
     setPlanets((current) => [...current, newPlanet]);
-    setSelection({ orbitId: targetId, planetId, barId: null });
+    selectSingle({ orbitId: targetId, planetId, barId: null });
     if (newPlanet.speed !== 1 || newPlanet.pitchCents) {
       void audioEngine.processPlanetBuffer(
         newPlanet.orbitId, newPlanet.id, newPlanet.speed, newPlanet.pitchCents
@@ -487,8 +577,10 @@ export default function App() {
     const orbitId = id();
     try {
       await audioEngine.resume();
-      const buffer = await audioEngine.decodeFile(orbitId, file);
+      // Snapshot before the audio exists: pushHistory() prunes audio for orbits absent
+      // from state/history, so decoding first would immediately drop this orbit's buffer.
       pushHistory();
+      const buffer = await audioEngine.decodeFile(orbitId, file);
       const radiusX = 145, radiusY = 90;
       const name = file.name.replace(/\.[^.]+$/, "");
       const orbit: Orbit = {
@@ -499,7 +591,7 @@ export default function App() {
         color: ORBIT_COLORS[orbits.length % ORBIT_COLORS.length], sequenceRetriggerMode: "overlap"
       };
       setOrbits((current) => [...current, orbit]);
-      setSelection({ orbitId, planetId: null, barId: null });
+      selectSingle({ orbitId, planetId: null, barId: null });
       flash(`${file.name} — ${buffer.duration.toFixed(1)}s timeline created.`);
     } catch {
       audioEngine.removeOrbit(orbitId);
@@ -516,7 +608,8 @@ export default function App() {
   async function saveProject() {
     if (!window.orbitonicAPI) return flash("Project saving is only available in the desktop app.");
     const project = serializeProject(
-      projectName || "Untitled Session", orbits, planets, bars, lastLoopBarLengthRadians, selection
+      projectName || "Untitled Session", orbits, planets, bars, lastLoopBarLengthRadians, selection,
+      { volume: masterVolume, pan: masterPan }
     );
     const assets = orbits.flatMap((orbit) => {
       const asset = audioEngine.getProjectAsset(orbit.id);
@@ -539,6 +632,7 @@ export default function App() {
       return;
     }
     try {
+      resetParameterHistoryWindow();
       audioEngine.stopAllActivePlaybacks();
       for (const orbit of stateRef.current.orbits) audioEngine.removeOrbit(orbit.id);
       const project = parseProject(result.text);
@@ -582,7 +676,9 @@ export default function App() {
       const spliceBars = restoredOrbits.flatMap((orbit) =>
         createSpliceBars(orbit.id, orbit.spliceCount ?? 0, orbit.spliceStartAngle ?? 0));
       setBars([...manualBars, ...spliceBars]);
-      setSelection(project.ui ?? emptySelection);
+      selectSingle(project.ui ?? emptySelection);
+      setMasterVolume(project.master.volume);
+      setMasterPan(project.master.pan);
       setLastLoopBarLengthRadians(project.lastLoopBarLengthRadians);
       setProjectName(project.projectName);
       setProjectPath(result.path);
@@ -591,6 +687,7 @@ export default function App() {
       setIsDirty(false);
       undoStack.current = [];
       redoStack.current = [];
+      audioEngine.pruneOrbits(new Set(restoredOrbits.map((orbit) => orbit.id)));
       if (missing.length) flash(`Project loaded with missing audio: ${missing.join(", ")}`, 5000);
       else flash("Project loaded.");
       for (const planet of restoredPlanets) {
@@ -746,7 +843,7 @@ export default function App() {
       startAngle: ((angle - SEQUENCE_BAR_LENGTH_RADIANS / 2) % TAU + TAU) % TAU, kind
     };
     setBars((current) => [...current, bar]);
-    setSelection({ orbitId: orbit.id, planetId: null, barId: bar.id });
+    selectSingle({ orbitId: orbit.id, planetId: null, barId: bar.id });
     setMenu(null);
   }
 
@@ -776,7 +873,12 @@ export default function App() {
       else if (command && key === "d") { event.preventDefault(); duplicateOrbit(); }
       else if (command && key === "s") { event.preventDefault(); void saveProject(); }
       else if (command && key === "o") { event.preventDefault(); void openProject(); }
-      else if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); deleteSelection(); }
+      else if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault();
+        const multi = stateRef.current.multiSelection;
+        if (multi.orbitIds.length || multi.planetIds.length) deleteMultiSelection();
+        else deleteSelection();
+      }
       else if (key === "s") setSelectedTool("select");
       else if (key === "p") setSelectedTool("planet");
       else if (key === "b") setSelectedTool("bar");
@@ -786,7 +888,8 @@ export default function App() {
         if (isPlaying) { audioEngine.stopAllActivePlaybacks(); setIsPlaying(false); }
         else { void audioEngine.resume(); setIsPlaying(true); }
       } else if (event.key === "Escape") {
-        setMenu(null); setSelection(emptySelection); setCancelSignal((value) => value + 1);
+        setMenu(null); clearSelection();
+        setCancelSignal((value) => value + 1);
       }
     };
     window.addEventListener("keydown", keydown);
@@ -796,7 +899,13 @@ export default function App() {
   return <main className="app" onClick={() => setMenu(null)}>
     <header className="topline">
       <span>ORBITONIC</span><small>{projectName.toUpperCase()} {isDirty ? "•" : ""}</small>
-      <i className={isPlaying ? "live" : ""}>{isRecording ? "RECORDING" : isPlaying ? "RUNNING" : "PAUSED"}</i>
+      <i className={`topline-status ${isRecording ? "recording" : isPlaying ? "live" : ""}`}>
+        {isRecording ? "RECORDING" : isPlaying ? "RUNNING" : "PAUSED"}
+      </i>
+      <MasterControls
+        volume={masterVolume} pan={masterPan}
+        isActive={(isPlaying && orbits.length > 0) || isRecording}
+        onVolume={changeMasterVolume} onPan={changeMasterPan} />
     </header>
     <Toolbar selected={selectedTool} onSelect={setSelectedTool} />
     <section className={`canvas-shell ${isDragOver ? "receiving" : ""}`}>
@@ -809,9 +918,12 @@ export default function App() {
       </div>}
       <CanvasStage
         orbits={orbits} planets={planets} bars={bars} waveformPeaksByOrbit={waveformPeaksByOrbit} selection={selection}
+        multiSelection={multiSelection}
         selectedTool={selectedTool} isPlaying={isPlaying} isDragOver={isDragOver}
         cancelSignal={cancelSignal} viewport={viewport} onViewportChange={setViewport}
-        onSelect={setSelection} onBeginMutation={pushHistory}
+        onSelect={selectSingle}
+        onMarqueeSelect={selectMultiple}
+        onBeginMutation={pushHistory}
         onAddPlanet={(orbitId, angle) => {
           pushHistory();
           const planetId = id();
@@ -820,7 +932,7 @@ export default function App() {
             direction: 1, collisionSpeedMultiplier: 1,
             collisionFlashRemaining: 0
           }]);
-          setSelection({ orbitId, planetId, barId: null });
+          selectSingle({ orbitId, planetId, barId: null });
         }}
         onAddBar={(orbitId, angle) => {
           pushHistory();
@@ -833,7 +945,7 @@ export default function App() {
             startAngle: ((angle - length / 2) % TAU + TAU) % TAU, kind: "play"
           };
           setBars((current) => [...current, bar]);
-          setSelection({ orbitId, planetId: null, barId: bar.id });
+          selectSingle({ orbitId, planetId: null, barId: bar.id });
         }}
         onMovePlanets={(updates) => {
           for (const planet of stateRef.current.planets) {
@@ -939,6 +1051,7 @@ export default function App() {
       onPause={() => selectedOrbit && toggleOrbitPause(selectedOrbit.id)}
       onMute={(muted) => selectedOrbit && setOrbitMute(selectedOrbit.id, muted)}
       onSolo={(solo) => selectedOrbit && setOrbitSolo(selectedOrbit.id, solo)}
+      onToggleWaveform={(show) => selectedOrbit && updateOrbit(selectedOrbit.id, { showWaveform: show })}
       onRetriggerMode={(sequenceRetriggerMode: SequenceRetriggerMode) =>
         selectedOrbit && updateOrbit(selectedOrbit.id, { sequenceRetriggerMode })}
       onDuplicate={() => selectedOrbit && duplicateOrbit(selectedOrbit.id)}

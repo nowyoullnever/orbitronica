@@ -26,6 +26,7 @@ type Props = {
   onPause: () => void;
   onMute: (muted: boolean) => void;
   onSolo: (solo: boolean) => void;
+  onToggleWaveform: (show: boolean) => void;
   onRetriggerMode: (mode: SequenceRetriggerMode) => void;
   onDuplicate: () => void;
   onDeleteOrbit: () => void;
@@ -191,6 +192,11 @@ export function OrbitSettingsPanel(props: Props) {
             <label><input type="checkbox" checked={orbit.isSolo}
               onChange={(event) => props.onSolo(event.target.checked)} /> Solo</label>
           </div>
+          <label className="reverse-toggle">
+            <input type="checkbox" checked={orbit.showWaveform !== false}
+              onChange={(event) => props.onToggleWaveform(event.target.checked)} />
+            SHOW WAVEFORM
+          </label>
           <label><span>ORBIT VOLUME <output>{Math.round(orbit.volume * 100)}%</output></span>
             <input type="range" min="0" max="1" step=".01" value={orbit.volume}
               onChange={(event) => props.onVolume(Number(event.target.value))}
