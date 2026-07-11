@@ -837,8 +837,9 @@ export default function App() {
           const window = normalizeSampleWindow(orbit.audioDuration, start, end);
           return { ...orbit, sampleStart: window.start, sampleEnd: window.end };
         }));
-        // No stop here: an active loop updates its window in place (syncLoop) so
-        // dragging the trim while playing stays smooth instead of restarting.
+        // Restart the loop so it reseeks into the new window and playback follows the
+        // sample as the handle drags (syncLoop also restarts on the window change).
+        audioEngine.stopActiveLoopPlaybacksForOrbit(orbitId);
       }}
       hasPlanetClipboard={clipboard?.type === "planet"}
       onProjectName={(name) => { setProjectName(name); setIsDirty(true); }}

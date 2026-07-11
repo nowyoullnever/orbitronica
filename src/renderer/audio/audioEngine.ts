@@ -251,19 +251,12 @@ class AudioEngine {
       const windowEnd = Math.min(Math.max(sampleEnd / speedDivisor, windowStart), bufferDuration);
       const loopStart = reverse ? bufferDuration - windowEnd : windowStart;
       const loopEnd = reverse ? bufferDuration - windowStart : windowEnd;
-      // Reversing needs a different (reversed) buffer, so only that forces a restart.
-      if (current.isReverse !== reverse) {
+      // Restart when the window (or direction) changes so playback reseeks to the sample
+      // position the planet now maps to. Mutating loopStart/loopEnd in place would keep
+      // playing continuously without reflecting the new trim, so a restart is intended.
+      if (current.isReverse !== reverse || current.loopWindowStart !== loopStart || current.loopWindowEnd !== loopEnd) {
         this.stopPlayback(key);
       } else {
-        // loopStart/loopEnd are mutable on a live source, so trimming while playing
-        // just moves the loop boundaries — no restart, no click.
-        if ((current.loopWindowStart !== loopStart || current.loopWindowEnd !== loopEnd) && loopEnd - loopStart > .001) {
-          current.source.loop = true;
-          current.source.loopStart = loopStart;
-          current.source.loopEnd = loopEnd;
-          current.loopWindowStart = loopStart;
-          current.loopWindowEnd = loopEnd;
-        }
         current.gainNode.gain.setValueAtTime(planetVolume, this.getContext().currentTime);
         current.source.playbackRate.setValueAtTime(tapeRate, this.getContext().currentTime);
         return;
