@@ -14,6 +14,10 @@ export type Orbit = {
   initialRadiusX: number;
   initialRadiusY: number;
   audioDuration: number;
+  // Playback window into the sample, in seconds. Undefined means the full sample
+  // (sampleStart 0 .. sampleEnd audioDuration). Both loop and sequence modes honor it.
+  sampleStart?: number;
+  sampleEnd?: number;
   mode: OrbitMode;
   volume: number;
   isPaused: boolean;
@@ -87,7 +91,7 @@ export type HistorySnapshot = {
 };
 
 export type SerializableProject = {
-  schemaVersion: 2;
+  schemaVersion: 3;
   appName: "Orbitonic";
   savedAt: string;
   projectName: string;

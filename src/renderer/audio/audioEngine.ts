@@ -10,11 +10,19 @@ type ActivePlayback = {
   gainNode: GainNode;
   mode: "loop" | "sequence";
   isReverse: boolean;
+  loopWindowStart?: number;
+  loopWindowEnd?: number;
 };
+
+type WaveformListener = (orbitId: string, peaks: Float32Array | null) => void;
 
 class AudioEngine {
   private context: AudioContext | null = null;
   private buffers = new Map<string, AudioBuffer>();
+  private waveformPeaks = new Map<string, Float32Array>();
+  private waveformPeakPromises = new WeakMap<AudioBuffer, Promise<Float32Array>>();
+  private waveformListeners = new Set<WaveformListener>();
+  private readonly waveformResolution = 1024;
   private processedBuffers = new Map<string, AudioBuffer>();
   private reverseBuffers = new Map<string, AudioBuffer>();
   private rawFiles = new Map<string, { fileName: string; bytes: Uint8Array }>();
@@ -61,6 +69,9 @@ class AudioEngine {
   private registerBuffer(orbitId: string, buffer: AudioBuffer, volume: number) {
     const context = this.getContext();
     this.buffers.set(orbitId, buffer);
+    this.waveformPeaks.delete(orbitId);
+    this.publishWaveformPeaks(orbitId, null);
+    void this.cacheWaveformPeaks(orbitId, buffer);
     const gain = context.createGain();
     gain.gain.value = volume;
     gain.connect(this.masterGain!);
@@ -78,6 +89,58 @@ class AudioEngine {
 
   getProjectAsset(orbitId: string) {
     return this.rawFiles.get(orbitId);
+  }
+
+  subscribeWaveformPeaks(listener: WaveformListener) {
+    this.waveformListeners.add(listener);
+    for (const [orbitId, peaks] of this.waveformPeaks) listener(orbitId, peaks);
+    return () => { this.waveformListeners.delete(listener); };
+  }
+
+  private publishWaveformPeaks(orbitId: string, peaks: Float32Array | null) {
+    for (const listener of this.waveformListeners) listener(orbitId, peaks);
+  }
+
+  private async cacheWaveformPeaks(orbitId: string, buffer: AudioBuffer) {
+    let peakPromise = this.waveformPeakPromises.get(buffer);
+    if (!peakPromise) {
+      peakPromise = this.computeWaveformPeaks(buffer);
+      this.waveformPeakPromises.set(buffer, peakPromise);
+    }
+    try {
+      const peaks = await peakPromise;
+      if (this.buffers.get(orbitId) !== buffer) return;
+      this.waveformPeaks.set(orbitId, peaks);
+      this.publishWaveformPeaks(orbitId, peaks);
+    } catch {
+      // A failed visualization must never affect audio playback.
+    }
+  }
+
+  // Normalized per-bin peak amplitudes (0..1). Work is yielded in small chunks so
+  // loading a long sample cannot monopolize the renderer that schedules playback.
+  private async computeWaveformPeaks(buffer: AudioBuffer): Promise<Float32Array> {
+    const resolution = this.waveformResolution;
+    const peaks = new Float32Array(resolution);
+    const length = buffer.length;
+    const channels = Array.from({ length: buffer.numberOfChannels }, (_, ch) => buffer.getChannelData(ch));
+    let max = 0;
+    for (let bin = 0; bin < resolution; bin++) {
+      const start = Math.floor((bin / resolution) * length);
+      const end = Math.max(start + 1, Math.floor(((bin + 1) / resolution) * length));
+      let peak = 0;
+      for (const data of channels) {
+        for (let index = start; index < end && index < length; index++) {
+          const value = Math.abs(data[index]);
+          if (value > peak) peak = value;
+        }
+      }
+      peaks[bin] = peak;
+      if (peak > max) max = peak;
+      if ((bin + 1) % 16 === 0) await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+    }
+    if (max > 0) for (let index = 0; index < resolution; index++) peaks[index] /= max;
+    return peaks;
   }
 
   setVolume(orbitId: string, volume: number) {
@@ -173,16 +236,25 @@ class AudioEngine {
   syncLoop(
     orbitId: string, planetId: string, barId: string, inside: boolean,
     audioTime: number, planetVolume: number, tapeRate: number, userSpeed: number, pitchCents: number,
-    reverse = false
+    reverse = false, sampleStart = 0, sampleEnd = Infinity
   ) {
     const key = `loop:${planetId}:${barId}`;
     const current = this.active.get(key);
+    const speedDivisor = this.hasUserSpeedChange(userSpeed) ? this.normalizedSpeed(userSpeed) : 1;
     if (!inside) {
       if (current) this.stopPlayback(key);
       return;
     }
     if (current) {
-      if (current.isReverse !== reverse) {
+      const bufferDuration = current.source.buffer?.duration ?? 0;
+      const windowStart = Math.min(Math.max(sampleStart / speedDivisor, 0), bufferDuration);
+      const windowEnd = Math.min(Math.max(sampleEnd / speedDivisor, windowStart), bufferDuration);
+      const loopStart = reverse ? bufferDuration - windowEnd : windowStart;
+      const loopEnd = reverse ? bufferDuration - windowStart : windowEnd;
+      // Restart when the window (or direction) changes so playback reseeks to the sample
+      // position the planet now maps to. Mutating loopStart/loopEnd in place would keep
+      // playing continuously without reflecting the new trim, so a restart is intended.
+      if (current.isReverse !== reverse || current.loopWindowStart !== loopStart || current.loopWindowEnd !== loopEnd) {
         this.stopPlayback(key);
       } else {
         current.gainNode.gain.setValueAtTime(planetVolume, this.getContext().currentTime);
@@ -196,11 +268,24 @@ class AudioEngine {
     if (!created) return;
     // Match commit 3e8ee22 exactly when the user speed is unchanged:
     // the loop bar maps directly to the original audio timeline.
-    const processedOffset = this.hasUserSpeedChange(userSpeed)
-      ? audioTime / this.normalizedSpeed(userSpeed)
-      : audioTime;
+    const processedOffset = audioTime / speedDivisor;
     const mappedTime = reverse ? created.buffer.duration - processedOffset : processedOffset;
     const safeOffset = Math.min(Math.max(mappedTime, 0), Math.max(0, created.buffer.duration - .001));
+    // Bound playback to the trimmed window so only that slice repeats instead of the
+    // audio running past sampleEnd into the rest of the sample. As the planet wraps
+    // past angle 0, the native loop wraps sampleEnd -> sampleStart in step.
+    const bufferDuration = created.buffer.duration;
+    const windowStart = Math.min(Math.max(sampleStart / speedDivisor, 0), bufferDuration);
+    const windowEnd = Math.min(Math.max(sampleEnd / speedDivisor, windowStart), bufferDuration);
+    const loopStart = reverse ? bufferDuration - windowEnd : windowStart;
+    const loopEnd = reverse ? bufferDuration - windowStart : windowEnd;
+    if (loopEnd - loopStart > .001) {
+      created.playback.source.loop = true;
+      created.playback.source.loopStart = loopStart;
+      created.playback.source.loopEnd = loopEnd;
+      created.playback.loopWindowStart = loopStart;
+      created.playback.loopWindowEnd = loopEnd;
+    }
     created.playback.source.start(created.context.currentTime, safeOffset);
     console.debug({
       orbitId, planetId, barId, pitchCents,
@@ -212,7 +297,7 @@ class AudioEngine {
   triggerSequence(
     orbitId: string, planetId: string, barId: string, planetVolume: number,
     tapeRate: number, pitchCents: number, reverse: boolean,
-    retriggerMode: SequenceRetriggerMode
+    retriggerMode: SequenceRetriggerMode, sampleStart = 0, sampleEnd = Infinity
   ) {
     if (retriggerMode === "ignore-until-end" && this.hasActiveSequencePlayback(orbitId)) return;
     if (retriggerMode === "cut-previous") this.stopActiveSequencePlaybacksForOrbit(orbitId);
@@ -221,7 +306,14 @@ class AudioEngine {
       id, orbitId, planetId, barId, "sequence", planetVolume, tapeRate, 1, pitchCents, reverse
     );
     if (created) {
-      created.playback.source.start(created.context.currentTime);
+      // Play only the trimmed window. Pitch shifting preserves length, so the
+      // sample-time bounds map straight onto the (possibly reversed) buffer.
+      const bufferDuration = created.buffer.duration;
+      const start = Math.min(Math.max(sampleStart, 0), bufferDuration);
+      const end = Math.min(Math.max(sampleEnd, start), bufferDuration);
+      const duration = Math.max(0.001, end - start);
+      const offset = reverse ? Math.max(0, bufferDuration - end) : start;
+      created.playback.source.start(created.context.currentTime, offset, duration);
       console.debug({
         orbitId, planetId, barId, pitchCents,
         usingProcessedBuffer: created.usingProcessedBuffer,
@@ -407,6 +499,8 @@ class AudioEngine {
   removeOrbit(orbitId: string) {
     this.stopAllActivePlaybacksForOrbit(orbitId);
     this.buffers.delete(orbitId);
+    this.waveformPeaks.delete(orbitId);
+    this.publishWaveformPeaks(orbitId, null);
     for (const key of [...this.processedBuffers.keys()]) {
       if (key.startsWith(`${orbitId}:`)) this.processedBuffers.delete(key);
     }

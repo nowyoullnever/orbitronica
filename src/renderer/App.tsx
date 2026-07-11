@@ -11,9 +11,11 @@ import type {
   SequenceRetriggerMode, Tool, TriggerBar, ViewportState
 } from "./state/types";
 import {
-  TAU, getOrbitTapeRate, getTapeStyleRuntimeRateOnly, isFullLoopBar, normalizeAngle, normalizeSpliceCount,
+  TAU, getOrbitTapeRate, getSampleDuration, getSampleEnd, getSampleStart,
+  getTapeStyleRuntimeRateOnly, isFullLoopBar, normalizeAngle, normalizeSpliceCount,
   orbitAngleAtPoint, rateToCents, spliceBarSpecs
 } from "./utils/geometry";
+import { normalizeSampleWindow } from "./utils/sampleTrim";
 
 const id = () => crypto.randomUUID();
 const MAX_HISTORY = 100;
@@ -95,6 +97,7 @@ export default function App() {
   const [cancelSignal, setCancelSignal] = useState(0);
   const [clipboard, setClipboard] = useState<AppClipboard>(null);
   const [viewport, setViewport] = useState<ViewportState>(defaultViewport);
+  const [waveformPeaksByOrbit, setWaveformPeaksByOrbit] = useState<Map<string, Float32Array>>(() => new Map());
   const uploadPoint = useRef({ x: 450, y: 350 });
   const fileInput = useRef<HTMLInputElement>(null);
   const undoStack = useRef<HistorySnapshot[]>([]);
@@ -104,6 +107,15 @@ export default function App() {
   const stateRef = useRef({ orbits, planets, bars, selection, lastLoopBarLengthRadians });
   stateRef.current = { orbits, planets, bars, selection, lastLoopBarLengthRadians };
   clipboardRef.current = clipboard;
+
+  useEffect(() => audioEngine.subscribeWaveformPeaks((orbitId, peaks) => {
+    setWaveformPeaksByOrbit((current) => {
+      const next = new Map(current);
+      if (peaks) next.set(orbitId, peaks);
+      else next.delete(orbitId);
+      return next;
+    });
+  }), []);
 
   const selectedOrbit = useMemo(
     () => orbits.find((orbit) => orbit.id === selection.orbitId) ?? null,
@@ -158,6 +170,9 @@ export default function App() {
     setSelection(next.selection);
     for (const orbit of next.orbits) {
       audioEngine.setVolume(orbit.id, orbit.volume);
+      // A snapshot can alter a trim window while the native source is looping.
+      // Sources cannot change loopStart/loopEnd in place, so reconcile on next frame.
+      audioEngine.stopAllActivePlaybacksForOrbit(orbit.id);
       if (orbit.isPaused || orbit.isMuted) audioEngine.stopAllActivePlaybacksForOrbit(orbit.id);
     }
   }
@@ -795,7 +810,7 @@ export default function App() {
         }}>Upload your first sound</button>
       </div>}
       <CanvasStage
-        orbits={orbits} planets={planets} bars={bars} selection={selection}
+        orbits={orbits} planets={planets} bars={bars} waveformPeaksByOrbit={waveformPeaksByOrbit} selection={selection}
         selectedTool={selectedTool} isPlaying={isPlaying} isDragOver={isDragOver}
         cancelSignal={cancelSignal} viewport={viewport} onViewportChange={setViewport}
         onSelect={setSelection} onBeginMutation={pushHistory}
@@ -842,15 +857,17 @@ export default function App() {
         onLoopFrame={(orbit, planet, bar, inside, angle) => {
           audioEngine.syncLoop(
             orbit.id, planet.id, bar.id, inside && canOrbitSound(orbit.id),
-            angle / TAU * orbit.audioDuration, planet.volume,
-            getTapeStyleRuntimeRateOnly(orbit, planet), planet.speed, planet.pitchCents, planet.direction === -1
+            getSampleStart(orbit) + angle / TAU * getSampleDuration(orbit), planet.volume,
+            getTapeStyleRuntimeRateOnly(orbit, planet), planet.speed, planet.pitchCents,
+            planet.direction === -1, getSampleStart(orbit), getSampleEnd(orbit)
           );
         }}
         onSequencePlay={(orbit, planet, bar) => {
           if (!canOrbitSound(orbit.id)) return;
           audioEngine.triggerSequence(
             orbit.id, planet.id, bar.id, planet.volume, 1, planet.pitchCents,
-            planet.direction === -1, orbit.sequenceRetriggerMode
+            planet.direction === -1, orbit.sequenceRetriggerMode,
+            getSampleStart(orbit), getSampleEnd(orbit)
           );
         }}
         onSequenceStop={(orbitId) => audioEngine.stopActiveSequencePlaybacksForOrbit(orbitId)}
@@ -886,6 +903,18 @@ export default function App() {
 
     <OrbitSettingsPanel
       orbit={selectedOrbit} planets={planets} projectName={projectName} isDirty={isDirty}
+      waveformPeaks={selectedOrbit ? waveformPeaksByOrbit.get(selectedOrbit.id) : undefined}
+      onSampleTrim={(orbitId, start, end) => {
+        pushParameterHistory();
+        setOrbits((current) => current.map((orbit) => {
+          if (orbit.id !== orbitId) return orbit;
+          const window = normalizeSampleWindow(orbit.audioDuration, start, end);
+          return { ...orbit, sampleStart: window.start, sampleEnd: window.end };
+        }));
+        // Restart the loop so it reseeks into the new window and playback follows the
+        // sample as the handle drags (syncLoop also restarts on the window change).
+        audioEngine.stopActiveLoopPlaybacksForOrbit(orbitId);
+      }}
       hasPlanetClipboard={clipboard?.type === "planet"}
       onProjectName={(name) => { setProjectName(name); setIsDirty(true); }}
       onSave={() => void saveProject()} onOpen={() => void openProject()}

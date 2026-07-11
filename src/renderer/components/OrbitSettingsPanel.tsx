@@ -1,12 +1,17 @@
 import { useEffect, useState } from "react";
 import type { Orbit, OrbitMode, Planet, SequenceRetriggerMode } from "../state/types";
 import {
-  getOrbitTapeRate, getPlanetEffectiveSpeed, getTapeStyleRuntimeRateOnly, rateToCents, SPLICE_MAX_PIECES
+  getOrbitTapeRate, getPlanetEffectiveSpeed, getSampleEnd, getSampleStart,
+  getTapeStyleRuntimeRateOnly, rateToCents, SPLICE_MAX_PIECES
 } from "../utils/geometry";
+import { SampleTrimEditor } from "./SampleTrimEditor";
+import { normalizeSampleWindow } from "../utils/sampleTrim";
 
 type Props = {
   orbit: Orbit | null;
   planets: Planet[];
+  waveformPeaks?: Float32Array;
+  onSampleTrim: (orbitId: string, start: number, end: number) => void;
   projectName: string;
   isDirty: boolean;
   hasPlanetClipboard: boolean;
@@ -134,6 +139,33 @@ export function OrbitSettingsPanel(props: Props) {
           <div className="panel-eyebrow">ORBIT</div>
           <NameEditor value={orbit.name} onCommit={props.onName} />
           <div className="audio-duration">{orbit.audioName} - {orbit.audioDuration.toFixed(2)} SEC</div>
+          <div className="sample-trim">
+            <div className="panel-eyebrow">SAMPLE START / END</div>
+            <SampleTrimEditor
+              key={orbit.id}
+              audioDuration={orbit.audioDuration}
+              peaks={props.waveformPeaks}
+              start={getSampleStart(orbit)}
+              end={getSampleEnd(orbit)}
+              color={orbit.color}
+              onChange={(start, end) => props.onSampleTrim(orbit.id, start, end)}
+            />
+            <div className="effective-values">
+              <EditableMetric label="START" value={getSampleStart(orbit)} decimals={2} suffix="sec"
+                step={0.01} min={0} max={orbit.audioDuration}
+                onApply={(value) => {
+                  const window = normalizeSampleWindow(orbit.audioDuration, value, getSampleEnd(orbit));
+                  props.onSampleTrim(orbit.id, window.start, window.end);
+                }} />
+              <EditableMetric label="END" value={getSampleEnd(orbit)} decimals={2} suffix="sec"
+                step={0.01} min={0} max={orbit.audioDuration}
+                onApply={(value) => {
+                  const window = normalizeSampleWindow(orbit.audioDuration, getSampleStart(orbit), value);
+                  props.onSampleTrim(orbit.id, window.start, window.end);
+                }} />
+              <ReadonlyMetric label="LENGTH" value={getSampleEnd(orbit) - getSampleStart(orbit)} suffix="sec" />
+            </div>
+          </div>
           <label><span>MODE</span>
             <select value={orbit.mode} onChange={(event) => props.onMode(event.target.value as OrbitMode)}>
               <option value="loop">Loop / timeline</option>
