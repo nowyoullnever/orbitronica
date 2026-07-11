@@ -837,7 +837,8 @@ export default function App() {
           const window = normalizeSampleWindow(orbit.audioDuration, start, end);
           return { ...orbit, sampleStart: window.start, sampleEnd: window.end };
         }));
-        audioEngine.stopAllActivePlaybacksForOrbit(orbitId);
+        // No stop here: an active loop updates its window in place (syncLoop) so
+        // dragging the trim while playing stays smooth instead of restarting.
       }}
       hasPlanetClipboard={clipboard?.type === "planet"}
       onProjectName={(name) => { setProjectName(name); setIsDirty(true); }}

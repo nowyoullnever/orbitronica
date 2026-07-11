@@ -32,8 +32,8 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
   const [draft, setDraft] = useState(() => normalizeSampleWindow(audioDuration, start, end));
   // Visible time window [start, end] in seconds — the wheel zooms/pans this.
   const [view, setView] = useState(() => ({ start: 0, end: audioDuration || 1 }));
-  const liveRef = useRef({ view, audioDuration, draft });
-  liveRef.current = { view, audioDuration, draft };
+  const liveRef = useRef({ view, audioDuration, draft, onChange });
+  liveRef.current = { view, audioDuration, draft, onChange };
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const dragRef = useRef<Drag>(null);
@@ -188,11 +188,14 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
 
   const applyDrag = (which: "start" | "end", time: number) => {
     const current = draftRef.current;
-    setDraft(normalizeSampleWindow(
+    const window = normalizeSampleWindow(
       audioDuration,
       which === "start" ? time : current.start,
       which === "end" ? time : current.end
-    ));
+    );
+    setDraft(window);
+    // Commit live so playback (loop volume/length) follows the drag in real time.
+    onChange(window.start, window.end);
   };
 
   // While a handle is dragged to a viewport edge, scroll the view that way and keep the
@@ -207,7 +210,7 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
     }
     const rect = canvas.getBoundingClientRect();
     const x = pointerX - rect.left;
-    const { view, audioDuration, draft } = liveRef.current;
+    const { view, audioDuration, draft, onChange } = liveRef.current;
     const width = view.end - view.start;
     let direction = 0;
     if (x < EDGE_PAN_MARGIN_PX && view.start > 0) direction = -1;
@@ -222,11 +225,13 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
       if (nextStart !== view.start) {
         setView({ start: nextStart, end: nextStart + width });
         const time = nextStart + clamp(x / rect.width, 0, 1) * width;
-        setDraft(normalizeSampleWindow(
+        const window = normalizeSampleWindow(
           audioDuration,
           activeDrag.type === "start" ? time : draft.start,
           activeDrag.type === "end" ? time : draft.end
-        ));
+        );
+        setDraft(window);
+        onChange(window.start, window.end);
       }
     }
     autoPanRef.current = requestAnimationFrame(autoPanTick);
