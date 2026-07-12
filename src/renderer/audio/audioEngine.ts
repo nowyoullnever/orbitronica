@@ -22,11 +22,7 @@ type OrbitAudioRuntime = {
   gainNode: GainNode;
 };
 
-export type CompletedRecording = {
-  blob: Blob;
-  mimeType: string;
-  durationMs: number;
-};
+export type CompletedRecording = { wav: ArrayBuffer; durationMs: number };
 
 type WaveformListener = (orbitId: string, peaks: Float32Array | null) => void;
 
@@ -51,9 +47,9 @@ class AudioEngine {
   private meterBufferR: Float32Array | null = null;
   private masterVolume = 1;
   private masterPan = 0;
-  private recordingDestination: MediaStreamAudioDestinationNode | null = null;
-  private recorder: MediaRecorder | null = null;
-  private recordingChunks: Blob[] = [];
+  private pcmRecorder: AudioWorkletNode | null = null;
+  private pcmChunks: Float32Array[] = [];
+  private pcmRecording = false;
   private recordingStartedAt: number | null = null;
 
   private getContext() {
@@ -66,8 +62,6 @@ class AudioEngine {
       // Final chain: orbit gains -> master volume -> master pan -> output.
       this.masterGain.connect(this.masterPanner);
       this.masterPanner.connect(this.context.destination);
-      this.recordingDestination = this.context.createMediaStreamDestination();
-      this.masterPanner.connect(this.recordingDestination);
       // Metering tap: split the final stereo signal so L/R are measured separately.
       // Analysers are read-only taps, so their outputs stay unconnected.
       this.meterSplitter = this.context.createChannelSplitter(2);
@@ -561,56 +555,47 @@ class AudioEngine {
   async startRecording() {
     await this.resume();
     const context = this.getContext();
-    if (!this.recordingDestination || typeof MediaRecorder === "undefined") {
-      throw new Error("Recording is not supported in this environment.");
+    if (!context.audioWorklet) throw new Error("Unable to initialize the audio recorder.");
+    if (!this.pcmRecorder) {
+      const source = `class P extends AudioWorkletProcessor { constructor(){super();this.on=false;this.n=0;this.b=[];this.port.onmessage=e=>{this.on=e.data==='start';};} process(i){const x=i[0];if(this.on&&x.length){const l=x[0]||new Float32Array(128),r=x[1]||l;const a=new Float32Array(l.length*2);for(let j=0;j<l.length;j++){a[j*2]=l[j];a[j*2+1]=r[j];}this.b.push(a);this.n+=l.length;if(this.n>=2048){const z=new Float32Array(this.n*2);let o=0;for(const q of this.b){z.set(q,o);o+=q.length;}this.port.postMessage(z,[z.buffer]);this.b=[];this.n=0;}}return true;} } registerProcessor('orbitonic-pcm',P);`;
+      const url = URL.createObjectURL(new Blob([source], { type: "application/javascript" }));
+      await context.audioWorklet.addModule(url); URL.revokeObjectURL(url);
+      this.pcmRecorder = new AudioWorkletNode(context, "orbitonic-pcm", { channelCount: 2, channelCountMode: "explicit" });
+      this.pcmRecorder.port.onmessage = (event) => { if (this.pcmRecording) this.pcmChunks.push(new Float32Array(event.data)); };
+      this.masterPanner!.connect(this.pcmRecorder);
     }
-    if (this.recorder?.state === "recording") return;
-    const preferredMimeType = "audio/webm;codecs=opus";
-    const mimeType = MediaRecorder.isTypeSupported(preferredMimeType)
-      ? preferredMimeType
-      : MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : null;
-    if (!mimeType) throw new Error("Recording is not supported in this environment.");
-    this.recordingChunks = [];
+    this.pcmChunks = [];
     this.recordingStartedAt = Date.now();
-    const recorder = new MediaRecorder(this.recordingDestination.stream, { mimeType });
-    this.recorder = recorder;
-    recorder.ondataavailable = (event) => {
-      if (event.data.size) this.recordingChunks.push(event.data);
-    };
-    recorder.onerror = () => { /* stopRecording reports the failure to the UI */ };
-    // A short timeslice makes data flushing resilient if the renderer is interrupted.
-    recorder.start(1000);
-    // Keep the context reference live through recorder setup for browsers that lazily
-    // activate MediaStream destinations after resume.
-    void context;
+    this.pcmRecording = true; this.pcmRecorder.port.postMessage("start");
   }
 
   stopRecording(): Promise<CompletedRecording> {
     return new Promise((resolve, reject) => {
-      if (!this.recorder || this.recorder.state !== "recording") {
+      if (!this.pcmRecorder || !this.pcmRecording) {
         reject(new Error("No recording is active."));
         return;
       }
-      const recorder = this.recorder;
-      recorder.onerror = () => {
-        this.recorder = null;
-        this.recordingStartedAt = null;
-        reject(new Error("Recording failed."));
-      };
-      recorder.onstop = () => {
+      this.pcmRecording = false;
+      window.setTimeout(() => {
         const durationMs = this.recordingStartedAt ? Date.now() - this.recordingStartedAt : 0;
-        const blob = new Blob(this.recordingChunks, { type: recorder.mimeType || "audio/webm" });
-        this.recordingChunks = [];
-        this.recorder = null;
+        const samples = this.pcmChunks.flatMap((chunk) => Array.from(chunk));
+        this.pcmChunks = [];
         this.recordingStartedAt = null;
-        if (!blob.size) {
+        if (!samples.length) {
           reject(new Error("Recording failed: no audio data was captured."));
           return;
         }
-        resolve({ blob, mimeType: recorder.mimeType || "audio/webm", durationMs });
-      };
-      recorder.stop();
+        const wav = this.encodeWav(new Float32Array(samples), this.getContext().sampleRate);
+        resolve({ wav, durationMs });
+      }, 50);
     });
+  }
+
+  private encodeWav(samples: Float32Array, sampleRate: number) {
+    const dataSize = samples.length / 2 * 6, out = new ArrayBuffer(44 + dataSize), v = new DataView(out);
+    const text = (o: number, s: string) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+    text(0,"RIFF"); v.setUint32(4,36+dataSize,true); text(8,"WAVEfmt "); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,2,true); v.setUint32(24,sampleRate,true); v.setUint32(28,sampleRate*6,true); v.setUint16(32,6,true); v.setUint16(34,24,true); text(36,"data"); v.setUint32(40,dataSize,true);
+    let o=44; for (const s of samples) { const n=Math.round(Math.max(-1,Math.min(1,s))*(s<0?0x800000:0x7fffff)); v.setUint8(o++,n&255);v.setUint8(o++,(n>>8)&255);v.setUint8(o++,(n>>16)&255); } return out;
   }
 
   removeOrbit(orbitId: string) {

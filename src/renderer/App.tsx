@@ -716,14 +716,14 @@ export default function App() {
       } else {
         const recording = await audioEngine.stopRecording();
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-        const fileName = `orbitonic-recording-${stamp}.webm`;
-        const data = await recording.blob.arrayBuffer();
+        const fileName = `orbitonic-recording-${stamp}.wav`;
+        const data = recording.wav;
         if (window.orbitonicAPI?.saveRecording) {
-          const result = await window.orbitonicAPI.saveRecording({ fileName, mimeType: recording.mimeType, data });
+          const result = await window.orbitonicAPI.saveRecording({ fileName, mimeType: "audio/wav", data });
           if (result.ok) flash("Recording saved.");
           else if (!result.canceled) flash(result.error ?? "Failed to save recording.");
         } else {
-          const url = URL.createObjectURL(recording.blob);
+          const url = URL.createObjectURL(new Blob([recording.wav], { type: "audio/wav" }));
           const link = document.createElement("a");
           link.href = url;
           link.download = fileName;
