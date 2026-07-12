@@ -242,6 +242,13 @@ export class WamHost {
     try { return await load; } catch (error) { this.moduleLoads.delete(context); throw error; }
   }
 
+  /** Creates an unconnected instance for a rack that owns its own topology. */
+  async createPluginInstance(context: AudioContext, loader: WamModuleLoader, catalogId = "spike"): Promise<WamPluginInstance> {
+    const registration = await this.initialize(context);
+    const module = await this.loadModule(context, loader, registration.groupId, catalogId);
+    return this.bounded(catalogId, "instance-create", module.createInstance(context, registration.groupId), async (late) => { await late.destroy?.(); });
+  }
+
   async insertPreFader(context: AudioContext, source: AudioNode, destination: AudioNode, loader: WamModuleLoader, catalogId = "spike"): Promise<WamInsert> {
     const registration = await this.initialize(context);
     const module = await this.loadModule(context, loader, registration.groupId, catalogId);

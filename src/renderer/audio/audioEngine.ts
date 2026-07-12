@@ -1,8 +1,9 @@
 import { SimpleFilter, SoundTouch, WebAudioBufferSource } from "soundtouchjs";
-import type { SequenceRetriggerMode } from "../state/types";
+import type { Orbit, PluginSlot, SequenceRetriggerMode } from "../state/types";
 import { createFLStylePanNode, type FLStylePanNode } from "./flStylePan.ts";
 import { WamHost, type WamInsert, type WamModuleLoader } from "./wamHost.ts";
 import { getWamCatalogEntry, loadCatalogModule, type WamCatalogId } from "./wamCatalog.ts";
+import { OrbitWamRack, prunePluginStates, type PluginRuntimeStatus } from "./wamRack.ts";
 
 type ActivePlayback = {
   id: string;
@@ -89,6 +90,9 @@ class AudioEngine {
   private orbitPanValues = new Map<string, number>();
   private readonly wamHost = new WamHost();
   private orbitWamInserts = new Map<string, WamInsert>();
+  /** State outlives runtime and document history; it is never embedded in Orbit. */
+  private readonly pluginStateStore = new Map<string, import("./wamHost.ts").JsonValue>();
+  private readonly orbitWamRacks = new Map<string, OrbitWamRack>();
   private active = new Map<string, ActivePlayback>();
   private masterGain: GainNode | null = null;
   private masterPanner: StereoPannerNode | null = null;
@@ -372,6 +376,41 @@ class AudioEngine {
     if (!insert) return;
     this.orbitWamInserts.delete(orbitId);
     await insert.cleanup();
+  }
+
+  private rackForOrbit(orbitId: string): OrbitWamRack {
+    const existing = this.orbitWamRacks.get(orbitId); if (existing) return existing;
+    const runtime = this.orbitRuntimes.get(orbitId);
+    if (!runtime) throw new Error(`Audio runtime is unavailable for orbit "${orbitId}".`);
+    const rack = new OrbitWamRack(runtime.input, runtime.panNode.input, async (slot) => {
+      const entry = getWamCatalogEntry(slot.catalogId);
+      if (!entry || entry.pluginVersion !== slot.pluginVersion) throw new Error("WAM catalog entry is unavailable.");
+      return this.wamHost.createPluginInstance(this.getContext(), () => loadCatalogModule(entry), entry.id);
+    }, this.pluginStateStore);
+    this.orbitWamRacks.set(orbitId, rack); return rack;
+  }
+
+  /** Universal rack reconciliation for structural edits, undo/redo, open and thaw. */
+  async reconcileOrbitPluginRack(orbitId: string, slots: readonly PluginSlot[], generation?: number): Promise<void> {
+    await this.rackForOrbit(orbitId).reconcile(slots, generation);
+  }
+  async freezeOrbitPluginRack(orbitId: string): Promise<void> { await this.orbitWamRacks.get(orbitId)?.freeze(); }
+  async snapshotOrbitPluginStates(): Promise<void> { await Promise.all([...this.orbitWamRacks.values()].map((rack) => rack.snapshotActiveState())); }
+  getOrbitPluginStatus(orbitId: string, slotId: string): PluginRuntimeStatus { return this.orbitWamRacks.get(orbitId)?.getStatus(slotId) ?? "idle"; }
+  getPluginStateStore(): ReadonlyMap<string, import("./wamHost.ts").JsonValue> { return this.pluginStateStore; }
+  prunePluginStateSlots(retainedSlotIds: ReadonlySet<string>) { prunePluginStates(this.pluginStateStore, retainedSlotIds); }
+  copyPluginSlotStates(source: readonly PluginSlot[] | undefined, destination: readonly PluginSlot[] | undefined) {
+    const from = source ?? [], to = destination ?? [];
+    for (let index = 0; index < Math.min(from.length, to.length); index++) {
+      const state = this.pluginStateStore.get(from[index].id);
+      if (state !== undefined) this.pluginStateStore.set(to[index].id, JSON.parse(JSON.stringify(state)));
+    }
+  }
+  /** Gate-first scene runtime transaction; document publication remains owned by App. */
+  async transitionScenePluginRacks(previous: readonly Orbit[], target: readonly Orbit[], generation: number): Promise<void> {
+    await Promise.all(previous.map((orbit) => this.freezeOrbitPluginRack(orbit.id)));
+    await Promise.all(target.filter((orbit) => (orbit.plugins?.length ?? 0) > 0 && this.orbitRuntimes.has(orbit.id))
+      .map((orbit) => this.reconcileOrbitPluginRack(orbit.id, orbit.plugins ?? [], generation)));
   }
 
   private normalizedSpeed(speed: number) {
@@ -849,6 +888,8 @@ class AudioEngine {
       if (key.startsWith(`${orbitId}:`)) this.reverseBuffers.delete(key);
     }
     this.rawFiles.delete(orbitId);
+    const rack = this.orbitWamRacks.get(orbitId);
+    if (rack) { this.orbitWamRacks.delete(orbitId); void rack.disposeAll(); }
     const wamInsert = this.orbitWamInserts.get(orbitId);
     if (wamInsert) {
       this.orbitWamInserts.delete(orbitId);

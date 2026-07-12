@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { SetStateAction } from "react";
 import { audioEngine, type ProjectAudioInput } from "./audio/audioEngine";
+import { collectRetainedPluginSlotIds } from "./audio/wamRack";
 import { encodeWav, type WavSampleFormat } from "./audio/wavEncoder";
 import { CanvasStage } from "./components/CanvasStage";
 import { ContextMenu } from "./components/ContextMenu";
@@ -118,8 +119,10 @@ export default function App() {
   const projectIds = useRef(initialProjectIds);
   const parameterHistoryTimer = useRef<number>();
   // Updated synchronously at the transition boundary so stale Canvas callbacks cannot revive old audio.
-  const audibleSceneId = useRef(activeSceneId);
+  const audibleSceneId = useRef<string | null>(activeSceneId);
   const playbackEpoch = useRef(0);
+  // Separate from playbackEpoch: this cancels stale WAM hydration, not Canvas callbacks.
+  const sceneTransitionEpoch = useRef(0);
   const clipboardRef = useRef<AppClipboard>(null);
   const sceneDuplicationPending = useRef(false);
   const recordingInFlight = useRef(false);
@@ -225,6 +228,8 @@ export default function App() {
 
   function pruneUnreferencedAudio(currentScenes = stateRef.current.scenes) {
     audioEngine.pruneOrbits(collectRetainedOrbitIds(currentScenes, undoStack.current, redoStack.current));
+    const retainedScenes = [currentScenes, ...undoStack.current.map((item) => item.scenes), ...redoStack.current.map((item) => item.scenes)].flat();
+    audioEngine.prunePluginStateSlots(collectRetainedPluginSlotIds(retainedScenes));
   }
 
   function pushHistory() {
@@ -279,6 +284,19 @@ export default function App() {
     if (!prepareActiveSceneTransition(nextSceneId)) return;
     resetParameterHistoryWindow();
     setActiveSceneId(nextSceneId);
+    // Publishing the target selection stays synchronous for the existing tab
+    // contract. Audio remains gated until the newest hydration transaction settles.
+    const epoch = ++sceneTransitionEpoch.current;
+    const previous = stateRef.current.scenes.find((scene) => scene.id === stateRef.current.activeSceneId);
+    const target = stateRef.current.scenes.find((scene) => scene.id === nextSceneId);
+    audibleSceneId.current = null;
+    void audioEngine.transitionScenePluginRacks(previous?.orbits ?? [], target?.orbits ?? [], epoch).then(() => {
+      if (sceneTransitionEpoch.current === epoch) audibleSceneId.current = nextSceneId;
+    }).catch(() => {
+      // Per-slot unavailable placeholders remain dry. A rack failure must not
+      // restore stale scene audio or overwrite durable bypass metadata.
+      if (sceneTransitionEpoch.current === epoch) audibleSceneId.current = nextSceneId;
+    });
   }
 
   function commitSceneDocument(nextScenes: Scene[], nextActiveSceneId: string) {
@@ -531,7 +549,8 @@ export default function App() {
     const newOrbitId = projectOrbitId(source.spliceCount);
     const duplicate: Orbit = {
       ...source, id: newOrbitId, name: `${source.name} Copy`, x: source.x + 40, y: source.y + 40,
-      isMuted: false, isSolo: false
+      isMuted: false, isSolo: false,
+      plugins: source.plugins?.map((slot) => ({ ...slot, id: projectId() }))
     };
     const copiedPlanets = stateRef.current.planets.filter((planet) => planet.orbitId === source.id).map((planet) => {
       const newId = projectId();
@@ -559,6 +578,7 @@ export default function App() {
       flash("The orbit audio is unavailable.");
       return;
     }
+    audioEngine.copyPluginSlotStates(source.plugins, duplicate.plugins);
     audioEngine.setOrbitAudioPan(newOrbitId, duplicate.audioPan);
     try {
       commitSceneDocument(nextScenes, current.activeSceneId);

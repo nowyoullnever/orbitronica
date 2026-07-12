@@ -1,6 +1,14 @@
 export type Tool = "select" | "planet" | "bar" | "splicer";
 export type OrbitMode = "loop" | "sequence";
 export type SequenceRetriggerMode = "overlap" | "cut-previous" | "ignore-until-end";
+export type PluginSlot = {
+  /** Globally unique durable identity. Array position is the chain order. */
+  id: string;
+  catalogId: string;
+  /** Version that produced the separately retained state blob. */
+  pluginVersion: string;
+  bypassed: boolean;
+};
 
 export type Orbit = {
   id: string;
@@ -34,6 +42,8 @@ export type Orbit = {
   spliceStartAngle?: number;
   // Whether the sample waveform is drawn around the orbit. Undefined/true = shown.
   showWaveform?: boolean;
+  /** Metadata only: parameter state deliberately stays outside history snapshots. */
+  plugins?: PluginSlot[];
 };
 
 export type Planet = {
