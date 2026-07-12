@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from "electron";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +7,7 @@ import {
 } from "./projectAssets.js";
 import { PreferencesStore } from "./preferences.js";
 import { newProjectPath, projectDialogExtensions } from "./projectPaths.js";
+import { validateProjectSavePayload } from "./projectPayload.js";
 import { installAppMenu } from "./appMenu.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -30,6 +31,7 @@ function createWindow() {
       backgroundThrottling: false
     }
   });
+  mainWindow = win;
 
   if (wamSmoke) {
     const timeout = setTimeout(() => {
@@ -56,12 +58,16 @@ function createWindow() {
   }
 }
 
-type SavePayload = {
-  project: Record<string, unknown> & { projectName?: string };
-  assets: Array<{ orbitId: string; fileName: string; bytes: Uint8Array }>;
-};
-
 let preferencesStore: PreferencesStore | undefined;
+let mainWindow: BrowserWindow | undefined;
+let activeProjectPath: string | undefined;
+
+function ipcFailure(message: string): never { throw new Error(`Invalid project IPC payload: ${message}`); }
+function requireTrustedSender(event: IpcMainInvokeEvent) {
+  // A sandboxed renderer can still be compromised; only the window we created may
+  // request project filesystem operations. Do not use sender supplied paths as authority.
+  if (!mainWindow || event.sender !== mainWindow.webContents) ipcFailure("untrusted sender");
+}
 
 function getPreferencesStore() {
   preferencesStore ??= new PreferencesStore(path.join(app.getPath("userData"), "preferences.json"));
@@ -71,9 +77,13 @@ function getPreferencesStore() {
 ipcMain.handle("preferences:get", () => getPreferencesStore().get());
 ipcMain.handle("preferences:set", (_event, patch) => getPreferencesStore().set(patch));
 
-ipcMain.handle("project:save", async (_event, payload: SavePayload, currentPath?: string) => {
+ipcMain.handle("project:save", async (event, payload: unknown, currentPath?: unknown) => {
   try {
-    let projectPath = currentPath;
+    requireTrustedSender(event);
+    validateProjectSavePayload(payload);
+    // The renderer can request a save, but it never grants itself a filesystem path.
+    // Existing paths must have originated from this main process's dialog/open flow.
+    let projectPath = typeof currentPath === "string" && currentPath === activeProjectPath ? activeProjectPath : undefined;
     if (!projectPath) {
       const result = await dialog.showSaveDialog({
         title: "Save Orbitronica Project",
@@ -100,14 +110,16 @@ ipcMain.handle("project:save", async (_event, payload: SavePayload, currentPath?
     }
     const project = rewriteProjectAudioPaths(payload.project, audioPaths);
     await fs.writeFile(projectPath, JSON.stringify(project, null, 2), "utf8");
+    activeProjectPath = projectPath;
     return { ok: true, path: projectPath };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
 
-ipcMain.handle("project:open", async () => {
+ipcMain.handle("project:open", async (event) => {
   try {
+    requireTrustedSender(event);
     const result = await dialog.showOpenDialog({
       title: "Open Orbitronica Project",
       properties: ["openFile"],
@@ -130,6 +142,7 @@ ipcMain.handle("project:open", async () => {
         assets.push({ orbitId: descriptor.orbitId, error: `Missing audio: ${descriptor.audioPath}` });
       }
     }
+    activeProjectPath = projectPath;
     return { ok: true, path: projectPath, text, assets };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
