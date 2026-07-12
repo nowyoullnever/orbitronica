@@ -35,6 +35,24 @@ test("late instance is destroyed and never wired after a newer reconcile", async
   assert.equal(destroys, 1); assert.equal(input.edges.has(late), false); assert.equal(input.edges.has(destination), true);
 });
 
+test("newer same-slot reconcile replaces an in-flight create and reaches ready", async () => {
+  const input = new Node(), destination = new Node(), stale = new Node(), current = new Node();
+  const resolvers: Array<(instance: any) => void> = []; let staleDestroy = 0;
+  const rack = new OrbitWamRack(input as unknown as AudioNode, destination as unknown as AudioNode,
+    () => new Promise((resolve) => { resolvers.push(resolve); }), new Map());
+  const first = rack.reconcile([slot("a")], 1);
+  while (resolvers.length < 1) await new Promise((done) => setTimeout(done, 0));
+  const latest = rack.reconcile([slot("a")], 2);
+  while (resolvers.length < 2) await new Promise((done) => setTimeout(done, 0));
+  resolvers[0]({ audioNode: stale as unknown as AudioNode, destroy: () => { staleDestroy++; } });
+  resolvers[1]({ audioNode: current as unknown as AudioNode });
+  await Promise.all([first, latest]);
+  assert.equal(staleDestroy, 1);
+  assert.equal(rack.getStatus("a"), "ready");
+  assert.equal(input.edges.has(current), true);
+  assert.equal(input.edges.has(stale), false);
+});
+
 test("freeze snapshots state and destroys runtime exactly once", async () => {
   const input = new Node(), destination = new Node(), wam = new Node(); let destroys = 0;
   const states = new Map();

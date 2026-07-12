@@ -100,8 +100,12 @@ export class OrbitWamRack {
   private async ensure(slot: PluginSlot, generation: number): Promise<void> {
     const prior = this.runtimes.get(slot.id);
     if (prior && !prior.disposed && prior.status === "ready") return;
-    if (prior?.status === "loading") return;
-    const placeholder: PluginRuntime = prior ?? { slotId: slot.id, instance: null as unknown as WamPluginInstance, status: "loading", generation, disposed: false };
+    // A newer reconcile for the same slot must not wait behind an older,
+    // non-cancellable create. Retire that placeholder and start a generation-
+    // owned attempt; the old result observes `disposed`/identity mismatch and
+    // destroys itself instead of leaving the latest request loading forever.
+    if (prior?.status === "loading") prior.disposed = true;
+    const placeholder: PluginRuntime = { slotId: slot.id, instance: null as unknown as WamPluginInstance, status: "loading", generation, disposed: false };
     placeholder.status = "loading"; placeholder.generation = generation; this.runtimes.set(slot.id, placeholder);
     try {
       const instance = await this.create(slot);
