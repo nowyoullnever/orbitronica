@@ -7,6 +7,7 @@ import {
 } from "./projectAssets.js";
 import { newProjectPath, projectDialogExtensions } from "./projectPaths.js";
 import { PreferencesStore } from "./preferences.js";
+import { installAppMenu } from "./appMenu.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -131,6 +132,7 @@ ipcMain.handle("recording:save", async (_event, bytes: Uint8Array, suggestedName
 });
 
 app.whenReady().then(() => {
+  installAppMenu();
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
