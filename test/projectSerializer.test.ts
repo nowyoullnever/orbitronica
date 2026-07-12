@@ -181,7 +181,7 @@ test("v4 migration also rejects a persisted ID occupying an implied splice reser
 });
 
 test("unsupported future versions and malformed shapes fail clearly", () => {
-  assert.throws(() => parseProject(JSON.stringify({ schemaVersion: 6 })), /Unsupported Orbitonic schema version 6/);
+  assert.throws(() => parseProject(JSON.stringify({ schemaVersion: 6 })), /Unsupported Orbitronica schema version 6/);
   assert.throws(() => parseProject(JSON.stringify({
     schemaVersion: 5, appName: "Orbitonic", scenes: {}
   })), /require a scenes array/);

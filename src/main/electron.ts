@@ -5,8 +5,13 @@ import { fileURLToPath } from "node:url";
 import {
   describeProjectAssets, portableAudioPath, rewriteProjectAudioPaths
 } from "./projectAssets.js";
+import { PreferencesStore } from "./preferences.js";
+import { newProjectPath, projectDialogExtensions } from "./projectPaths.js";
+import { installAppMenu } from "./appMenu.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+app.setName("Orbitronica");
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -15,7 +20,7 @@ function createWindow() {
     minWidth: 960,
     minHeight: 640,
     backgroundColor: "#f4f3ee",
-    title: "Orbitonic MVP",
+    title: "Orbitronica",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       sandbox: true,
@@ -37,17 +42,27 @@ type SavePayload = {
   assets: Array<{ orbitId: string; fileName: string; bytes: Uint8Array }>;
 };
 
+let preferencesStore: PreferencesStore | undefined;
+
+function getPreferencesStore() {
+  preferencesStore ??= new PreferencesStore(path.join(app.getPath("userData"), "preferences.json"));
+  return preferencesStore;
+}
+
+ipcMain.handle("preferences:get", () => getPreferencesStore().get());
+ipcMain.handle("preferences:set", (_event, patch) => getPreferencesStore().set(patch));
+
 ipcMain.handle("project:save", async (_event, payload: SavePayload, currentPath?: string) => {
   try {
     let projectPath = currentPath;
     if (!projectPath) {
       const result = await dialog.showSaveDialog({
-        title: "Save Orbitonic Project",
-        defaultPath: `${payload.project.projectName ?? "Untitled Session"}.orbitonic`,
-        filters: [{ name: "Orbitonic Project", extensions: ["orbitonic"] }]
+        title: "Save Orbitronica Project",
+        defaultPath: `${payload.project.projectName ?? "Untitled Session"}.orb`,
+        filters: [{ name: "Orbitronica Project", extensions: projectDialogExtensions }]
       });
       if (result.canceled || !result.filePath) return { ok: false, canceled: true };
-      projectPath = result.filePath.endsWith(".orbitonic") ? result.filePath : `${result.filePath}.orbitonic`;
+      projectPath = newProjectPath(result.filePath);
     }
     const projectDir = path.dirname(projectPath);
     const audioDir = path.join(projectDir, "audio");
@@ -75,9 +90,9 @@ ipcMain.handle("project:save", async (_event, payload: SavePayload, currentPath?
 ipcMain.handle("project:open", async () => {
   try {
     const result = await dialog.showOpenDialog({
-      title: "Open Orbitonic Project",
+      title: "Open Orbitronica Project",
       properties: ["openFile"],
-      filters: [{ name: "Orbitonic Project", extensions: ["orbitonic"] }]
+      filters: [{ name: "Orbitronica Project", extensions: projectDialogExtensions }]
     });
     if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true };
     const projectPath = result.filePaths[0];
@@ -107,10 +122,10 @@ ipcMain.handle("recording:save", async (_event, bytes: Uint8Array, suggestedName
     const result = await dialog.showSaveDialog({
       title: "Save Recording",
       defaultPath: suggestedName,
-      filters: [{ name: "WebM Audio", extensions: ["webm"] }]
+      filters: [{ name: "WAV Audio", extensions: ["wav"] }]
     });
     if (result.canceled || !result.filePath) return { ok: false, canceled: true };
-    const filePath = result.filePath.endsWith(".webm") ? result.filePath : `${result.filePath}.webm`;
+    const filePath = /\.wav$/i.test(result.filePath) ? result.filePath : `${result.filePath}.wav`;
     await fs.writeFile(filePath, Buffer.from(bytes));
     return { ok: true, path: filePath };
   } catch (error) {
@@ -119,6 +134,7 @@ ipcMain.handle("recording:save", async (_event, bytes: Uint8Array, suggestedName
 });
 
 app.whenReady().then(() => {
+  installAppMenu();
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

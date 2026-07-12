@@ -34,6 +34,45 @@ export type ProjectAudioInput = {
 
 export type StagedProjectAudio = ProjectAudioInput & { buffer: AudioBuffer };
 
+export type RecordedPcm = { channels: Float32Array[]; sampleRate: number };
+
+type RecordingSession = {
+  id: number;
+  state: "starting" | "recording" | "stopping";
+  chunks: [Float32Array[], Float32Array[]];
+  resolve?: () => void;
+  reject?: (error: Error) => void;
+  timeout?: number;
+  result?: RecordedPcm;
+};
+
+// Keep the Blob path self-contained; the emitted asset URL below is only the
+// sandbox fallback and is deliberately a standalone worklet script as well.
+const PCM_WORKLET_SOURCE = `
+class OrbitronicaPcmCapture extends AudioWorkletProcessor {
+  constructor() { super(); this.recordingId = null; this.left = []; this.right = []; this.frames = 0;
+    this.port.onmessage = ({ data }) => {
+      if (data.type === "start") { this.recordingId = data.recordingId; this.left = []; this.right = []; this.frames = 0; this.port.postMessage({ type: "started", recordingId: data.recordingId }); }
+      else if (data.type === "stop" && data.recordingId === this.recordingId) { this.flush(); this.port.postMessage({ type: "stopped", recordingId: data.recordingId }); this.recordingId = null; }
+    };
+  }
+  flush() { if (!this.frames) return; const left = new Float32Array(this.frames), right = new Float32Array(this.frames); let offset = 0;
+    for (const block of this.left) { left.set(block, offset); offset += block.length; } offset = 0;
+    for (const block of this.right) { right.set(block, offset); offset += block.length; }
+    this.port.postMessage({ type: "chunk", recordingId: this.recordingId, left: left.buffer, right: right.buffer }, [left.buffer, right.buffer]); this.left = []; this.right = []; this.frames = 0;
+  }
+  process(inputs) { const input = inputs[0]; if (this.recordingId !== null) { const left = input[0], right = input[1] || left;
+      const length = left ? left.length : 128, copyLeft = new Float32Array(length), copyRight = new Float32Array(length);
+      if (left) copyLeft.set(left); if (right) copyRight.set(right); this.left.push(copyLeft); this.right.push(copyRight); this.frames += length; if (this.frames >= 2048) this.flush(); }
+    return true;
+  }
+}
+registerProcessor("orbitronica-pcm-capture", OrbitronicaPcmCapture);`;
+
+// Vite rewrites this to the emitted script URL in dev and packaged builds;
+// Node-only unit tests can still import this module without a query-loader.
+const recorderProcessorAssetUrl = new URL("./recorder-processor.js", import.meta.url).toString();
+
 class AudioEngine {
   private context: AudioContext | null = null;
   private buffers = new Map<string, AudioBuffer>();
@@ -56,9 +95,11 @@ class AudioEngine {
   private meterBufferR: Float32Array | null = null;
   private masterVolume = 1;
   private masterPan = 0;
-  private recordingDestination: MediaStreamAudioDestinationNode | null = null;
-  private recorder: MediaRecorder | null = null;
-  private recordingChunks: Blob[] = [];
+  private recordingNode: AudioWorkletNode | null = null;
+  private recordingPull: GainNode | null = null;
+  private recordingSession: RecordingSession | null = null;
+  private recordingModuleLoads = new WeakMap<AudioContext, Promise<void>>();
+  private nextRecordingId = 0;
 
   private getContext() {
     if (!this.context) {
@@ -70,8 +111,6 @@ class AudioEngine {
       // Final chain: orbit gains -> master volume -> master pan -> output.
       this.masterGain.connect(this.masterPanner);
       this.masterPanner.connect(this.context.destination);
-      this.recordingDestination = this.context.createMediaStreamDestination();
-      this.masterPanner.connect(this.recordingDestination);
       // Metering tap: split the final stereo signal so L/R are measured separately.
       // Analysers are read-only taps, so their outputs stay unconnected.
       this.meterSplitter = this.context.createChannelSplitter(2);
@@ -625,37 +664,134 @@ class AudioEngine {
     this.processedBuffers.set(key, output);
   }
 
-  startRecording() {
-    if (!this.recordingDestination || typeof MediaRecorder === "undefined") {
-      throw new Error("Audio recording is not supported on this system.");
+  private async loadRecordingProcessor(context: AudioContext) {
+    const cached = this.recordingModuleLoads.get(context);
+    if (cached) return cached;
+    const load = (async () => {
+      const blobUrl = URL.createObjectURL(new Blob([PCM_WORKLET_SOURCE], { type: "text/javascript" }));
+      try {
+        await context.audioWorklet.addModule(blobUrl);
+        return;
+      } catch (blobError) {
+        try {
+          // Sandboxed Chromium normally accepts the Blob module. The emitted Vite
+          // asset is a retry path for a restrictive Blob/CSP implementation.
+          await context.audioWorklet.addModule(recorderProcessorAssetUrl);
+          return;
+        } catch (assetError) {
+          throw new Error(`AudioWorklet module could not load from Blob or asset URL: ${String(blobError)}; ${String(assetError)}`);
+        }
+      } finally {
+        URL.revokeObjectURL(blobUrl);
+      }
+    })();
+    this.recordingModuleLoads.set(context, load);
+    try {
+      await load;
+    } catch (error) {
+      // A failed module registration is retryable on the next start attempt.
+      this.recordingModuleLoads.delete(context);
+      throw error;
     }
-    if (this.recorder?.state === "recording") return;
-    this.recordingChunks = [];
-    const options = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-      ? { mimeType: "audio/webm;codecs=opus" } : undefined;
-    this.recorder = new MediaRecorder(this.recordingDestination.stream, options);
-    this.recorder.ondataavailable = (event) => {
-      if (event.data.size) this.recordingChunks.push(event.data);
-    };
-    this.recorder.start();
   }
 
-  stopRecording(): Promise<Blob> {
-    return new Promise((resolve, reject) => {
-      if (!this.recorder || this.recorder.state !== "recording") {
-        reject(new Error("No recording is active."));
-        return;
-      }
-      const recorder = this.recorder;
-      recorder.onerror = () => reject(new Error("Recording failed."));
-      recorder.onstop = () => {
-        const blob = new Blob(this.recordingChunks, { type: "audio/webm" });
-        this.recordingChunks = [];
-        this.recorder = null;
-        resolve(blob);
-      };
-      recorder.stop();
+  private async ensureRecordingNode() {
+    if (this.recordingNode) return this.recordingNode;
+    const context = this.getContext();
+    if (!context.audioWorklet || typeof AudioWorkletNode === "undefined") {
+      throw new Error("AudioWorklet recording is not supported on this system.");
+    }
+    await this.loadRecordingProcessor(context);
+    const node = new AudioWorkletNode(context, "orbitronica-pcm-capture", {
+      channelCount: 2, channelCountMode: "explicit", outputChannelCount: [2]
     });
+    const pull = context.createGain();
+    pull.gain.value = 0;
+    this.masterPanner!.connect(node);
+    node.connect(pull);
+    pull.connect(context.destination);
+    node.port.onmessage = ({ data }) => this.handleRecordingMessage(data as Record<string, unknown>);
+    // A processor error can arrive after this disconnected node has been replaced.
+    // Never let a stale node tear down a new recording session.
+    node.onprocessorerror = () => {
+      if (this.recordingNode === node) this.failRecording(new Error("AudioWorklet recording failed."));
+    };
+    this.recordingNode = node;
+    this.recordingPull = pull;
+    return node;
+  }
+
+  private handleRecordingMessage(message: Record<string, unknown>) {
+    const session = this.recordingSession;
+    if (!session || message.recordingId !== session.id) return;
+    if (message.type === "chunk" && message.left instanceof ArrayBuffer && message.right instanceof ArrayBuffer) {
+      session.chunks[0].push(new Float32Array(message.left));
+      session.chunks[1].push(new Float32Array(message.right));
+    } else if (message.type === "started" && session.state === "starting") {
+      window.clearTimeout(session.timeout);
+      session.state = "recording";
+      session.resolve?.();
+    } else if (message.type === "stopped" && session.state === "stopping") {
+      window.clearTimeout(session.timeout);
+      const channels = session.chunks.map((parts) => this.joinRecordingChunks(parts));
+      this.recordingSession = null;
+      const result: RecordedPcm = { channels, sampleRate: this.getContext().sampleRate };
+      session.result = result;
+      session.resolve?.();
+    }
+  }
+
+  private joinRecordingChunks(parts: Float32Array[]) {
+    const length = parts.reduce((total, part) => total + part.length, 0);
+    const joined = new Float32Array(length);
+    let offset = 0;
+    for (const part of parts) { joined.set(part, offset); offset += part.length; }
+    return joined;
+  }
+
+  private failRecording(error: Error) {
+    const session = this.recordingSession;
+    if (session) { window.clearTimeout(session.timeout); this.recordingSession = null; session.reject?.(error); }
+    try { this.recordingNode?.disconnect(); } catch { /* already disconnected */ }
+    try { this.recordingPull?.disconnect(); } catch { /* already disconnected */ }
+    this.recordingNode = null;
+    this.recordingPull = null;
+  }
+
+  private waitForRecordingAck(session: RecordingSession) {
+    return new Promise<void>((resolve, reject) => {
+      session.resolve = resolve;
+      session.reject = reject;
+      session.timeout = window.setTimeout(() => this.failRecording(new Error("AudioWorklet recording acknowledgement timed out.")), 5000);
+    });
+  }
+
+  async startRecording(): Promise<void> {
+    if (this.recordingSession) throw new Error("A recording operation is already active.");
+    const session: RecordingSession = { id: ++this.nextRecordingId, state: "starting", chunks: [[], []] };
+    this.recordingSession = session;
+    try {
+      const node = await this.ensureRecordingNode();
+      const acknowledgement = this.waitForRecordingAck(session);
+      node.port.postMessage({ type: "start", recordingId: session.id });
+      await acknowledgement;
+    } catch (cause) {
+      const error = cause instanceof Error ? cause : new Error(String(cause));
+      if (this.recordingSession === session) this.failRecording(error);
+      throw error;
+    }
+  }
+
+  async stopRecording(): Promise<RecordedPcm> {
+    const session = this.recordingSession;
+    if (!session || session.state !== "recording" || !this.recordingNode) throw new Error("No recording is active.");
+    session.state = "stopping";
+    const acknowledgement = this.waitForRecordingAck(session);
+    this.recordingNode.port.postMessage({ type: "stop", recordingId: session.id });
+    await acknowledgement;
+    const result = session.result;
+    if (!result) throw new Error("AudioWorklet stopped without captured audio.");
+    return result;
   }
 
   removeOrbit(orbitId: string) {

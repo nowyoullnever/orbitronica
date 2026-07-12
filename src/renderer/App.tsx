@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { SetStateAction } from "react";
 import { audioEngine, type ProjectAudioInput } from "./audio/audioEngine";
+import { encodeWav, type WavSampleFormat } from "./audio/wavEncoder";
 import { CanvasStage } from "./components/CanvasStage";
 import { ContextMenu } from "./components/ContextMenu";
 import { MasterControls } from "./components/MasterControls";
 import { OrbitSettingsPanel } from "./components/OrbitSettingsPanel";
+import { PreferencesModal } from "./components/PreferencesModal";
 import { SceneTabs } from "./components/SceneTabs";
 import { Toolbar } from "./components/Toolbar";
 import { TransportControls } from "./components/TransportControls";
@@ -50,6 +52,10 @@ type AppClipboard = {
   sourceOrbitId: string;
   data: CopiedPlanetData;
 } | null;
+type RecordingPreferencesApi = {
+  getPreferences?: () => Promise<{ export: { sampleFormat: WavSampleFormat } }>;
+};
+type MenuAction = "open-project" | "save-project" | "save-project-as" | "preferences";
 
 const cleanPlanet = (planet: Planet): Planet => ({
   ...planet,
@@ -88,6 +94,9 @@ export default function App() {
   const [selectedTool, setSelectedTool] = useState<Tool>("select");
   const [isPlaying, setIsPlaying] = useState(true);
   const [isRecording, setIsRecording] = useState(false);
+  const [recordingPhase, setRecordingPhase] = useState<"idle" | "starting" | "recording" | "encoding" | "saving">("idle");
+  const [recordingSampleFormat, setRecordingSampleFormat] = useState<WavSampleFormat>("pcm16");
+  const [isPreferencesOpen, setIsPreferencesOpen] = useState(false);
   const [masterVolume, setMasterVolume] = useState(1);
   const [masterPan, setMasterPan] = useState(0);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -113,6 +122,13 @@ export default function App() {
   const playbackEpoch = useRef(0);
   const clipboardRef = useRef<AppClipboard>(null);
   const sceneDuplicationPending = useRef(false);
+  const recordingInFlight = useRef(false);
+  const actionsRef = useRef<Record<MenuAction, () => void | Promise<void>>>({
+    "open-project": () => undefined,
+    "save-project": () => undefined,
+    "save-project-as": () => undefined,
+    preferences: () => undefined
+  });
   const stateRef = useRef({
     scenes, activeSceneId, orbits, planets, bars, selection, multiSelection,
     lastLoopBarLengthRadians, masterVolume, masterPan
@@ -122,6 +138,13 @@ export default function App() {
     lastLoopBarLengthRadians, masterVolume, masterPan
   };
   clipboardRef.current = clipboard;
+
+  useEffect(() => {
+    const preferencesApi = window.orbitonicAPI as (typeof window.orbitonicAPI & RecordingPreferencesApi) | undefined;
+    void preferencesApi?.getPreferences?.().then((preferences) => {
+      setRecordingSampleFormat(preferences.export.sampleFormat);
+    }).catch(() => undefined);
+  }, []);
 
   function reserveProjectIds() {
     reserveSceneProjectIds(projectIds.current, stateRef.current.scenes);
@@ -810,7 +833,7 @@ export default function App() {
     }
   }
 
-  async function saveProject() {
+  async function performProjectSave(currentPath?: string) {
     if (!window.orbitonicAPI) return flash("Project saving is only available in the desktop app.");
     const project = serializeProject(
       projectName || "Untitled Session", scenes, activeSceneId, lastLoopBarLengthRadians,
@@ -820,12 +843,20 @@ export default function App() {
       const asset = audioEngine.getProjectAsset(orbit.id);
       return asset ? [{ orbitId: orbit.id, fileName: asset.fileName, bytes: asset.bytes }] : [];
     });
-    const result = await window.orbitonicAPI.saveProject({ project, assets }, projectPath);
+    const result = await window.orbitonicAPI.saveProject({ project, assets }, currentPath);
     if (result.ok) {
       setProjectPath(result.path);
       setIsDirty(false);
       flash("Project saved.");
     } else if (!result.canceled) flash(result.error ?? "Project could not be saved.");
+  }
+
+  async function saveProject() {
+    await performProjectSave(projectPath);
+  }
+
+  async function saveProjectAs() {
+    await performProjectSave(undefined);
   }
 
   async function openProject() {
@@ -916,25 +947,44 @@ export default function App() {
   }
 
   async function toggleRecording() {
+    if (recordingInFlight.current) return;
+    if (recordingPhase !== "idle" && recordingPhase !== "recording") return;
+    recordingInFlight.current = true;
+    let recordingStarted = false;
     try {
-      if (!isRecording) {
+      if (recordingPhase === "idle") {
+        setRecordingPhase("starting");
         await audioEngine.resume();
-        audioEngine.startRecording();
+        await audioEngine.startRecording();
         setIsRecording(true);
+        setRecordingPhase("recording");
+        recordingStarted = true;
         flash("Recording started.");
       } else {
-        const blob = await audioEngine.stopRecording();
+        const recording = await audioEngine.stopRecording();
         setIsRecording(false);
-        const bytes = new Uint8Array(await blob.arrayBuffer());
+        setRecordingPhase("encoding");
+        const bytes = encodeWav(recording.channels, recording.sampleRate, recordingSampleFormat);
         const stamp = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
-        const result = await window.orbitonicAPI?.saveRecording(bytes, `recording_${stamp}.webm`);
+        setRecordingPhase("saving");
+        const result = await window.orbitonicAPI?.saveRecording(bytes, `recording_${stamp}.wav`);
         if (result?.ok) flash("Recording saved.");
         else if (!result?.canceled) flash(result?.error ?? "Recording could not be saved.");
       }
     } catch (error) {
       setIsRecording(false);
       flash(error instanceof Error ? error.message : "Recording failed.");
+    } finally {
+      if (!recordingStarted) setRecordingPhase("idle");
+      recordingInFlight.current = false;
     }
+  }
+
+  async function savePreferences(sampleFormat: WavSampleFormat) {
+    if (!window.orbitonicAPI) throw new Error("Preferences are only available in the desktop app.");
+    const preferences = await window.orbitonicAPI.setPreferences({ export: { sampleFormat } });
+    setRecordingSampleFormat(preferences.export.sampleFormat);
+    flash("Preferences saved.");
   }
 
   function updateOrbit(orbitId: string, changes: Partial<Orbit>) {
@@ -1067,6 +1117,22 @@ export default function App() {
     window.addEventListener("pointerdown", resume, { once: true });
   }, []);
 
+  // Keep one IPC subscription while routing every menu action to the latest render's handlers.
+  actionsRef.current = {
+    "open-project": openProject,
+    "save-project": saveProject,
+    "save-project-as": saveProjectAs,
+    preferences: () => setIsPreferencesOpen(true)
+  };
+
+  useEffect(() => {
+    const api = window.orbitonicAPI;
+    if (!api) return;
+    return api.onMenuAction((action) => {
+      void actionsRef.current[action]();
+    });
+  }, []);
+
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
@@ -1075,6 +1141,10 @@ export default function App() {
       if (typing && event.key !== "Escape") return;
       const key = event.key.toLowerCase();
       const command = event.ctrlKey || event.metaKey;
+      // Electron's native File menu owns these accelerators and emits one IPC
+      // action. Keep this renderer fallback only for a non-desktop preview so a
+      // single Cmd/Ctrl+S or Cmd/Ctrl+O cannot run both paths.
+      const nativeMenuHandlesFileShortcuts = !!window.orbitonicAPI?.onMenuAction;
       if (command && /^[1-9]$/.test(key)) {
         const targetScene = stateRef.current.scenes[Number(key) - 1];
         if (targetScene) { event.preventDefault(); activateScene(targetScene.id); }
@@ -1099,18 +1169,18 @@ export default function App() {
         pastePlanet();
       }
       else if (command && key === "d") { event.preventDefault(); duplicateOrbit(); }
-      else if (command && key === "s") { event.preventDefault(); void saveProject(); }
-      else if (command && key === "o") { event.preventDefault(); void openProject(); }
+      else if (command && key === "s" && !nativeMenuHandlesFileShortcuts) { event.preventDefault(); void saveProject(); }
+      else if (command && key === "o" && !nativeMenuHandlesFileShortcuts) { event.preventDefault(); void openProject(); }
       else if (event.key === "Delete" || event.key === "Backspace") {
         event.preventDefault();
         const multi = stateRef.current.multiSelection;
         if (multi.orbitIds.length || multi.planetIds.length) deleteMultiSelection();
         else deleteSelection();
       }
-      else if (key === "s") setSelectedTool("select");
-      else if (key === "p") setSelectedTool("planet");
-      else if (key === "b") setSelectedTool("bar");
-      else if (key === "r") void toggleRecording();
+      else if (!command && key === "s") setSelectedTool("select");
+      else if (!command && key === "p") setSelectedTool("planet");
+      else if (!command && key === "b") setSelectedTool("bar");
+      else if (!command && key === "r") void toggleRecording();
       else if (event.code === "Space") {
         event.preventDefault();
         if (isPlaying) { audioEngine.stopAllActivePlaybacks(); setIsPlaying(false); }
@@ -1126,7 +1196,7 @@ export default function App() {
 
   return <main className="app" onClick={() => setMenu(null)}>
     <header className="topline">
-      <span>ORBITONIC</span><small>{projectName.toUpperCase()} {isDirty ? "•" : ""}</small>
+      <span>ORBITRONICA</span><small>{projectName.toUpperCase()} {isDirty ? "•" : ""}</small>
       <i className={`topline-status ${isRecording ? "recording" : isPlaying ? "live" : ""}`}>
         {isRecording ? "RECORDING" : isPlaying ? "RUNNING" : "PAUSED"}
       </i>
@@ -1369,6 +1439,11 @@ export default function App() {
         void handleFiles(Array.from(event.target.files ?? []), uploadPoint.current);
         event.currentTarget.value = "";
       }} />
+    {isPreferencesOpen && <PreferencesModal
+      sampleFormat={recordingSampleFormat}
+      onClose={() => setIsPreferencesOpen(false)}
+      onSave={savePreferences}
+    />}
     {message && <div className="toast">{message}</div>}
     <footer>S/P/B TOOLS · SPACE TRANSPORT · CTRL+S SAVE · R RECORD</footer>
   </main>;
