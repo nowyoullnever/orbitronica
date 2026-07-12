@@ -5,9 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   describeProjectAssets, portableAudioPath, rewriteProjectAudioPaths
 } from "./projectAssets.js";
-import { newProjectPath, projectDialogExtensions } from "./projectPaths.js";
 import { PreferencesStore } from "./preferences.js";
-import { installAppMenu } from "./appMenu.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
