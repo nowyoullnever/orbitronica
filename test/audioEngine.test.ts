@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 
 class FakeParam {
@@ -50,6 +51,14 @@ class FakeAudioContext {
 
 Object.assign(globalThis, { AudioContext: FakeAudioContext });
 const { audioEngine } = await import("../src/renderer/audio/audioEngine.ts");
+
+test("recording path is lazy AudioWorklet PCM capture with acknowledged session protocol", () => {
+  const source = fs.readFileSync(new URL("../src/renderer/audio/audioEngine.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /MediaRecorder|createMediaStreamDestination/);
+  for (const token of ["AudioWorkletNode", "recordingId", "started", "stopped", "processorerror", "2048", "URL.revokeObjectURL"]) {
+    assert.ok(source.includes(token), `missing recording protocol token: ${token}`);
+  }
+});
 
 test("master setters remain lazy and initialize the first graph with stored values", async () => {
   audioEngine.setMasterVolume(.4);
