@@ -3,8 +3,10 @@ import type {
   SerializableProjectV5, SerializableSceneV5, TriggerBar, ViewportState
 } from "../state/types";
 import {
-  assertValidScenes, collectSceneIds, createEmptyScene, createSpliceBars, DEFAULT_VIEWPORT
+  assertValidScenes, collectSceneIds, createEmptyScene, createSpliceBars, DEFAULT_VIEWPORT,
+  stabilizePlanetRuntime
 } from "../state/scenes.ts";
+import { normalizeAngle, normalizeSpliceCount, TAU } from "../utils/geometry.ts";
 import { normalizeSampleWindow } from "../utils/sampleTrim.ts";
 
 export type ParsedProject = Omit<SerializableProjectV5, "scenes"> & { scenes: Scene[] };
@@ -15,42 +17,55 @@ function invalidProject(detail?: string): never {
   throw new Error(`This file is not a valid Orbitonic project${detail ? `: ${detail}` : "."}`);
 }
 
-function serializeOrbit(orbit: Orbit): Orbit {
-  const window = normalizeSampleWindow(orbit.audioDuration, orbit.sampleStart, orbit.sampleEnd);
+const finite = (value: unknown, fallback: number) => typeof value === "number" && Number.isFinite(value) ? value : fallback;
+const clamp = (value: unknown, min: number, max: number, fallback: number) =>
+  Math.min(max, Math.max(min, finite(value, fallback)));
+const positive = (value: unknown, fallback: number) => Math.max(.000001, finite(value, fallback));
+const nonNegative = (value: unknown, fallback: number) => Math.max(0, finite(value, fallback));
+
+function normalizeOrbit(orbit: Partial<Orbit>): Orbit {
+  const audioDuration = nonNegative(orbit.audioDuration, 0);
+  const window = normalizeSampleWindow(audioDuration, orbit.sampleStart, orbit.sampleEnd);
   return {
     ...orbit,
-    audioPan: Number.isFinite(orbit.audioPan) ? orbit.audioPan : 0,
+    id: typeof orbit.id === "string" ? orbit.id : "",
+    name: typeof orbit.name === "string" ? orbit.name : "",
+    audioName: typeof orbit.audioName === "string" ? orbit.audioName : "",
+    x: finite(orbit.x, 0), y: finite(orbit.y, 0),
+    radiusX: positive(orbit.radiusX, 100), radiusY: positive(orbit.radiusY, 100),
+    initialRadiusX: positive(orbit.initialRadiusX, 100), initialRadiusY: positive(orbit.initialRadiusY, 100),
+    audioDuration, mode: orbit.mode === "sequence" ? "sequence" : "loop",
+    volume: clamp(orbit.volume, 0, 1, 1), audioPan: clamp(orbit.audioPan, -1, 1, 0),
+    isPaused: orbit.isPaused === true, isMuted: orbit.isMuted === true, isSolo: orbit.isSolo === true,
+    audioPath: typeof orbit.audioPath === "string" ? orbit.audioPath : undefined,
+    isMissingAudio: typeof orbit.isMissingAudio === "boolean" ? orbit.isMissingAudio : undefined,
+    showWaveform: typeof orbit.showWaveform === "boolean" ? orbit.showWaveform : undefined,
+    color: typeof orbit.color === "string" ? orbit.color : "#5b625d",
+    sequenceRetriggerMode: ["overlap", "cut-previous", "ignore-until-end"].includes(String(orbit.sequenceRetriggerMode))
+      ? orbit.sequenceRetriggerMode as Orbit["sequenceRetriggerMode"] : "overlap",
+    spliceCount: orbit.spliceCount === undefined ? undefined : normalizeSpliceCount(orbit.spliceCount),
+    spliceStartAngle: orbit.spliceStartAngle === undefined ? undefined : normalizeAngle(finite(orbit.spliceStartAngle, 0)),
     sampleStart: window.start,
     sampleEnd: window.end
   };
 }
 
-function stablePlanet(planet: Planet): Planet {
+function normalizePlanet(planet: Partial<Planet>): Planet {
   return {
     ...planet,
-    angle: Number.isFinite(planet.angle) ? planet.angle : 0,
-    speed: Number.isFinite(planet.speed) ? planet.speed : 1,
-    volume: Number.isFinite(planet.volume) ? planet.volume : 1,
-    audioPan: Number.isFinite(planet.audioPan) ? planet.audioPan : 0,
-    pitchCents: Number.isFinite(planet.pitchCents) ? planet.pitchCents : 0,
-    isActive: planet.isActive ?? true,
+    id: typeof planet.id === "string" ? planet.id : "",
+    orbitId: typeof planet.orbitId === "string" ? planet.orbitId : "",
+    angle: normalizeAngle(finite(planet.angle, 0)), speed: clamp(planet.speed, .000001, 8, 1),
+    volume: clamp(planet.volume, 0, 1, 1), audioPan: clamp(planet.audioPan, -1, 1, 0),
+    pitchCents: clamp(planet.pitchCents, -4800, 4800, 0),
+    isActive: planet.isActive !== false,
     direction: planet.direction === -1 ? -1 : 1,
-    pendingSpeed: undefined,
-    isSpeedProcessing: false,
-    processingSpeed: undefined,
-    speedProcessRequestId: undefined,
-    speedProcessingError: undefined,
-    pendingPitchCents: undefined,
-    isPitchProcessing: false,
-    processingPitchCents: undefined,
-    pitchProcessRequestId: undefined,
-    collisionSpeedMultiplier: 1,
-    collisionFlashRemaining: 0
+    collisionSpeedMultiplier: 1, collisionFlashRemaining: 0
   };
 }
 
 function serializePlanet(planet: Planet): Planet {
-  const durable: Partial<Planet> = { ...stablePlanet(planet) };
+  const durable: Partial<Planet> = { ...stabilizePlanetRuntime(normalizePlanet(planet)) };
   delete durable.pendingSpeed;
   delete durable.isSpeedProcessing;
   delete durable.processingSpeed;
@@ -62,6 +77,20 @@ function serializePlanet(planet: Planet): Planet {
   delete durable.pitchProcessRequestId;
   delete durable.collisionFlashRemaining;
   return durable as Planet;
+}
+
+function normalizeBar(bar: Partial<TriggerBar>): TriggerBar {
+  const startTime = bar.startTime === undefined ? undefined : nonNegative(bar.startTime, 0);
+  const endTime = bar.endTime === undefined ? undefined : Math.max(startTime ?? 0, nonNegative(bar.endTime, 0));
+  return {
+    ...bar,
+    id: typeof bar.id === "string" ? bar.id : "",
+    orbitId: typeof bar.orbitId === "string" ? bar.orbitId : "",
+    angle: normalizeAngle(finite(bar.angle, 0)), startAngle: normalizeAngle(finite(bar.startAngle, 0)),
+    lengthRadians: clamp(bar.lengthRadians, .000001, TAU, 1),
+    kind: bar.kind === "stop" ? "stop" : "play", source: bar.source === "splice" ? "splice" : "manual",
+    startTime, endTime
+  };
 }
 
 export function normalizeMasterMix(master?: Partial<MasterMix> | null): MasterMix {
@@ -99,9 +128,9 @@ function serializeScene(scene: Scene): SerializableSceneV5 {
   return {
     id: scene.id,
     name: scene.name,
-    orbits: scene.orbits.map(serializeOrbit),
+    orbits: scene.orbits.map(normalizeOrbit),
     planets: scene.planets.map(serializePlanet),
-    bars: scene.bars.filter((bar) => bar.source !== "splice").map((bar) => ({ ...bar })),
+    bars: scene.bars.filter((bar) => bar.source !== "splice").map(normalizeBar),
     viewport: normalizeViewport(scene.viewport),
     selection: { ...scene.selection }
   };
@@ -124,8 +153,7 @@ export function serializeProject(
     activeSceneId: persistedScenes.some((scene) => scene.id === activeSceneId)
       ? activeSceneId : persistedScenes[0]?.id ?? "",
     master: normalizeMasterMix(master),
-    lastLoopBarLengthRadians: Number.isFinite(lastLoopBarLengthRadians)
-      ? lastLoopBarLengthRadians : Math.PI / 12
+    lastLoopBarLengthRadians: clamp(lastLoopBarLengthRadians, .000001, TAU, Math.PI / 12)
   };
 }
 
@@ -258,9 +286,9 @@ function requireSceneShape(value: unknown, index: number, strictV5 = true): asse
 }
 
 function runtimeScene(raw: SerializableSceneV5): Scene {
-  const orbits = raw.orbits.map(serializeOrbit);
-  const planets = raw.planets.map(stablePlanet);
-  const bars = raw.bars.filter((bar) => bar.source !== "splice").map((bar) => ({ ...bar }));
+  const orbits = raw.orbits.map(normalizeOrbit);
+  const planets = raw.planets.map((planet) => stabilizePlanetRuntime(normalizePlanet(planet)));
+  const bars = raw.bars.filter((bar) => bar.source !== "splice").map(normalizeBar);
   return {
     id: raw.id,
     name: raw.name,
@@ -293,9 +321,9 @@ function migrateV4(raw: Partial<SerializableProjectV4>, createId: IdFactory): Pa
     invalidProject("v4 projects require top-level orbits, planets, and bars arrays.");
   }
   requireSceneShape({ id: "migration", name: "Scene 1", orbits: raw.orbits, planets: raw.planets, bars: raw.bars }, 0, false);
-  const orbits = raw.orbits.map(serializeOrbit);
-  const planets = raw.planets.map(stablePlanet);
-  const manualBars = raw.bars.filter((bar) => bar.source !== "splice").map((bar) => ({ ...bar }));
+  const orbits = raw.orbits.map(normalizeOrbit);
+  const planets = raw.planets.map((planet) => stabilizePlanetRuntime(normalizePlanet(planet)));
+  const manualBars = raw.bars.filter((bar) => bar.source !== "splice").map(normalizeBar);
   const scene: Scene = {
     id: uniqueMigrationSceneId(orbits, planets, manualBars, createId),
     name: "Scene 1",
@@ -320,8 +348,7 @@ function migrateV4(raw: Partial<SerializableProjectV4>, createId: IdFactory): Pa
     scenes: [scene],
     activeSceneId: scene.id,
     master: normalizeMasterMix(raw.master),
-    lastLoopBarLengthRadians: Number.isFinite(raw.lastLoopBarLengthRadians)
-      ? raw.lastLoopBarLengthRadians! : Math.PI / 12
+    lastLoopBarLengthRadians: clamp(raw.lastLoopBarLengthRadians, .000001, TAU, Math.PI / 12)
   };
 }
 
@@ -330,11 +357,11 @@ export function parseProject(text: string, createId: IdFactory = defaultIdFactor
   try { raw = JSON.parse(text); } catch { invalidProject("the JSON could not be parsed."); }
   if (!raw || typeof raw !== "object") invalidProject("the root value is not an object.");
   const root = raw as Record<string, unknown>;
-  if (root.schemaVersion === undefined || root.schemaVersion === 4) {
+  if (root.schemaVersion === undefined || root.schemaVersion === 2 || root.schemaVersion === 3 || root.schemaVersion === 4) {
     return migrateV4(root as Partial<SerializableProjectV4>, createId);
   }
   if (typeof root.schemaVersion === "number" && root.schemaVersion > 5) {
-    throw new Error(`Unsupported Orbitonic schema version ${root.schemaVersion}. This app supports versions 4 and 5.`);
+    throw new Error(`Unsupported Orbitonic schema version ${root.schemaVersion}. This app supports versions 2 through 5.`);
   }
   if (root.schemaVersion !== 5) invalidProject(`unsupported schemaVersion ${String(root.schemaVersion)}.`);
   if (root.appName !== "Orbitonic") invalidProject("v5 appName must be \"Orbitonic\".");

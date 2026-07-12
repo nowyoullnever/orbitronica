@@ -156,13 +156,13 @@ class AudioEngine {
     return staged;
   }
 
-  /** Installs one pre-decoded, globally unique orbit without disturbing existing project audio. */
+  /** Staged bytes are transaction-owned and immutable after staging; install keeps that single owned copy. */
   installStagedOrbitAudio(item: StagedProjectAudio): void {
     if (this.buffers.has(item.orbitId) || this.rawFiles.has(item.orbitId) || this.orbitRuntimes.has(item.orbitId)) {
       throw new Error(`Audio already exists for orbit "${item.orbitId}".`);
     }
     try {
-      this.rawFiles.set(item.orbitId, { fileName: item.fileName, bytes: new Uint8Array(item.bytes) });
+      this.rawFiles.set(item.orbitId, { fileName: item.fileName, bytes: item.bytes });
       this.registerBuffer(item.orbitId, item.buffer, item.volume);
       this.setOrbitAudioPan(item.orbitId, item.pan);
     } catch (error) {
@@ -189,7 +189,7 @@ class AudioEngine {
     try {
       clear();
       for (const item of staged) {
-        this.rawFiles.set(item.orbitId, { fileName: item.fileName, bytes: new Uint8Array(item.bytes) });
+        this.rawFiles.set(item.orbitId, { fileName: item.fileName, bytes: item.bytes });
         this.registerBuffer(item.orbitId, item.buffer, item.volume);
         this.setOrbitAudioPan(item.orbitId, item.pan);
       }

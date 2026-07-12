@@ -53,7 +53,7 @@ ipcMain.handle("project:save", async (_event, payload: SavePayload, currentPath?
     const audioDir = path.join(projectDir, "audio");
     await fs.mkdir(audioDir, { recursive: true });
     const usedNames = new Set<string>();
-    const audioPaths: Record<string, string> = {};
+    const audioPaths = new Map<string, string>();
     for (let index = 0; index < payload.assets.length; index++) {
       const asset = payload.assets[index];
       const safeBase = asset.fileName.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_");
@@ -62,7 +62,7 @@ ipcMain.handle("project:save", async (_event, payload: SavePayload, currentPath?
       while (usedNames.has(name)) name = `${String(index + 1).padStart(3, "0")}_${suffix++}_${safeBase}`;
       usedNames.add(name);
       await fs.writeFile(path.join(audioDir, name), Buffer.from(asset.bytes));
-      audioPaths[asset.orbitId] = portableAudioPath(name);
+      audioPaths.set(asset.orbitId, portableAudioPath(name));
     }
     const project = rewriteProjectAudioPaths(payload.project, audioPaths);
     await fs.writeFile(projectPath, JSON.stringify(project, null, 2), "utf8");

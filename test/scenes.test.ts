@@ -98,6 +98,17 @@ test("active scene transition stops sources exactly once and skips navigation no
   assert.deepEqual(calls, ["stop", "close", "cancel"]);
 });
 
+test("active scene designation happens synchronously before outgoing sources stop", () => {
+  const calls: string[] = [];
+  runActiveSceneTransition("a", "b", {
+    designateAudibleScene: () => calls.push("designate:b"),
+    stopActivePlaybacks: () => calls.push("stop"),
+    closeTransientUi: () => calls.push("close"),
+    cancelInteractions: () => calls.push("cancel")
+  });
+  assert.deepEqual(calls, ["designate:b", "stop", "close", "cancel"]);
+});
+
 test("history projection clears async and collision runtime state with structural sharing", () => {
   const stable = planet("stable", "orbit-a");
   const processing = planet("pending", "orbit-a", {
@@ -203,7 +214,7 @@ test("durable scene token ignores simulation and transient UI but detects incomp
   const base = scene({ orbits: [orbit("o")], planets: [planet("p", "o")] });
   const simulation = {
     ...base,
-    planets: [{ ...base.planets[0], angle: 2, collisionFlashRemaining: 8, collisionSpeedMultiplier: 3 }],
+    planets: [{ ...base.planets[0], angle: 2, direction: -1, collisionFlashRemaining: 8, collisionSpeedMultiplier: 3 }],
     viewport: { zoom: 2, offsetX: 10, offsetY: 20 },
     selection: { orbitId: "o", planetId: "p", barId: null }
   };

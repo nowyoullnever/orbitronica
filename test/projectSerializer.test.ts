@@ -86,6 +86,61 @@ test("v4 and unversioned projects migrate to one normalized scene", () => {
   assert.equal(parseProject(JSON.stringify(unversioned), () => "legacy-scene").scenes[0].id, "legacy-scene");
 });
 
+test("v2, v3, v4, and unversioned legacy documents normalize into reopenable v5", () => {
+  for (const schemaVersion of [undefined, 2, 3, 4]) {
+    const legacy = {
+      ...(schemaVersion === undefined ? {} : { schemaVersion }), projectName: "Historical",
+      orbits: [orbit("o", { volume: 3, audioPan: -3, spliceCount: 99, spliceStartAngle: -1 })],
+      planets: [planet("p", "o", { angle: -1, speed: 12, volume: 3, audioPan: -4, pitchCents: 5000 })],
+      bars: [bar("b", "o", { angle: -1, startAngle: 99, lengthRadians: 99 })]
+    };
+    const migrated = parseProject(JSON.stringify(legacy), () => `scene-${schemaVersion ?? "old"}`);
+    const reopened = parseProject(JSON.stringify(serializeProject(
+      migrated.projectName, migrated.scenes, migrated.activeSceneId,
+      migrated.lastLoopBarLengthRadians, migrated.master
+    )));
+    assert.equal(reopened.scenes[0].orbits[0].volume, 1);
+    assert.equal(reopened.scenes[0].planets[0].speed, 8);
+    assert.equal(reopened.scenes[0].planets[0].pitchCents, 4800);
+  }
+});
+
+test("legacy malformed optional fields are repaired before the migrated document is reopened", () => {
+  const legacy = {
+    schemaVersion: 4,
+    orbits: [{
+      ...orbit("o"), audioPath: 42, isMissingAudio: "yes", showWaveform: "no",
+      sampleStart: "start", sampleEnd: "end", spliceCount: "many", spliceStartAngle: "left"
+    }],
+    planets: [{ ...planet("p", "o"), isActive: "sometimes" }],
+    bars: [bar("b", "o")]
+  };
+  const migrated = parseProject(JSON.stringify(legacy), () => "scene");
+  const reopened = parseProject(JSON.stringify(serializeProject(
+    migrated.projectName, migrated.scenes, migrated.activeSceneId,
+    migrated.lastLoopBarLengthRadians, migrated.master
+  )));
+
+  const reopenedOrbit = reopened.scenes[0].orbits[0];
+  assert.equal(reopenedOrbit.audioPath, undefined);
+  assert.equal(reopenedOrbit.isMissingAudio, undefined);
+  assert.equal(reopenedOrbit.showWaveform, undefined);
+  assert.equal(reopenedOrbit.spliceCount, 0);
+  assert.equal(reopened.scenes[0].planets[0].isActive, true);
+});
+
+test("serialization closes runtime numeric domains while native v5 remains strict", () => {
+  const unstable = scene("s", {
+    orbits: [orbit("o", { volume: 4, audioPan: -4, spliceStartAngle: -1 })],
+    planets: [planet("p", "o", { angle: -1, speed: 12, pitchCents: 5000 })],
+    bars: [bar("b", "o", { angle: -1, lengthRadians: 99, startAngle: -1 })]
+  });
+  const serialized = serializeProject("x", [unstable], "s", 99, { volume: 3, pan: -3 });
+  assert.doesNotThrow(() => parseProject(JSON.stringify(serialized)));
+  assert.equal(serialized.scenes[0].planets[0].speed, 8);
+  assert.equal(serialized.scenes[0].planets[0].pitchCents, 4800);
+});
+
 test("empty v5 scenes repair and invalid active/selection state falls back safely", () => {
   const empty = parseProject(JSON.stringify({
     schemaVersion: 5, appName: "Orbitonic", scenes: [], activeSceneId: "missing"
@@ -147,6 +202,13 @@ test("v5 strictly rejects malformed durable entity fields and enums", () => {
   assert.throws(() => parseProject(malformed((copy) => { copy.scenes[0].planets[0].direction = 0; })), /direction/);
   assert.throws(() => parseProject(malformed((copy) => { copy.scenes[0].bars[0].kind = "pause"; })), /kind/);
   assert.throws(() => parseProject(malformed((copy) => { delete copy.scenes[0].viewport.zoom; })), /viewport/);
+  for (const [field, value] of [
+    ["audioPath", 42], ["isMissingAudio", "yes"], ["showWaveform", "yes"],
+    ["sampleStart", "start"], ["sampleEnd", "end"], ["spliceCount", "many"], ["spliceStartAngle", "left"]
+  ] as const) {
+    assert.throws(() => parseProject(malformed((copy) => { copy.scenes[0].orbits[0][field] = value; })),
+      new RegExp(field));
+  }
   for (const [field, value] of [
     ["radiusX", 0], ["initialRadiusY", -1], ["audioDuration", -1], ["volume", 1.1],
     ["audioPan", -1.1], ["sampleStart", -1], ["sampleEnd", 3], ["spliceCount", 3],

@@ -106,6 +106,8 @@ type WaveformGeometry = {
   basePath: Path2D;
 };
 
+type PlaybackCallback = { sceneId: string; epoch: number };
+
 type Props = {
   orbits: Orbit[];
   planets: Planet[];
@@ -115,6 +117,8 @@ type Props = {
   multiSelection: MultiSelection;
   selectedTool: Tool;
   isPlaying: boolean;
+  sceneId: string;
+  playbackEpoch: number;
   isDragOver: boolean;
   cancelSignal: number;
   viewport: ViewportState;
@@ -124,9 +128,9 @@ type Props = {
   onAddPlanet: (orbitId: string, angle: number) => void;
   onAddBar: (orbitId: string, angle: number) => void;
   onMovePlanets: (updates: Map<string, Partial<Planet>>) => void;
-  onLoopFrame: (orbit: Orbit, planet: Planet, bar: TriggerBar, inside: boolean, angle: number) => void;
-  onSequencePlay: (orbit: Orbit, planet: Planet, bar: TriggerBar) => void;
-  onSequenceStop: (orbitId: string) => void;
+  onLoopFrame: (orbit: Orbit, planet: Planet, bar: TriggerBar, inside: boolean, angle: number, callback: PlaybackCallback) => void;
+  onSequencePlay: (orbit: Orbit, planet: Planet, bar: TriggerBar, callback: PlaybackCallback) => void;
+  onSequenceStop: (orbitId: string, callback: PlaybackCallback) => void;
   onContextMenu: (menu: ContextMenuState) => void;
   onBeginMutation: () => void;
   onResizeOrbit: (orbitId: string, radiusX: number, radiusY: number) => void;
@@ -800,6 +804,7 @@ export function CanvasStage(props: Props) {
         });
         for (const bar of state.bars.filter((item) =>
           item.orbitId === orbit.id && (orbit.mode === "loop" || item.source !== "splice"))) {
+          const callback = { sceneId: state.sceneId, epoch: state.playbackEpoch };
           const key = `${planet.id}:${bar.id}`;
           if (orbit.mode === "loop") {
             const inside = state.isPlaying && !orbit.isPaused && planet.isActive &&
@@ -808,16 +813,16 @@ export function CanvasStage(props: Props) {
               ? getLoopBarTransitions(previousUnwrappedAngle, unwrappedAngle, bar.angle, bar.lengthRadians)
               : [];
             for (const transition of transitions) {
-              state.onLoopFrame(orbit, next, bar, transition.type === "enter", normalizeAngle(transition.angle));
+              state.onLoopFrame(orbit, next, bar, transition.type === "enter", normalizeAngle(transition.angle), callback);
             }
-            state.onLoopFrame(orbit, next, bar, inside, angle);
+            state.onLoopFrame(orbit, next, bar, inside, angle, callback);
             triggerStates.current.set(key, inside);
           } else {
             const inside = state.isPlaying && !orbit.isPaused && planet.isActive &&
               angularDistance(angle, bar.angle) < .04;
             if (inside && !triggerStates.current.get(key)) {
-              if (bar.kind === "stop") state.onSequenceStop(orbit.id);
-              else state.onSequencePlay(orbit, next, bar);
+              if (bar.kind === "stop") state.onSequenceStop(orbit.id, callback);
+              else state.onSequencePlay(orbit, next, bar, callback);
             }
             triggerStates.current.set(key, inside);
           }

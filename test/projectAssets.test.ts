@@ -58,3 +58,14 @@ test("portable paths and malformed or empty project inputs are deterministic", (
   assert.deepEqual(collectProjectOrbits({ scenes: [{ orbits: null }, null, { orbits: [{ nope: true }] }] }), []);
   assert.deepEqual(describeProjectAssets({ scenes: [] }, "/tmp/project"), []);
 });
+
+test("prototype-like orbit IDs use explicit map entries and never inherit object paths", () => {
+  const project = { scenes: [{ orbits: [{ id: "__proto__" }, { id: "toString" }] }] };
+  const rewritten = rewriteProjectAudioPaths(project, new Map([
+    ["__proto__", "audio/proto.wav"], ["toString", "audio/string.wav"]
+  ]));
+  assert.deepEqual(rewritten.scenes[0].orbits.map((orbit) => orbit.audioPath), [
+    "audio/proto.wav", "audio/string.wav"
+  ]);
+  assert.equal(rewriteProjectAudioPaths(project, {}).scenes[0].orbits[0].audioPath, undefined);
+});

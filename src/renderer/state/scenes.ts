@@ -99,7 +99,7 @@ export function durableSceneStructureToken(scene: Scene): string {
     planets: scene.planets.map((planet) => ({
       id: planet.id, orbitId: planet.orbitId, speed: planet.speed, volume: planet.volume,
       audioPan: planet.audioPan, pitchCents: planet.pitchCents, isActive: planet.isActive,
-      direction: planet.direction, name: planet.name
+      name: planet.name
     })),
     bars: scene.bars
   });
@@ -216,6 +216,7 @@ export function deleteScene(
 }
 
 export type SceneTransitionEffects = {
+  designateAudibleScene?(): void;
   stopActivePlaybacks(): void;
   closeTransientUi(): void;
   cancelInteractions(): void;
@@ -226,13 +227,14 @@ export function runActiveSceneTransition(
   currentSceneId: string, nextSceneId: string, effects: SceneTransitionEffects, force = false
 ): boolean {
   if (!force && currentSceneId === nextSceneId) return false;
+  effects.designateAudibleScene?.();
   effects.stopActivePlaybacks();
   effects.closeTransientUi();
   effects.cancelInteractions();
   return true;
 }
 
-function isHistorySafePlanet(planet: Planet): boolean {
+function isStablePlanetRuntime(planet: Planet): boolean {
   return planet.pendingSpeed === undefined && planet.isSpeedProcessing !== true &&
     planet.processingSpeed === undefined && planet.speedProcessRequestId === undefined &&
     planet.speedProcessingError === undefined && planet.pendingPitchCents === undefined &&
@@ -241,8 +243,9 @@ function isHistorySafePlanet(planet: Planet): boolean {
     planet.collisionSpeedMultiplier === 1;
 }
 
-export function projectPlanetForHistory(planet: Planet): Planet {
-  if (isHistorySafePlanet(planet)) return planet;
+/** Removes async and collision-only state that must never be restored or persisted. */
+export function stabilizePlanetRuntime(planet: Planet): Planet {
+  if (isStablePlanetRuntime(planet)) return planet;
   return {
     ...planet,
     pendingSpeed: undefined, isSpeedProcessing: false, processingSpeed: undefined,
@@ -252,8 +255,10 @@ export function projectPlanetForHistory(planet: Planet): Planet {
   };
 }
 
+export const projectPlanetForHistory = stabilizePlanetRuntime;
+
 export function projectSceneForHistory(scene: Scene): Scene {
-  const planets = scene.planets.map(projectPlanetForHistory);
+  const planets = scene.planets.map(stabilizePlanetRuntime);
   return planets.some((planet, index) => planet !== scene.planets[index]) ? { ...scene, planets } : scene;
 }
 
@@ -368,10 +373,36 @@ export function replaceOrbitSpliceSettings(
   scenes: readonly Scene[], sceneId: string, orbitId: string,
   spliceCount: number, spliceStartAngle: number
 ): Scene[] {
+  const normalizedCount = normalizeSpliceCount(spliceCount);
+  const proposedIds = impliedSpliceBarIds({ id: orbitId, spliceCount: normalizedCount });
+  const proposed = new Set(proposedIds);
+  // Pointer-move edits only change one orbit's derived bars. Preflight that namespace
+  // before publication instead of revalidating history-independent document state.
+  for (const candidateScene of scenes) {
+    for (const candidateOrbit of candidateScene.orbits) {
+      if (candidateOrbit.id !== orbitId && proposed.has(candidateOrbit.id)) {
+        throw new Error(`Reserved ID collision for splice bar "${candidateOrbit.id}".`);
+      }
+      if (candidateOrbit.id !== orbitId) for (const id of impliedSpliceBarIds(candidateOrbit)) {
+        if (proposed.has(id)) throw new Error(`Reserved ID collision for splice bar "${id}".`);
+      }
+    }
+    for (const candidatePlanet of candidateScene.planets) if (proposed.has(candidatePlanet.id)) {
+      throw new Error(`Reserved ID collision for splice bar "${candidatePlanet.id}".`);
+    }
+    for (const candidateBar of candidateScene.bars) {
+      if ((candidateBar.source !== "splice" || candidateBar.orbitId !== orbitId) && proposed.has(candidateBar.id)) {
+        throw new Error(`Reserved ID collision for splice bar "${candidateBar.id}".`);
+      }
+    }
+    if (proposed.has(candidateScene.id)) {
+      throw new Error(`Reserved ID collision for splice bar "${candidateScene.id}".`);
+    }
+  }
   const next = updateSceneById(scenes, sceneId, (scene) => {
     const orbit = scene.orbits.find((item) => item.id === orbitId);
     if (!orbit) return scene;
-    const updated = { ...orbit, spliceCount: normalizeSpliceCount(spliceCount), spliceStartAngle };
+    const updated = { ...orbit, spliceCount: normalizedCount, spliceStartAngle };
     return {
       ...scene,
       orbits: scene.orbits.map((item) => item.id === orbitId ? updated : item),
@@ -379,7 +410,6 @@ export function replaceOrbitSpliceSettings(
         ...createSpliceBars(updated)]
     };
   });
-  assertValidScenes(next);
   return next;
 }
 

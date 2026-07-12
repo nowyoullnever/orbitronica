@@ -51,7 +51,10 @@ export function SceneTabs(props: Props) {
         onClick={() => props.onActivate(scene.id)}
         onDoubleClick={() => beginRename(scene)}
         onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") props.onActivate(scene.id);
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            props.onActivate(scene.id);
+          }
           if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
             event.preventDefault();
             const nextIndex = nextSceneTabIndex(index, props.scenes.length, event.key as TabNavigationKey);

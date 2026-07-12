@@ -42,12 +42,12 @@ export function rewriteProjectAudioPaths<T extends Record<string, unknown>>(
 ): T {
   const lookup = audioPaths instanceof Map
     ? (id: string) => audioPaths.get(id)
-    : (id: string) => audioPaths[id];
+    : (id: string) => Object.prototype.hasOwnProperty.call(audioPaths, id) ? audioPaths[id] : undefined;
   const copy = structuredClone(project) as ProjectShape;
   const rewrite = (value: unknown) => Array.isArray(value) ? value.map((entry) => {
     if (!isRecord(entry) || typeof entry.id !== "string") return entry;
     const audioPath = lookup(entry.id);
-    return audioPath ? { ...entry, audioPath } : entry;
+    return typeof audioPath === "string" ? { ...entry, audioPath } : entry;
   }) : value;
 
   if (Array.isArray(copy.scenes)) {
