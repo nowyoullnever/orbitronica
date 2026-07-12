@@ -113,6 +113,20 @@ export class OrbitWamRack {
     }));
   }
 
+  /**
+   * Save barrier capture: unlike freeze recovery this never publishes a partial
+   * snapshot. The caller commits this staging map only after every live slot is
+   * JSON-safe, so a failed plugin cannot silently write a mixed-age project.
+   */
+  async captureActiveStateForSave(): Promise<Map<string, JsonValue>> {
+    const captured = new Map<string, JsonValue>();
+    await Promise.all([...this.runtimes.values()].map(async (runtime) => {
+      if (runtime.status !== "ready" || runtime.disposed || !runtime.instance.getState) return;
+      captured.set(runtime.slotId, cloneJson(await runtime.instance.getState() as JsonValue));
+    }));
+    return captured;
+  }
+
   private disconnectOwned(source: AudioNode, destination: AudioNode) {
     try { source.disconnect(destination); } catch { /* no owned edge */ }
   }

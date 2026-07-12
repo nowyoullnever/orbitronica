@@ -87,6 +87,30 @@ test("trusted catalog is closed and maps only the frozen Burns entry", async () 
   assert.equal(catalogEntryUrl(WAM_CATALOG["burns-simple-delay"], "file:///bundle/index.html"), "file:///bundle/wam/burns-simple-delay/index.js");
 });
 
+test("catalog adapter forwards WAM-node state and destroy while retaining instance GUI ownership", async () => {
+  const { adaptWamInstance } = await import("../src/renderer/audio/wamCatalog.ts");
+  const node = new FakeNode() as unknown as AudioNode & {
+    getState(): Promise<unknown>; setState(value: unknown): Promise<void>; destroy(): void;
+  };
+  let saved: unknown; let destroyed = 0; let guiDestroyed = 0;
+  (node as any).getState = async () => ({ delay: .25 });
+  (node as any).setState = async (value: unknown) => { saved = value; };
+  (node as any).destroy = () => { destroyed++; };
+  const gui = { remove() {} } as unknown as HTMLElement;
+  const adapted = adaptWamInstance({
+    audioNode: node,
+    createGui: async () => gui,
+    destroyGui: async (value) => { assert.equal(value, gui); guiDestroyed++; }
+  });
+  assert.deepEqual(await adapted.getState?.(), { delay: .25 });
+  await adapted.setState?.({ delay: .75 });
+  assert.deepEqual(saved, { delay: .75 });
+  assert.equal(await adapted.createGui?.(), gui);
+  await adapted.destroyGui?.(gui);
+  await adapted.destroy?.();
+  assert.equal(guiDestroyed, 1); assert.equal(destroyed, 1);
+});
+
 test("timeout opens a bounded catalog circuit and late instance is destroyed", async () => {
   let time = 0;
   let destroyed = 0;

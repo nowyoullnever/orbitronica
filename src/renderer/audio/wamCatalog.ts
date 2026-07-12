@@ -2,7 +2,7 @@
  * The renderer's executable WAM allowlist. Project documents may name only a
  * catalog id; they never provide a URL, module specifier, or import option.
  */
-import type { WamPluginModule } from "./wamHost.ts";
+import type { JsonValue, WamPluginInstance, WamPluginModule } from "./wamHost.ts";
 
 export type WamCatalogEntry = Readonly<{
   id: "burns-simple-delay";
@@ -37,13 +37,42 @@ export function catalogEntryUrl(entry: WamCatalogEntry, locationHref = window.lo
   return new URL(`./${entry.entry}`, locationHref).toString();
 }
 
+type WamAudioNode = AudioNode & {
+  getState?(): Promise<unknown>;
+  setState?(state: JsonValue): Promise<void>;
+  destroy?(): Promise<void> | void;
+};
+
+type WamInstance = {
+  audioNode: WamAudioNode;
+  createGui?(): Promise<HTMLElement> | HTMLElement;
+  destroyGui?(gui: HTMLElement): Promise<void> | void;
+};
+
 type WamConstructor = {
   createInstance(groupId: string, context: AudioContext): Promise<{
-    audioNode: AudioNode;
+    audioNode: WamAudioNode;
     createGui?(): Promise<HTMLElement> | HTMLElement;
     destroyGui?(gui: HTMLElement): Promise<void> | void;
   }>;
 };
+
+/**
+ * WAM 2 instances expose GUI ownership on the instance but state and destroy
+ * on its WamNode. Keep that split explicit rather than relying on an accidental
+ * structural cast: racks consume one host-facing instance shape.
+ */
+export function adaptWamInstance(instance: WamInstance): WamPluginInstance {
+  const node = instance.audioNode;
+  return {
+    audioNode: node,
+    getState: node.getState?.bind(node),
+    setState: node.setState?.bind(node),
+    destroy: node.destroy?.bind(node),
+    createGui: instance.createGui?.bind(instance),
+    destroyGui: instance.destroyGui?.bind(instance)
+  };
+}
 
 /**
  * Imports one audited artifact. `vite-ignore` is intentional: the compiled
@@ -60,7 +89,7 @@ export async function loadCatalogModule(entry: WamCatalogEntry): Promise<WamPlug
       if (!hostGroupId) throw new Error("wam-host-group-missing");
       const instance = await imported.default!.createInstance(hostGroupId, context);
       if (!instance?.audioNode) throw new Error("catalog-instance-invalid");
-      return instance;
+      return adaptWamInstance(instance);
     }
   };
 }

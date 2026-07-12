@@ -43,6 +43,21 @@ test("freeze snapshots state and destroys runtime exactly once", async () => {
   assert.deepEqual(states.get("a"), { feedback: .3 }); assert.equal(destroys, 1); assert.equal(input.edges.has(destination), true);
 });
 
+test("save capture stages every ready slot and does not mutate durable state on a failed read", async () => {
+  const input = new Node(), destination = new Node(), first = new Node(), second = new Node();
+  const states = new Map<string, any>([["a", { old: true }]]);
+  const rack = new OrbitWamRack(input as unknown as AudioNode, destination as unknown as AudioNode, async (item) => ({
+    audioNode: (item.id === "a" ? first : second) as unknown as AudioNode,
+    getState: async () => {
+      if (item.id === "b") throw new Error("read failed");
+      return { fresh: true };
+    }
+  }), states);
+  await rack.reconcile([slot("a"), slot("b")]);
+  await assert.rejects(rack.captureActiveStateForSave(), /read failed/);
+  assert.deepEqual(states.get("a"), { old: true });
+});
+
 test("slot state is independent of history metadata and clone receives fresh ids", () => {
   const state = new Map<string, any>([["a", { nested: [1] }], ["orphan", 2]]);
   const copied = duplicatePluginSlots([slot("a")], state, () => "b");

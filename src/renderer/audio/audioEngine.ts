@@ -93,6 +93,9 @@ class AudioEngine {
   /** State outlives runtime and document history; it is never embedded in Orbit. */
   private readonly pluginStateStore = new Map<string, import("./wamHost.ts").JsonValue>();
   private readonly orbitWamRacks = new Map<string, OrbitWamRack>();
+  /** Independent from playback callbacks: only the newest hydrate may own audio. */
+  private scenePluginTransitionGeneration = 0;
+  private scenePluginRuntimeOwner: string | null = null;
   private active = new Map<string, ActivePlayback>();
   private masterGain: GainNode | null = null;
   private masterPanner: StereoPannerNode | null = null;
@@ -395,7 +398,11 @@ class AudioEngine {
     await this.rackForOrbit(orbitId).reconcile(slots, generation);
   }
   async freezeOrbitPluginRack(orbitId: string): Promise<void> { await this.orbitWamRacks.get(orbitId)?.freeze(); }
-  async snapshotOrbitPluginStates(): Promise<void> { await Promise.all([...this.orbitWamRacks.values()].map((rack) => rack.snapshotActiveState())); }
+  /** Commit WAM state only after every active rack produced a valid snapshot. */
+  async snapshotOrbitPluginStates(): Promise<void> {
+    const staged = await Promise.all([...this.orbitWamRacks.values()].map((rack) => rack.captureActiveStateForSave()));
+    for (const states of staged) for (const [slotId, value] of states) this.pluginStateStore.set(slotId, value);
+  }
   getOrbitPluginStatus(orbitId: string, slotId: string): PluginRuntimeStatus { return this.orbitWamRacks.get(orbitId)?.getStatus(slotId) ?? "idle"; }
   async mountOrbitPluginGui(orbitId: string, slotId: string, container: HTMLElement): Promise<void> {
     await this.orbitWamRacks.get(orbitId)?.mountGui(slotId, container);
@@ -417,11 +424,23 @@ class AudioEngine {
       if (state !== undefined) this.pluginStateStore.set(to[index].id, JSON.parse(JSON.stringify(state)));
     }
   }
-  /** Gate-first scene runtime transaction; document publication remains owned by App. */
-  async transitionScenePluginRacks(previous: readonly Orbit[], target: readonly Orbit[], generation: number): Promise<void> {
+  getScenePluginRuntimeOwner() { return this.scenePluginRuntimeOwner; }
+  /**
+   * Gate-first, last-wins scene runtime transaction. App owns document
+   * publication; this boundary owns WAM lifetime and never lets an older
+   * hydration publish ownership after a newer request has arrived.
+   */
+  async transitionScenePluginRacks(previous: readonly Orbit[], target: readonly Orbit[], generation: number, targetSceneId?: string): Promise<boolean> {
+    this.scenePluginTransitionGeneration = Math.max(this.scenePluginTransitionGeneration, generation);
+    const current = () => generation === this.scenePluginTransitionGeneration;
+    this.scenePluginRuntimeOwner = null;
     await Promise.all(previous.map((orbit) => this.freezeOrbitPluginRack(orbit.id)));
+    if (!current()) return false;
     await Promise.all(target.filter((orbit) => (orbit.plugins?.length ?? 0) > 0 && this.orbitRuntimes.has(orbit.id))
       .map((orbit) => this.reconcileOrbitPluginRack(orbit.id, orbit.plugins ?? [], generation)));
+    if (!current()) return false;
+    this.scenePluginRuntimeOwner = targetSceneId ?? null;
+    return true;
   }
 
   private normalizedSpeed(speed: number) {

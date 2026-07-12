@@ -281,6 +281,18 @@ export default function App() {
     }, force);
   }
 
+  /** One reconciliation path for scene tabs, open, undo/redo and structural edits. */
+  function scheduleScenePluginTransition(previous: readonly Orbit[], target: readonly Orbit[], targetSceneId: string) {
+    const epoch = ++sceneTransitionEpoch.current;
+    audibleSceneId.current = null;
+    void audioEngine.transitionScenePluginRacks(previous, target, epoch, targetSceneId).then((ownsTarget) => {
+      if (ownsTarget && sceneTransitionEpoch.current === epoch) audibleSceneId.current = targetSceneId;
+    }).catch(() => {
+      // A single unavailable slot is dry; the rest of the target may remain audible.
+      if (sceneTransitionEpoch.current === epoch) audibleSceneId.current = targetSceneId;
+    });
+  }
+
   function activateScene(nextSceneId: string) {
     if (!stateRef.current.scenes.some((scene) => scene.id === nextSceneId)) return;
     if (!prepareActiveSceneTransition(nextSceneId)) return;
@@ -288,17 +300,9 @@ export default function App() {
     setActiveSceneId(nextSceneId);
     // Publishing the target selection stays synchronous for the existing tab
     // contract. Audio remains gated until the newest hydration transaction settles.
-    const epoch = ++sceneTransitionEpoch.current;
     const previous = stateRef.current.scenes.find((scene) => scene.id === stateRef.current.activeSceneId);
     const target = stateRef.current.scenes.find((scene) => scene.id === nextSceneId);
-    audibleSceneId.current = null;
-    void audioEngine.transitionScenePluginRacks(previous?.orbits ?? [], target?.orbits ?? [], epoch).then(() => {
-      if (sceneTransitionEpoch.current === epoch) audibleSceneId.current = nextSceneId;
-    }).catch(() => {
-      // Per-slot unavailable placeholders remain dry. A rack failure must not
-      // restore stale scene audio or overwrite durable bypass metadata.
-      if (sceneTransitionEpoch.current === epoch) audibleSceneId.current = nextSceneId;
-    });
+    scheduleScenePluginTransition(previous?.orbits ?? [], target?.orbits ?? [], nextSceneId);
   }
 
   function commitSceneDocument(nextScenes: Scene[], nextActiveSceneId: string) {
@@ -410,6 +414,9 @@ export default function App() {
       audioEngine.setVolume(orbitId, volume);
       audioEngine.setOrbitAudioPan(orbitId, pan);
     });
+    const prior = stateRef.current.scenes.find((scene) => scene.id === stateRef.current.activeSceneId);
+    const target = next.scenes.find((scene) => scene.id === next.activeSceneId);
+    scheduleScenePluginTransition(prior?.orbits ?? [], target?.orbits ?? [], next.activeSceneId);
   }
 
   function undo() {
@@ -589,6 +596,8 @@ export default function App() {
       flash(error instanceof Error ? error.message : "The orbit could not be duplicated.");
       return;
     }
+    // Duplicates receive new slot IDs synchronously; runtime creation stays lazy.
+    reconcileOrbitPlugins(duplicate);
     for (const planet of copiedPlanets) {
       if (planet.speed !== 1 || planet.pitchCents) {
         void audioEngine.processPlanetBuffer(newOrbitId, planet.id, planet.speed, planet.pitchCents);
@@ -951,6 +960,8 @@ export default function App() {
           audioEngine.replaceProjectAudio(stagedAudio);
         },
         publish: () => {
+          const previousOrbits = stateRef.current.scenes.find((scene) => scene.id === stateRef.current.activeSceneId)?.orbits ?? [];
+          const restoredActiveOrbits = restoredScenes.find((scene) => scene.id === project.activeSceneId)?.orbits ?? [];
           prepareActiveSceneTransition(project.activeSceneId, true);
           resetParameterHistoryWindow();
           projectIds.current = restoredProjectIds;
@@ -966,6 +977,9 @@ export default function App() {
           setIsDirty(false);
           undoStack.current = [];
           redoStack.current = [];
+          // Only the active scene is hydrated after open; inactive scenes retain
+          // validated blobs until their own gate-first activation transaction.
+          scheduleScenePluginTransition(previousOrbits, restoredActiveOrbits, project.activeSceneId);
           if (missing.length) flash(`Project loaded with missing audio: ${missing.join(", ")}`, 5000);
           else flash("Project loaded.");
           for (const scene of restoredScenes) for (const planet of scene.planets) {
