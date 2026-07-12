@@ -31,7 +31,7 @@ export function normalizePreferences(value: unknown): AppPreferences {
   const exportValue = isRecord(value) && isRecord(value.export) ? value.export : {};
   return {
     export: {
-      container: exportValue.container === "wav" ? "wav" : "wav",
+      container: "wav",
       sampleFormat: exportValue.sampleFormat === "pcm24" || exportValue.sampleFormat === "float32"
         ? exportValue.sampleFormat
         : "pcm16"

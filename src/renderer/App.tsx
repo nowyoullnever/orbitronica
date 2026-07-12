@@ -1177,10 +1177,10 @@ export default function App() {
         if (multi.orbitIds.length || multi.planetIds.length) deleteMultiSelection();
         else deleteSelection();
       }
-      else if (key === "s") setSelectedTool("select");
-      else if (key === "p") setSelectedTool("planet");
-      else if (key === "b") setSelectedTool("bar");
-      else if (key === "r") void toggleRecording();
+      else if (!command && key === "s") setSelectedTool("select");
+      else if (!command && key === "p") setSelectedTool("planet");
+      else if (!command && key === "b") setSelectedTool("bar");
+      else if (!command && key === "r") void toggleRecording();
       else if (event.code === "Space") {
         event.preventDefault();
         if (isPlaying) { audioEngine.stopAllActivePlaybacks(); setIsPlaying(false); }
