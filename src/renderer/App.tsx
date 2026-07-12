@@ -104,6 +104,7 @@ export default function App() {
   const [clipboard, setClipboard] = useState<AppClipboard>(null);
   const [viewport, setViewport] = useState<ViewportState>(defaultViewport);
   const [waveformPeaksByOrbit, setWaveformPeaksByOrbit] = useState<Map<string, Float32Array>>(() => new Map());
+  const [automationSamplePath, setAutomationSamplePath] = useState("");
   const uploadPoint = useRef({ x: 450, y: 350 });
   const fileInput = useRef<HTMLInputElement>(null);
   const undoStack = useRef<HistorySnapshot[]>([]);
@@ -739,6 +740,15 @@ export default function App() {
     }
   }
 
+  async function loadAutomationSample() {
+    if (!window.orbitonicAPI?.loadAutomationSample || !automationSamplePath.trim()) return;
+    const result = await window.orbitonicAPI.loadAutomationSample(automationSamplePath.trim());
+    if (!result.ok || !result.fileName || !result.bytes) return flash(result.error ?? "Unable to load sample.");
+    const extension = result.fileName.split(".").pop()?.toLowerCase() || "wav";
+    const type = extension === "mp3" ? "audio/mpeg" : extension === "ogg" ? "audio/ogg" : "audio/wav";
+    await handleFiles([new File([result.bytes], result.fileName, { type })], { x: 520, y: 380 });
+  }
+
   function updateOrbit(orbitId: string, changes: Partial<Orbit>) {
     pushHistory();
     setOrbits((current) => current.map((orbit) => orbit.id === orbitId ? { ...orbit, ...changes } : orbit));
@@ -932,6 +942,11 @@ export default function App() {
         <button onClick={(event) => {
           event.stopPropagation(); uploadPoint.current = { x: 520, y: 380 }; fileInput.current?.click();
         }}>Upload your first sound</button>
+        <div className="automation-sample-loader">
+          <input value={automationSamplePath} placeholder="D:\\샘플 사운드\\녹음\\sample.wav"
+            onChange={(event) => setAutomationSamplePath(event.target.value)} />
+          <button onClick={() => void loadAutomationSample()}>Load local sample</button>
+        </div>
       </div>}
       <CanvasStage
         orbits={orbits} planets={planets} bars={bars} waveformPeaksByOrbit={waveformPeaksByOrbit} selection={selection}

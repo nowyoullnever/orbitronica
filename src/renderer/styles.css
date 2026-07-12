@@ -222,6 +222,9 @@ button { color: inherit; }
   pointer-events: none; transition: .15s ease;
 }
 .canvas-shell.receiving::after { border-color: #376cc4; color: #376cc4; background: rgba(55,108,196,.055); }
+.automation-sample-loader { display: flex; gap: 6px; margin-top: 10px; width: 340px; }
+.automation-sample-loader input { min-width: 0; flex: 1; padding: 7px; font: 8px "MapoFlowerIsland", sans-serif; }
+.automation-sample-loader button { white-space: nowrap; }
 .stage { position: absolute; width: 100%; height: 100%; display: block; }
 .stage.tool-select { cursor: default; }
 .stage.tool-planet, .stage.tool-bar, .stage.tool-splicer { cursor: crosshair; }
