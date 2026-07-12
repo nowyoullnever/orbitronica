@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   describeProjectAssets, portableAudioPath, rewriteProjectAudioPaths
 } from "./projectAssets.js";
+import { PreferencesStore } from "./preferences.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -36,6 +37,16 @@ type SavePayload = {
   project: Record<string, unknown> & { projectName?: string };
   assets: Array<{ orbitId: string; fileName: string; bytes: Uint8Array }>;
 };
+
+let preferencesStore: PreferencesStore | undefined;
+
+function getPreferencesStore() {
+  preferencesStore ??= new PreferencesStore(path.join(app.getPath("userData"), "preferences.json"));
+  return preferencesStore;
+}
+
+ipcMain.handle("preferences:get", () => getPreferencesStore().get());
+ipcMain.handle("preferences:set", (_event, patch) => getPreferencesStore().set(patch));
 
 ipcMain.handle("project:save", async (_event, payload: SavePayload, currentPath?: string) => {
   try {

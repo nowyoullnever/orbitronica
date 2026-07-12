@@ -17,7 +17,8 @@ test("sandboxed preload source and build contract require a CommonJS artifact", 
   assert.match(tsconfig, /src\/main\/preload\.cts/);
   assert.match(packageJson.scripts.build, /verify-preload\.mjs/);
   assert.match(preload, /contextBridge\.exposeInMainWorld\(["']orbitonicAPI["']/);
-  for (const channel of ["project:save", "project:open", "recording:save"]) {
+  for (const channel of ["project:save", "project:open", "recording:save", "preferences:get", "preferences:set", "menu:action"]) {
     assert.ok(preload.includes(channel));
   }
+  assert.match(preload, /onMenuAction[\s\S]*return \(\) => ipcRenderer\.removeListener/);
 });
