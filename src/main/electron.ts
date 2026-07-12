@@ -14,6 +14,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 app.setName("Orbitronica");
 
 function createWindow() {
+  const wamSmoke = process.argv.includes("--wam-smoke");
   const win = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -30,10 +31,28 @@ function createWindow() {
     }
   });
 
+  if (wamSmoke) {
+    const timeout = setTimeout(() => {
+      console.error("ORBITRONICA_WAM_SMOKE {\"status\":\"fail\",\"error\":\"renderer timeout\"}");
+      app.exit(1);
+    }, 30_000);
+    win.webContents.on("console-message", (_event, _level, message) => {
+      if (!message.startsWith("ORBITRONICA_WAM_SMOKE ")) return;
+      clearTimeout(timeout);
+      console.log(message);
+      app.exit(message.includes('"status":"pass"') ? 0 : 1);
+    });
+    win.webContents.on("did-fail-load", (_event, _errorCode, errorDescription) => {
+      clearTimeout(timeout);
+      console.error(`ORBITRONICA_WAM_SMOKE {"status":"fail","error":${JSON.stringify(errorDescription)}}`);
+      app.exit(1);
+    });
+  }
+
   if (process.argv.includes("--dev")) {
     void win.loadURL("http://localhost:5173");
   } else {
-    void win.loadFile(path.join(__dirname, "../dist/index.html"));
+    void win.loadFile(path.join(__dirname, "../dist", wamSmoke ? "wam-smoke.html" : "index.html"));
   }
 }
 

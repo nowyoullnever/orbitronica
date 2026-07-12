@@ -1,0 +1,15 @@
+{
+  "catalogId": "burns-simple-delay",
+  "package": "burns-audio-wam",
+  "packageVersion": "0.2.54",
+  "packageSha256": "03dbe1a9891482e43b16392832eeea675e8468d019d4a212cf5d6dda2300595d",
+  "license": "MIT",
+  "source": "https://github.com/boourns/burns-audio-wam",
+  "entry": "index.js",
+  "descriptor": "descriptor.json",
+  "assets": {
+    "descriptor.json": "179fd4c0a60af4a8647e935e53bb6a61f652991058a849f392ffd735ef661435",
+    "index.js": "a1504e26e0591e3795b248cf42c9897f694558ca541f85e168e2a2664eef3457",
+    "screenshot.png": "a5a1c2035a53c2e650121488321b1970d869f2c845e781dc24772f3fed8a03f6"
+  }
+}
