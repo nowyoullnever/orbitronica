@@ -12,9 +12,21 @@ bundled plugin asset nor a plugin URL resolver. Consequently it cannot prove
 that a WAM module (and all its worklet, WASM, GUI, and import assets) loads
 from the packaged renderer's `file://` origin.
 
-No exact trusted-effect candidate is selected. Selecting one without a
-candidate-specific WAM 2 API audit and a verified redistributable license would
-be an unsupported enabled claim.
+One **internal-alpha, frozen-artifact candidate** has passed a production
+Electron `file://` temp-path probe, but is not selected or enabled for the
+catalog: **Burns Simple Delay** from `burns-audio-wam@0.2.54` (MIT). The probe
+covered `fetch(file:)`, host initialization, instance creation, state,
+GUI, and destruction without `SharedArrayBuffer`. It does not make the effect
+packaged: its assets are not under `dist`, and the builder artifact has no
+candidate-specific executable smoke. The WAM API's internal alpha.4 and host
+alpha.6 compatibility is accepted only for this exact frozen artifact; rerun
+the smoke on every upgrade.
+
+| Frozen candidate evidence | SHA-256 |
+| --- | --- |
+| `burns-audio-wam@0.2.54` tarball | `03dbe1a9891482e43b16392832eeea675e8468d019d4a212cf5d6dda2300595d` |
+| Simple Delay index | `a1504e26e0591e3795b248cf42c9897f694558ca541f85e168e2a2664eef3457` |
+| Simple Delay descriptor | `179fd4c0a60af4a8647e935e53bb6a61f652991058a849f392ffd735ef661435` |
 
 ## Compatibility requirements before enablement
 
@@ -57,10 +69,12 @@ the SDK tarball only; it does not authenticate a future effect.
 ## Packaged proof gate
 
 `npm run build` is the artifact-producing smoke prerequisite: it type-checks,
-verifies the preload, builds Vite, then invokes `electron-builder --dir`.
-It is not a WAM proof today because no WAM effect is bundled or invoked. The
-enabled gate therefore remains **disabled**, with the precise blocker: no exact
-effect candidate and no packaged `file://` loader/asset smoke harness exist.
+verifies the preload, builds Vite, then invokes `electron-builder --dir`. It
+passed on 2026-07-12 and produced `dist/mac-arm64`, but it is not candidate WAM
+proof because Burns Simple Delay is neither bundled nor invoked from that
+artifact. The enabled gate therefore remains **disabled**, with the precise
+blocker: the frozen candidate's assets are absent from `dist` and no
+builder-executable `file://` loader/asset smoke harness exists.
 
 ## Limits of existing code
 
