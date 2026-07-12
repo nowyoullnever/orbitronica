@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { SetStateAction } from "react";
 import { audioEngine, type ProjectAudioInput } from "./audio/audioEngine";
+import { encodeWav, type WavSampleFormat } from "./audio/wavEncoder";
 import { CanvasStage } from "./components/CanvasStage";
 import { ContextMenu } from "./components/ContextMenu";
 import { MasterControls } from "./components/MasterControls";
@@ -50,6 +51,10 @@ type AppClipboard = {
   sourceOrbitId: string;
   data: CopiedPlanetData;
 } | null;
+type RecordingPreferencesApi = {
+  getPreferences?: () => Promise<{ export: { sampleFormat: WavSampleFormat } }>;
+};
+type CapturedRecording = { channels: Float32Array[]; sampleRate: number };
 
 const cleanPlanet = (planet: Planet): Planet => ({
   ...planet,
@@ -88,6 +93,8 @@ export default function App() {
   const [selectedTool, setSelectedTool] = useState<Tool>("select");
   const [isPlaying, setIsPlaying] = useState(true);
   const [isRecording, setIsRecording] = useState(false);
+  const [recordingPhase, setRecordingPhase] = useState<"idle" | "starting" | "recording" | "encoding" | "saving">("idle");
+  const [recordingSampleFormat, setRecordingSampleFormat] = useState<WavSampleFormat>("pcm16");
   const [masterVolume, setMasterVolume] = useState(1);
   const [masterPan, setMasterPan] = useState(0);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -122,6 +129,13 @@ export default function App() {
     lastLoopBarLengthRadians, masterVolume, masterPan
   };
   clipboardRef.current = clipboard;
+
+  useEffect(() => {
+    const preferencesApi = window.orbitonicAPI as (typeof window.orbitonicAPI & RecordingPreferencesApi) | undefined;
+    void preferencesApi?.getPreferences?.().then((preferences) => {
+      setRecordingSampleFormat(preferences.export.sampleFormat);
+    }).catch(() => undefined);
+  }, []);
 
   function reserveProjectIds() {
     reserveSceneProjectIds(projectIds.current, stateRef.current.scenes);
@@ -916,24 +930,33 @@ export default function App() {
   }
 
   async function toggleRecording() {
+    if (recordingPhase !== "idle" && recordingPhase !== "recording") return;
+    let recordingStarted = false;
     try {
-      if (!isRecording) {
+      if (recordingPhase === "idle") {
+        setRecordingPhase("starting");
         await audioEngine.resume();
-        audioEngine.startRecording();
+        await audioEngine.startRecording();
         setIsRecording(true);
+        setRecordingPhase("recording");
+        recordingStarted = true;
         flash("Recording started.");
       } else {
-        const blob = await audioEngine.stopRecording();
+        const recording = await audioEngine.stopRecording() as unknown as CapturedRecording;
         setIsRecording(false);
-        const bytes = new Uint8Array(await blob.arrayBuffer());
+        setRecordingPhase("encoding");
+        const bytes = encodeWav(recording.channels, recording.sampleRate, recordingSampleFormat);
         const stamp = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
-        const result = await window.orbitonicAPI?.saveRecording(bytes, `recording_${stamp}.webm`);
+        setRecordingPhase("saving");
+        const result = await window.orbitonicAPI?.saveRecording(bytes, `recording_${stamp}.wav`);
         if (result?.ok) flash("Recording saved.");
         else if (!result?.canceled) flash(result?.error ?? "Recording could not be saved.");
       }
     } catch (error) {
       setIsRecording(false);
       flash(error instanceof Error ? error.message : "Recording failed.");
+    } finally {
+      if (!recordingStarted) setRecordingPhase("idle");
     }
   }
 
