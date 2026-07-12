@@ -1,6 +1,7 @@
 import { SimpleFilter, SoundTouch, WebAudioBufferSource } from "soundtouchjs";
 import type { SequenceRetriggerMode } from "../state/types";
 import { createFLStylePanNode, type FLStylePanNode } from "./flStylePan.ts";
+import { WamHost, type WamInsert, type WamModuleLoader } from "./wamHost.ts";
 
 type ActivePlayback = {
   id: string;
@@ -85,6 +86,8 @@ class AudioEngine {
   private rawFiles = new Map<string, { fileName: string; bytes: Uint8Array }>();
   private orbitRuntimes = new Map<string, OrbitAudioRuntime>();
   private orbitPanValues = new Map<string, number>();
+  private readonly wamHost = new WamHost();
+  private orbitWamInserts = new Map<string, WamInsert>();
   private active = new Map<string, ActivePlayback>();
   private masterGain: GainNode | null = null;
   private masterPanner: StereoPannerNode | null = null;
@@ -329,6 +332,30 @@ class AudioEngine {
   setVolume(orbitId: string, volume: number) {
     const runtime = this.orbitRuntimes.get(orbitId);
     if (runtime) runtime.gainNode.gain.setValueAtTime(volume, this.getContext().currentTime);
+  }
+
+  /**
+   * Development-only WAM insertion point. It sits after orbit pan and before
+   * the orbit gain, so an inserted plugin is pre-fader and cleanup can restore
+   * the exact dry route without affecting master routing.
+   */
+  async attachOrbitWam(orbitId: string, loader: WamModuleLoader): Promise<WamInsert> {
+    const existing = this.orbitWamInserts.get(orbitId);
+    if (existing) return existing;
+    const runtime = this.orbitRuntimes.get(orbitId);
+    if (!runtime) throw new Error(`Audio runtime is unavailable for orbit "${orbitId}".`);
+    const insert = await this.wamHost.insertPreFader(
+      this.getContext(), runtime.panNode.output, runtime.gainNode, loader
+    );
+    this.orbitWamInserts.set(orbitId, insert);
+    return insert;
+  }
+
+  async detachOrbitWam(orbitId: string): Promise<void> {
+    const insert = this.orbitWamInserts.get(orbitId);
+    if (!insert) return;
+    this.orbitWamInserts.delete(orbitId);
+    await insert.cleanup();
   }
 
   private normalizedSpeed(speed: number) {
@@ -806,6 +833,11 @@ class AudioEngine {
       if (key.startsWith(`${orbitId}:`)) this.reverseBuffers.delete(key);
     }
     this.rawFiles.delete(orbitId);
+    const wamInsert = this.orbitWamInserts.get(orbitId);
+    if (wamInsert) {
+      this.orbitWamInserts.delete(orbitId);
+      void wamInsert.cleanup();
+    }
     const runtime = this.orbitRuntimes.get(orbitId);
     if (runtime) {
       try { runtime.input.disconnect(); } catch { /* already disconnected */ }
