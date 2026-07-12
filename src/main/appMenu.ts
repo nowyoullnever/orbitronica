@@ -13,7 +13,11 @@ const customEdit = (label: string, action: "undo" | "redo" | "copy" | "paste"): 
 });
 
 export function installAppMenu() {
-  const preferences: MenuItemConstructorOptions = { label: "Preferences…", click: () => send("preferences") };
+  const preferences: MenuItemConstructorOptions = {
+    label: "Preferences…",
+    accelerator: "CmdOrCtrl+,",
+    click: () => send("preferences")
+  };
   const template: any[] = [
     ...(process.platform === "darwin" ? [{ label: app.name, submenu: [{ role: "about" }, preferences, { type: "separator" }, { role: "services" }, { role: "hide" }, { role: "hideOthers" }, { role: "quit" }] }] : []),
     { label: "File", submenu: [

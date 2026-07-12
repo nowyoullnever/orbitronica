@@ -12,5 +12,13 @@ test("native menu routes focused-window actions without stealing canvas keyboard
   assert.match(source, /label: "Open…", accelerator: "CmdOrCtrl\+O"/);
   assert.match(source, /label: "Save", accelerator: "CmdOrCtrl\+S"/);
   assert.match(source, /label: "Save As…", accelerator: "CmdOrCtrl\+Shift\+S"/);
+  assert.match(source, /label: "Preferences…",\s*accelerator: "CmdOrCtrl\+,"/);
   assert.doesNotMatch(source, /customEdit\([^\n]+accelerator/);
+});
+
+test("renderer leaves native File accelerators to their one IPC dispatch path", () => {
+  const source = fs.readFileSync(new URL("../src/renderer/App.tsx", import.meta.url), "utf8");
+  assert.match(source, /const nativeMenuHandlesFileShortcuts = !!window\.orbitonicAPI\?\.onMenuAction/);
+  assert.match(source, /command && key === "s" && !nativeMenuHandlesFileShortcuts/);
+  assert.match(source, /command && key === "o" && !nativeMenuHandlesFileShortcuts/);
 });

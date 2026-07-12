@@ -1141,6 +1141,10 @@ export default function App() {
       if (typing && event.key !== "Escape") return;
       const key = event.key.toLowerCase();
       const command = event.ctrlKey || event.metaKey;
+      // Electron's native File menu owns these accelerators and emits one IPC
+      // action. Keep this renderer fallback only for a non-desktop preview so a
+      // single Cmd/Ctrl+S or Cmd/Ctrl+O cannot run both paths.
+      const nativeMenuHandlesFileShortcuts = !!window.orbitonicAPI?.onMenuAction;
       if (command && /^[1-9]$/.test(key)) {
         const targetScene = stateRef.current.scenes[Number(key) - 1];
         if (targetScene) { event.preventDefault(); activateScene(targetScene.id); }
@@ -1165,8 +1169,8 @@ export default function App() {
         pastePlanet();
       }
       else if (command && key === "d") { event.preventDefault(); duplicateOrbit(); }
-      else if (command && key === "s") { event.preventDefault(); void saveProject(); }
-      else if (command && key === "o") { event.preventDefault(); void openProject(); }
+      else if (command && key === "s" && !nativeMenuHandlesFileShortcuts) { event.preventDefault(); void saveProject(); }
+      else if (command && key === "o" && !nativeMenuHandlesFileShortcuts) { event.preventDefault(); void openProject(); }
       else if (event.key === "Delete" || event.key === "Backspace") {
         event.preventDefault();
         const multi = stateRef.current.multiSelection;

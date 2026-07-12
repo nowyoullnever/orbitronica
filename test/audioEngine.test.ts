@@ -55,9 +55,12 @@ const { audioEngine } = await import("../src/renderer/audio/audioEngine.ts");
 test("recording path is lazy AudioWorklet PCM capture with acknowledged session protocol", () => {
   const source = fs.readFileSync(new URL("../src/renderer/audio/audioEngine.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /MediaRecorder|createMediaStreamDestination/);
-  for (const token of ["AudioWorkletNode", "recordingId", "started", "stopped", "processorerror", "2048", "URL.revokeObjectURL"]) {
+  for (const token of ["AudioWorkletNode", "recordingId", "started", "stopped", "processorerror", "URL.revokeObjectURL", "recordingModuleLoads", "recorderProcessorAssetUrl"]) {
     assert.ok(source.includes(token), `missing recording protocol token: ${token}`);
   }
+  assert.match(source, /this\.frames >= 2048/);
+  assert.match(source, /this\.recordingSession = session;[\s\S]*await this\.ensureRecordingNode/);
+  assert.match(source, /addModule\(blobUrl\)[\s\S]*addModule\(recorderProcessorAssetUrl\)/);
   assert.match(source, /export type RecordedPcm = \{ channels: Float32Array\[\]\; sampleRate: number \}/);
   assert.doesNotMatch(source, /RecordedPcm = Blob/);
   assert.match(source, /if \(this\.recordingNode === node\) this\.failRecording/);

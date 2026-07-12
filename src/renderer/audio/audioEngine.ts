@@ -46,6 +46,8 @@ type RecordingSession = {
   result?: RecordedPcm;
 };
 
+// Keep the Blob path self-contained; the emitted asset URL below is only the
+// sandbox fallback and is deliberately a standalone worklet script as well.
 const PCM_WORKLET_SOURCE = `
 class OrbitronicaPcmCapture extends AudioWorkletProcessor {
   constructor() { super(); this.recordingId = null; this.left = []; this.right = []; this.frames = 0;
@@ -66,6 +68,10 @@ class OrbitronicaPcmCapture extends AudioWorkletProcessor {
   }
 }
 registerProcessor("orbitronica-pcm-capture", OrbitronicaPcmCapture);`;
+
+// Vite rewrites this to the emitted script URL in dev and packaged builds;
+// Node-only unit tests can still import this module without a query-loader.
+const recorderProcessorAssetUrl = new URL("./recorder-processor.js", import.meta.url).toString();
 
 class AudioEngine {
   private context: AudioContext | null = null;
@@ -92,6 +98,7 @@ class AudioEngine {
   private recordingNode: AudioWorkletNode | null = null;
   private recordingPull: GainNode | null = null;
   private recordingSession: RecordingSession | null = null;
+  private recordingModuleLoads = new WeakMap<AudioContext, Promise<void>>();
   private nextRecordingId = 0;
 
   private getContext() {
@@ -657,18 +664,44 @@ class AudioEngine {
     this.processedBuffers.set(key, output);
   }
 
+  private async loadRecordingProcessor(context: AudioContext) {
+    const cached = this.recordingModuleLoads.get(context);
+    if (cached) return cached;
+    const load = (async () => {
+      const blobUrl = URL.createObjectURL(new Blob([PCM_WORKLET_SOURCE], { type: "text/javascript" }));
+      try {
+        await context.audioWorklet.addModule(blobUrl);
+        return;
+      } catch (blobError) {
+        try {
+          // Sandboxed Chromium normally accepts the Blob module. The emitted Vite
+          // asset is a retry path for a restrictive Blob/CSP implementation.
+          await context.audioWorklet.addModule(recorderProcessorAssetUrl);
+          return;
+        } catch (assetError) {
+          throw new Error(`AudioWorklet module could not load from Blob or asset URL: ${String(blobError)}; ${String(assetError)}`);
+        }
+      } finally {
+        URL.revokeObjectURL(blobUrl);
+      }
+    })();
+    this.recordingModuleLoads.set(context, load);
+    try {
+      await load;
+    } catch (error) {
+      // A failed module registration is retryable on the next start attempt.
+      this.recordingModuleLoads.delete(context);
+      throw error;
+    }
+  }
+
   private async ensureRecordingNode() {
     if (this.recordingNode) return this.recordingNode;
     const context = this.getContext();
     if (!context.audioWorklet || typeof AudioWorkletNode === "undefined") {
       throw new Error("AudioWorklet recording is not supported on this system.");
     }
-    const url = URL.createObjectURL(new Blob([PCM_WORKLET_SOURCE], { type: "text/javascript" }));
-    try {
-      await context.audioWorklet.addModule(url);
-    } finally {
-      URL.revokeObjectURL(url);
-    }
+    await this.loadRecordingProcessor(context);
     const node = new AudioWorkletNode(context, "orbitronica-pcm-capture", {
       channelCount: 2, channelCountMode: "explicit", outputChannelCount: [2]
     });
@@ -735,12 +768,18 @@ class AudioEngine {
 
   async startRecording(): Promise<void> {
     if (this.recordingSession) throw new Error("A recording operation is already active.");
-    const node = await this.ensureRecordingNode();
     const session: RecordingSession = { id: ++this.nextRecordingId, state: "starting", chunks: [[], []] };
     this.recordingSession = session;
-    const acknowledgement = this.waitForRecordingAck(session);
-    node.port.postMessage({ type: "start", recordingId: session.id });
-    await acknowledgement;
+    try {
+      const node = await this.ensureRecordingNode();
+      const acknowledgement = this.waitForRecordingAck(session);
+      node.port.postMessage({ type: "start", recordingId: session.id });
+      await acknowledgement;
+    } catch (cause) {
+      const error = cause instanceof Error ? cause : new Error(String(cause));
+      if (this.recordingSession === session) this.failRecording(error);
+      throw error;
+    }
   }
 
   async stopRecording(): Promise<RecordedPcm> {
