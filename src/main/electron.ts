@@ -6,6 +6,8 @@ import {
   describeProjectAssets, portableAudioPath, rewriteProjectAudioPaths
 } from "./projectAssets.js";
 import { PreferencesStore } from "./preferences.js";
+import { newProjectPath, projectDialogExtensions } from "./projectPaths.js";
+import { installAppMenu } from "./appMenu.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
