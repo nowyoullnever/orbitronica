@@ -4,6 +4,6 @@ contextBridge.exposeInMainWorld("orbitonicAPI", {
   saveProject: (payload: unknown, currentPath?: string) =>
     ipcRenderer.invoke("project:save", payload, currentPath),
   openProject: () => ipcRenderer.invoke("project:open"),
-  saveRecording: (bytes: Uint8Array, suggestedName: string) =>
-    ipcRenderer.invoke("recording:save", bytes, suggestedName)
+  saveRecording: (payload: { fileName: string; mimeType: string; data: ArrayBuffer }) =>
+    ipcRenderer.invoke("recording:save", payload)
 });

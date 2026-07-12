@@ -22,6 +22,12 @@ type OrbitAudioRuntime = {
   gainNode: GainNode;
 };
 
+export type CompletedRecording = {
+  blob: Blob;
+  mimeType: string;
+  durationMs: number;
+};
+
 type WaveformListener = (orbitId: string, peaks: Float32Array | null) => void;
 
 class AudioEngine {
@@ -48,6 +54,7 @@ class AudioEngine {
   private recordingDestination: MediaStreamAudioDestinationNode | null = null;
   private recorder: MediaRecorder | null = null;
   private recordingChunks: Blob[] = [];
+  private recordingStartedAt: number | null = null;
 
   private getContext() {
     if (!this.context) {
@@ -551,34 +558,56 @@ class AudioEngine {
     this.processedBuffers.set(key, output);
   }
 
-  startRecording() {
+  async startRecording() {
+    await this.resume();
+    const context = this.getContext();
     if (!this.recordingDestination || typeof MediaRecorder === "undefined") {
-      throw new Error("Audio recording is not supported on this system.");
+      throw new Error("Recording is not supported in this environment.");
     }
     if (this.recorder?.state === "recording") return;
+    const preferredMimeType = "audio/webm;codecs=opus";
+    const mimeType = MediaRecorder.isTypeSupported(preferredMimeType)
+      ? preferredMimeType
+      : MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : null;
+    if (!mimeType) throw new Error("Recording is not supported in this environment.");
     this.recordingChunks = [];
-    const options = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-      ? { mimeType: "audio/webm;codecs=opus" } : undefined;
-    this.recorder = new MediaRecorder(this.recordingDestination.stream, options);
-    this.recorder.ondataavailable = (event) => {
+    this.recordingStartedAt = Date.now();
+    const recorder = new MediaRecorder(this.recordingDestination.stream, { mimeType });
+    this.recorder = recorder;
+    recorder.ondataavailable = (event) => {
       if (event.data.size) this.recordingChunks.push(event.data);
     };
-    this.recorder.start();
+    recorder.onerror = () => { /* stopRecording reports the failure to the UI */ };
+    // A short timeslice makes data flushing resilient if the renderer is interrupted.
+    recorder.start(1000);
+    // Keep the context reference live through recorder setup for browsers that lazily
+    // activate MediaStream destinations after resume.
+    void context;
   }
 
-  stopRecording(): Promise<Blob> {
+  stopRecording(): Promise<CompletedRecording> {
     return new Promise((resolve, reject) => {
       if (!this.recorder || this.recorder.state !== "recording") {
         reject(new Error("No recording is active."));
         return;
       }
       const recorder = this.recorder;
-      recorder.onerror = () => reject(new Error("Recording failed."));
+      recorder.onerror = () => {
+        this.recorder = null;
+        this.recordingStartedAt = null;
+        reject(new Error("Recording failed."));
+      };
       recorder.onstop = () => {
-        const blob = new Blob(this.recordingChunks, { type: "audio/webm" });
+        const durationMs = this.recordingStartedAt ? Date.now() - this.recordingStartedAt : 0;
+        const blob = new Blob(this.recordingChunks, { type: recorder.mimeType || "audio/webm" });
         this.recordingChunks = [];
         this.recorder = null;
-        resolve(blob);
+        this.recordingStartedAt = null;
+        if (!blob.size) {
+          reject(new Error("Recording failed: no audio data was captured."));
+          return;
+        }
+        resolve({ blob, mimeType: recorder.mimeType || "audio/webm", durationMs });
       };
       recorder.stop();
     });

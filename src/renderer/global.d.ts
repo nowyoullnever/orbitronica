@@ -12,7 +12,9 @@ declare global {
         error?: string;
         canceled?: boolean;
       }>;
-      saveRecording(bytes: Uint8Array, suggestedName: string): Promise<{ ok: boolean; path?: string; error?: string; canceled?: boolean }>;
+      saveRecording(payload: { fileName: string; mimeType: string; data: ArrayBuffer }): Promise<{
+        ok: boolean; path?: string; error?: string; canceled?: boolean;
+      }>;
     };
   }
 }

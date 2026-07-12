@@ -710,22 +710,32 @@ export default function App() {
   async function toggleRecording() {
     try {
       if (!isRecording) {
-        await audioEngine.resume();
-        audioEngine.startRecording();
+        await audioEngine.startRecording();
         setIsRecording(true);
         flash("Recording started.");
       } else {
-        const blob = await audioEngine.stopRecording();
-        setIsRecording(false);
-        const bytes = new Uint8Array(await blob.arrayBuffer());
-        const stamp = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
-        const result = await window.orbitonicAPI?.saveRecording(bytes, `recording_${stamp}.webm`);
-        if (result?.ok) flash("Recording saved.");
-        else if (!result?.canceled) flash(result?.error ?? "Recording could not be saved.");
+        const recording = await audioEngine.stopRecording();
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const fileName = `orbitonic-recording-${stamp}.webm`;
+        const data = await recording.blob.arrayBuffer();
+        if (window.orbitonicAPI?.saveRecording) {
+          const result = await window.orbitonicAPI.saveRecording({ fileName, mimeType: recording.mimeType, data });
+          if (result.ok) flash("Recording saved.");
+          else if (!result.canceled) flash(result.error ?? "Failed to save recording.");
+        } else {
+          const url = URL.createObjectURL(recording.blob);
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = fileName;
+          link.click();
+          window.setTimeout(() => URL.revokeObjectURL(url), 0);
+          flash("Recording saved.");
+        }
       }
     } catch (error) {
-      setIsRecording(false);
       flash(error instanceof Error ? error.message : "Recording failed.");
+    } finally {
+      if (isRecording) setIsRecording(false);
     }
   }
 

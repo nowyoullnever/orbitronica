@@ -106,16 +106,23 @@ ipcMain.handle("project:open", async () => {
   }
 });
 
-ipcMain.handle("recording:save", async (_event, bytes: Uint8Array, suggestedName: string) => {
+type RecordingSavePayload = {
+  fileName: string;
+  mimeType: string;
+  data: ArrayBuffer;
+};
+
+ipcMain.handle("recording:save", async (_event, payload: RecordingSavePayload) => {
   try {
+    const safeName = path.basename(payload.fileName).replace(/[^a-zA-Z0-9._-]/g, "_") || "orbitonic-recording.webm";
     const result = await dialog.showSaveDialog({
       title: "Save Recording",
-      defaultPath: suggestedName,
-      filters: [{ name: "WebM Audio", extensions: ["webm"] }]
+      defaultPath: safeName.endsWith(".webm") ? safeName : `${safeName}.webm`,
+      filters: [{ name: "WebM Audio", extensions: ["webm"] }, { name: "All Files", extensions: ["*"] }]
     });
     if (result.canceled || !result.filePath) return { ok: false, canceled: true };
     const filePath = result.filePath.endsWith(".webm") ? result.filePath : `${result.filePath}.webm`;
-    await fs.writeFile(filePath, Buffer.from(bytes));
+    await fs.writeFile(filePath, Buffer.from(payload.data));
     return { ok: true, path: filePath };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
