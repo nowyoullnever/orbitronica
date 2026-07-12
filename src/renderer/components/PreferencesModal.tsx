@@ -22,7 +22,18 @@ export function PreferencesModal({ sampleFormat, onClose, onSave }: Props) {
   const [error, setError] = useState<string>();
 
   useEffect(() => setSelectedFormat(sampleFormat), [sampleFormat]);
-  useEffect(() => { closeButton.current?.focus(); }, []);
+  useEffect(() => {
+    // The menu action that opened the dialog should remain the user's next focus
+    // target after closing it. Do this in cleanup so Escape, Cancel, backdrop, and
+    // successful Save share the same restoration behavior.
+    const previouslyFocused = document.activeElement;
+    closeButton.current?.focus();
+    return () => {
+      if (previouslyFocused instanceof HTMLElement && previouslyFocused.isConnected) {
+        previouslyFocused.focus();
+      }
+    };
+  }, []);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
