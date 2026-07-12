@@ -39,6 +39,17 @@ export class OrbitWamRack {
 
   getRuntime(slotId: string) { return this.runtimes.get(slotId); }
   getStatus(slotId: string): PluginRuntimeStatus { return this.runtimes.get(slotId)?.status ?? "idle"; }
+  /**
+   * Revokes every in-flight hydration lease before an owner freezes or removes
+   * this rack.  A create() that settles after this point sees a different
+   * generation (and no desired slot) and is destroyed instead of reconnecting
+   * a scene that is no longer audible.
+   */
+  invalidate(): void {
+    ++this.generation;
+    this.desired = [];
+    this.rewire();
+  }
   /** Mounting is idempotent and late createGui results are destroyed, which makes
    * the React StrictMode mount/unmount probe safe. */
   async mountGui(slotId: string, container: HTMLElement): Promise<void> {
@@ -71,8 +82,11 @@ export class OrbitWamRack {
 
   async reconcile(slots: readonly PluginSlot[], ownerGeneration?: number): Promise<void> {
     if (this.disposed) return;
-    const generation = ownerGeneration ?? ++this.generation;
-    this.generation = Math.max(this.generation, generation);
+    // A rack lease is local, but a scene owner can supply a larger generation.
+    // Never lower the local lease after an invalidation: a stale scene epoch
+    // must not become valid merely because it is numerically smaller.
+    const generation = Math.max(++this.generation, ownerGeneration ?? 0);
+    this.generation = generation;
     this.desired = slots.map((slot) => ({ ...slot }));
     const desiredIds = new Set(slots.map((slot) => slot.id));
     await Promise.all([...this.runtimes.values()].filter((runtime) => !desiredIds.has(runtime.slotId)).map((runtime) => this.dispose(runtime)));
@@ -158,7 +172,7 @@ export class OrbitWamRack {
     }
     await this.destroyInstance(runtime.instance, runtime.slotId);
   }
-  async freeze(): Promise<void> { await this.snapshotActiveState(); await Promise.all([...this.runtimes.values()].map((runtime) => this.dispose(runtime))); this.rewire(); }
+  async freeze(): Promise<void> { this.invalidate(); await this.snapshotActiveState(); await Promise.all([...this.runtimes.values()].map((runtime) => this.dispose(runtime))); this.rewire(); }
   async disposeAll(): Promise<void> { this.disposed = true; ++this.generation; await this.freeze(); }
 }
 

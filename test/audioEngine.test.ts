@@ -51,6 +51,7 @@ class FakeAudioContext {
 
 Object.assign(globalThis, { AudioContext: FakeAudioContext });
 const { audioEngine } = await import("../src/renderer/audio/audioEngine.ts");
+const { OrbitWamRack } = await import("../src/renderer/audio/wamRack.ts");
 
 test("recording path is lazy AudioWorklet PCM capture with acknowledged session protocol", () => {
   const source = fs.readFileSync(new URL("../src/renderer/audio/audioEngine.ts", import.meta.url), "utf8");
@@ -114,4 +115,27 @@ test("single-orbit staged install rejects collisions without replacing live audi
   assert.equal(audioEngine.getProjectAsset("live")?.fileName, "live.wav");
   audioEngine.installStagedOrbitAudio(unique);
   assert.equal(audioEngine.getProjectAsset("unique")?.fileName, "unique.wav");
+});
+
+test("scene transition revokes a pending rack create before freezing its orbit", async () => {
+  const orbitId = "wam-transition-race";
+  await audioEngine.decodeBytes(orbitId, "race.wav", new Uint8Array([7]));
+  const engine = audioEngine as any;
+  const runtime = engine.orbitRuntimes.get(orbitId);
+  let resolve!: (instance: any) => void;
+  let destroys = 0;
+  const rack = new OrbitWamRack(runtime.input, runtime.panNode.input, () => new Promise((done) => { resolve = done; }), engine.pluginStateStore);
+  engine.orbitWamRacks.set(orbitId, rack);
+  const plugin = { id: "race-slot", catalogId: "burns-simple-delay", pluginVersion: "0.2.54", bypassed: false };
+
+  const pending = audioEngine.reconcileOrbitPluginRack(orbitId, [plugin]);
+  while (!resolve) await new Promise((done) => setTimeout(done, 0));
+  // transitionScenePluginRacks must invalidate before freeze's first await.
+  const transition = audioEngine.transitionScenePluginRacks([{ id: orbitId, plugins: [plugin] } as any], [], 91, "next-scene");
+  resolve({ audioNode: new FakeNode(), destroy: async () => { destroys++; } });
+  await pending;
+  assert.equal(await transition, true);
+  assert.equal(destroys, 1);
+  assert.equal(audioEngine.getOrbitPluginStatus(orbitId, plugin.id), "idle");
+  audioEngine.removeOrbit(orbitId);
 });

@@ -397,6 +397,8 @@ class AudioEngine {
   async reconcileOrbitPluginRack(orbitId: string, slots: readonly PluginSlot[], generation?: number): Promise<void> {
     await this.rackForOrbit(orbitId).reconcile(slots, generation);
   }
+  /** Revoke a rack's pending hydration before its scene becomes frozen. */
+  invalidateOrbitPluginRack(orbitId: string): void { this.orbitWamRacks.get(orbitId)?.invalidate(); }
   async freezeOrbitPluginRack(orbitId: string): Promise<void> { await this.orbitWamRacks.get(orbitId)?.freeze(); }
   /** Commit WAM state only after every active rack produced a valid snapshot. */
   async snapshotOrbitPluginStates(): Promise<void> {
@@ -434,6 +436,9 @@ class AudioEngine {
     this.scenePluginTransitionGeneration = Math.max(this.scenePluginTransitionGeneration, generation);
     const current = () => generation === this.scenePluginTransitionGeneration;
     this.scenePluginRuntimeOwner = null;
+    // Invalidate synchronously, before the first await in freeze. Otherwise a
+    // pending create() can settle during state capture and rewire a frozen rack.
+    previous.forEach((orbit) => this.invalidateOrbitPluginRack(orbit.id));
     await Promise.all(previous.map((orbit) => this.freezeOrbitPluginRack(orbit.id)));
     if (!current()) return false;
     await Promise.all(target.filter((orbit) => (orbit.plugins?.length ?? 0) > 0 && this.orbitRuntimes.has(orbit.id))
