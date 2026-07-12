@@ -69,7 +69,7 @@ test("pre-fader insert round-trips state, GUI, and the dry connection during cle
   await insert.setState({ mix: .8, enabled: true });
   assert.deepEqual(await insert.getState(), { mix: .8, enabled: true });
   const container = { append: (element: HTMLElement) => assert.equal(element, gui) } as unknown as HTMLElement;
-  insert.mountGui(container);
+  await insert.mountGui(container);
   await insert.cleanup();
   await insert.cleanup();
   assert.equal(removed, 1);
@@ -77,4 +77,51 @@ test("pre-fader insert round-trips state, GUI, and the dry connection during cle
   assert.equal(source.edges.has(wamNode), false);
   assert.equal(wamNode.edges.has(destination), false);
   assert.equal(source.edges.has(destination), true, "cleanup restores the dry pre-fader route");
+});
+
+test("trusted catalog is closed and maps only the frozen Burns entry", async () => {
+  const { WAM_CATALOG, getWamCatalogEntry, catalogEntryUrl } = await import("../src/renderer/audio/wamCatalog.ts");
+  assert.deepEqual(Object.keys(WAM_CATALOG), ["burns-simple-delay"]);
+  assert.equal(getWamCatalogEntry("untrusted-url"), undefined);
+  assert.equal(getWamCatalogEntry("burns-simple-delay")?.license, "MIT");
+  assert.equal(catalogEntryUrl(WAM_CATALOG["burns-simple-delay"], "file:///bundle/index.html"), "file:///bundle/wam/burns-simple-delay/index.js");
+});
+
+test("timeout opens a bounded catalog circuit and late instance is destroyed", async () => {
+  let time = 0;
+  let destroyed = 0;
+  const host = new WamHost(async () => ["group"], {
+    deadlineMs: 20,
+    circuitThreshold: 1,
+    circuitCooldownMs: 100,
+    maxDetachedPerCatalog: 1,
+    now: () => time
+  });
+  const loader: WamModuleLoader = async () => ({
+    createInstance: async () => {
+      await new Promise((done) => setTimeout(done, 40));
+      return { audioNode: new FakeNode() as unknown as AudioNode, destroy: () => { destroyed++; } };
+    }
+  });
+  const source = new FakeNode(); const destination = new FakeNode(); source.connect(destination);
+  await assert.rejects(host.insertPreFader(context, source as unknown as AudioNode, destination as unknown as AudioNode, loader, "burns-simple-delay"), /wam-timeout/);
+  await assert.rejects(host.insertPreFader(context, source as unknown as AudioNode, destination as unknown as AudioNode, loader, "burns-simple-delay"), /wam-circuit-open/);
+  await new Promise((done) => setTimeout(done, 50));
+  assert.equal(destroyed, 1, JSON.stringify(host.getDiagnostics()));
+  const diagnostics = host.getDiagnostics();
+  assert.ok(diagnostics.events.some((event) => event.outcome === "timeout" && event.reason === "timeout"));
+  assert.ok(diagnostics.events.some((event) => event.outcome === "late-disposed"));
+  assert.equal(JSON.stringify(diagnostics), JSON.stringify(diagnostics).replace(/https?:\/\//g, ""), "diagnostics do not retain raw URLs");
+});
+
+test("state boundary rejects non-JSON values without passing them to plugins", async () => {
+  const host = new WamHost(async () => {});
+  const source = new FakeNode(); const destination = new FakeNode(); source.connect(destination);
+  let passed = false;
+  const insert = await host.insertPreFader(context, source as unknown as AudioNode, destination as unknown as AudioNode, async () => ({
+    createInstance: async () => ({ audioNode: new FakeNode() as unknown as AudioNode, setState: async () => { passed = true; }, getState: async () => ({ valid: Infinity }) })
+  }));
+  await assert.rejects(insert.setState({ invalid: undefined } as unknown as { invalid: never }), /invalid-state/);
+  assert.equal(passed, false);
+  await assert.rejects(insert.getState(), /invalid-state/);
 });

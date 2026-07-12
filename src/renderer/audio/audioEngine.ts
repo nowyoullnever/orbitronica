@@ -2,6 +2,7 @@ import { SimpleFilter, SoundTouch, WebAudioBufferSource } from "soundtouchjs";
 import type { SequenceRetriggerMode } from "../state/types";
 import { createFLStylePanNode, type FLStylePanNode } from "./flStylePan.ts";
 import { WamHost, type WamInsert, type WamModuleLoader } from "./wamHost.ts";
+import { getWamCatalogEntry, loadCatalogModule, type WamCatalogId } from "./wamCatalog.ts";
 
 type ActivePlayback = {
   id: string;
@@ -346,6 +347,21 @@ class AudioEngine {
     if (!runtime) throw new Error(`Audio runtime is unavailable for orbit "${orbitId}".`);
     const insert = await this.wamHost.insertPreFader(
       this.getContext(), runtime.panNode.output, runtime.gainNode, loader
+    );
+    this.orbitWamInserts.set(orbitId, insert);
+    return insert;
+  }
+
+  /** Attaches only a compiled allowlist item; documents never carry executable URLs. */
+  async attachOrbitCatalogWam(orbitId: string, catalogId: WamCatalogId): Promise<WamInsert> {
+    const entry = getWamCatalogEntry(catalogId);
+    if (!entry) throw new Error("WAM catalog entry is unavailable.");
+    const existing = this.orbitWamInserts.get(orbitId);
+    if (existing) return existing;
+    const runtime = this.orbitRuntimes.get(orbitId);
+    if (!runtime) throw new Error(`Audio runtime is unavailable for orbit "${orbitId}".`);
+    const insert = await this.wamHost.insertPreFader(
+      this.getContext(), runtime.panNode.output, runtime.gainNode, () => loadCatalogModule(entry), entry.id
     );
     this.orbitWamInserts.set(orbitId, insert);
     return insert;
