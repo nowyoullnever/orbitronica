@@ -12,9 +12,6 @@ declare global {
         error?: string;
         canceled?: boolean;
       }>;
-      loadAutomationSample(filePath: string): Promise<{
-        ok: boolean; fileName?: string; bytes?: Uint8Array; error?: string;
-      }>;
       saveRecording(payload: { fileName: string; mimeType: string; data: ArrayBuffer }): Promise<{
         ok: boolean; path?: string; error?: string; canceled?: boolean;
       }>;

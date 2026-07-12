@@ -4,7 +4,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const AUTOMATION_SAMPLE_ROOT = path.resolve("D:\\샘플 사운드\\녹음");
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -107,22 +106,6 @@ ipcMain.handle("project:open", async () => {
   }
 });
 
-// Temporary local-sample bridge for assisted testing. Keep this constrained to the
-// user-provided sample folder; never expose arbitrary renderer filesystem access.
-ipcMain.handle("automation:load-sample", async (_event, requestedPath: string) => {
-  try {
-    const resolved = path.resolve(requestedPath);
-    const relative = path.relative(AUTOMATION_SAMPLE_ROOT, resolved);
-    if (relative.startsWith("..") || path.isAbsolute(relative) || !/\.(wav|mp3|ogg)$/i.test(resolved)) {
-      return { ok: false, error: "Choose a WAV, MP3, or OGG file inside D:\\샘플 사운드\\녹음." };
-    }
-    const bytes = await fs.readFile(resolved);
-    return { ok: true, fileName: path.basename(resolved), bytes: new Uint8Array(bytes) };
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : "Unable to read sample." };
-  }
-});
-
 type RecordingSavePayload = {
   fileName: string;
   mimeType: string;
@@ -133,7 +116,7 @@ ipcMain.handle("recording:save", async (_event, payload: RecordingSavePayload) =
   try {
     const safeName = path.basename(payload.fileName).replace(/[^a-zA-Z0-9._-]/g, "_") || "orbitonic-recording.wav";
     const result = await dialog.showSaveDialog({
-      title: "Save Recording",
+      title: "Save Live Recording",
       defaultPath: safeName.endsWith(".wav") ? safeName : `${safeName}.wav`,
       filters: [{ name: "WAV Audio", extensions: ["wav"] }, { name: "All Files", extensions: ["*"] }]
     });
