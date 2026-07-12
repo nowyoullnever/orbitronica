@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseProject, serializeProject } from "../src/renderer/project/projectSerializer.ts";
+import { parseProject, serializeProject, validateJsonValue } from "../src/renderer/project/projectSerializer.ts";
 import { createSpliceBars } from "../src/renderer/state/scenes.ts";
 import type { Orbit, Planet, Scene, TriggerBar } from "../src/renderer/state/types.ts";
 
@@ -24,7 +24,7 @@ const scene = (id: string, extra: Partial<Scene> = {}): Scene => ({
   multiSelection: { orbitIds: [], planetIds: [] }, ...extra
 });
 
-test("v5 round-trip preserves every scene and active document state", () => {
+test("v6 round-trip preserves every scene and active document state", () => {
   const loop = orbit("loop", { spliceCount: 2, showWaveform: false });
   const first = scene("first", {
     name: "Intro", orbits: [loop],
@@ -40,7 +40,8 @@ test("v5 round-trip preserves every scene and active document state", () => {
   const second = scene("second", { name: "Outro" });
   const serialized = serializeProject("mix", [first, second], second.id, .25, { volume: .4, pan: -.25 });
 
-  assert.equal(serialized.schemaVersion, 5);
+  assert.equal(serialized.schemaVersion, 6);
+  assert.equal(serialized.appName, "Orbitronica");
   assert.deepEqual(serialized.scenes[0].bars.map((item) => item.id), ["manual"]);
   assert.equal("multiSelection" in serialized.scenes[0], false);
   assert.equal("speedProcessRequestId" in serialized.scenes[0].planets[0], false);
@@ -71,7 +72,7 @@ test("v4 and unversioned projects migrate to one normalized scene", () => {
     master: { volume: 5, pan: -5 }
   };
   const migrated = parseProject(JSON.stringify(legacy), () => "migrated-scene");
-  assert.equal(migrated.schemaVersion, 5);
+  assert.equal(migrated.schemaVersion, 6);
   assert.equal(migrated.scenes.length, 1);
   assert.equal(migrated.scenes[0].id, "migrated-scene");
   assert.equal(migrated.scenes[0].name, "Scene 1");
@@ -181,11 +182,38 @@ test("v4 migration also rejects a persisted ID occupying an implied splice reser
 });
 
 test("unsupported future versions and malformed shapes fail clearly", () => {
-  assert.throws(() => parseProject(JSON.stringify({ schemaVersion: 6 })), /Unsupported Orbitronica schema version 6/);
+  assert.throws(() => parseProject(JSON.stringify({ schemaVersion: 7 })), /Unsupported Orbitronica schema version 7/);
   assert.throws(() => parseProject(JSON.stringify({
     schemaVersion: 5, appName: "Orbitonic", scenes: {}
   })), /require a scenes array/);
   assert.throws(() => parseProject("not json"), /JSON could not be parsed/);
+});
+
+test("v6 keeps slot metadata in scenes and only current slot JSON state in the external store", () => {
+  const source = scene("s", { orbits: [orbit("o", {
+    plugins: [{ id: "slot", catalogId: "burns-simple-delay", pluginVersion: "0.2.54", bypassed: false }]
+  })] });
+  const encoded = serializeProject("plugins", [source], "s", 1, { volume: 1, pan: 0 }, new Map([
+    ["slot", { delay: .5, nested: [true, null] }]
+  ]));
+  assert.deepEqual(encoded.pluginStates, { slot: { delay: .5, nested: [true, null] } });
+  assert.equal("state" in encoded.scenes[0].orbits[0].plugins![0], false);
+  const decoded = parseProject(JSON.stringify(encoded));
+  assert.deepEqual(decoded.pluginStates, encoded.pluginStates);
+  const malformed = structuredClone(encoded) as any;
+  malformed.pluginStates.unknown = {};
+  assert.throws(() => parseProject(JSON.stringify(malformed)), /unknown slot/);
+});
+
+test("v6 rejects unsafe or oversized plugin state while v5 migrates with an empty store", () => {
+  const legacy = serializeProject("old", [scene("s")], "s", 1, { volume: 1, pan: 0 });
+  const v5 = { ...legacy, schemaVersion: 5 as const, appName: "Orbitonic" as const } as any;
+  delete v5.pluginStates;
+  const migrated = parseProject(JSON.stringify(v5));
+  assert.equal(migrated.schemaVersion, 6);
+  assert.deepEqual(migrated.pluginStates, {});
+  assert.throws(() => validateJsonValue({ nope: Infinity }), /non-finite/);
+  assert.throws(() => validateJsonValue(() => undefined), /JSON-safe/);
 });
 
 test("v5 strictly rejects malformed durable entity fields and enums", () => {

@@ -159,7 +159,24 @@ export type SerializableProjectV5 = {
   lastLoopBarLengthRadians: number;
 };
 
-export type SerializableProject = SerializableProjectV5;
+/** JSON-only parameter blobs live beside the document, never in history scenes. */
+export type JsonPrimitive = null | boolean | number | string;
+export type JsonValue = JsonPrimitive | readonly JsonValue[] | { readonly [key: string]: JsonValue };
+
+export type SerializableProjectV6 = {
+  schemaVersion: 6;
+  appName: "Orbitronica";
+  savedAt: string;
+  projectName: string;
+  scenes: SerializableSceneV5[];
+  activeSceneId: string;
+  master: MasterMix;
+  lastLoopBarLengthRadians: number;
+  /** State is keyed by globally unique slot ID; slots themselves remain in orbit metadata. */
+  pluginStates: Record<string, JsonValue>;
+};
+
+export type SerializableProject = SerializableProjectV6;
 
 export type ContextMenuState = {
   x: number;

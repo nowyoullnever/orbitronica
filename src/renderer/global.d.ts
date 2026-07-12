@@ -1,10 +1,10 @@
-import type { SerializableProjectV4, SerializableProjectV5 } from "./state/types";
+import type { SerializableProjectV4, SerializableProjectV5, SerializableProjectV6 } from "./state/types";
 
 export {};
 
 type ProjectAssetPayload = { orbitId: string; fileName: string; bytes: Uint8Array };
 type SaveProjectPayload = {
-  project: SerializableProjectV5 | SerializableProjectV4;
+  project: SerializableProjectV6 | SerializableProjectV5 | SerializableProjectV4;
   assets: ProjectAssetPayload[];
 };
 type ProjectAssetResult = { orbitId: string; bytes?: Uint8Array; error?: string };

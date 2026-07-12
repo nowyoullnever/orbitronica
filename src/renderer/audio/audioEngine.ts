@@ -404,6 +404,11 @@ class AudioEngine {
     await this.orbitWamRacks.get(orbitId)?.unmountGui(slotId);
   }
   getPluginStateStore(): ReadonlyMap<string, import("./wamHost.ts").JsonValue> { return this.pluginStateStore; }
+  /** Replaces only durable, already-validated state during an open transaction. */
+  replacePluginStateStore(states: ReadonlyMap<string, import("./wamHost.ts").JsonValue>) {
+    this.pluginStateStore.clear();
+    for (const [slotId, value] of states) this.pluginStateStore.set(slotId, JSON.parse(JSON.stringify(value)));
+  }
   prunePluginStateSlots(retainedSlotIds: ReadonlySet<string>) { prunePluginStates(this.pluginStateStore, retainedSlotIds); }
   copyPluginSlotStates(source: readonly PluginSlot[] | undefined, destination: readonly PluginSlot[] | undefined) {
     const from = source ?? [], to = destination ?? [];

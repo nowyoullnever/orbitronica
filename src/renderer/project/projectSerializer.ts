@@ -1,6 +1,7 @@
 import type {
   MasterMix, Orbit, Planet, Scene, Selection, SerializableProjectV4,
-  SerializableProjectV5, SerializableSceneV5, TriggerBar, ViewportState
+  SerializableProjectV5, SerializableProjectV6, SerializableSceneV5, TriggerBar, ViewportState,
+  JsonValue, PluginSlot
 } from "../state/types";
 import {
   assertValidScenes, collectSceneIds, createEmptyScene, createSpliceBars, DEFAULT_VIEWPORT,
@@ -9,9 +10,18 @@ import {
 import { normalizeAngle, normalizeSpliceCount, TAU } from "../utils/geometry.ts";
 import { normalizeSampleWindow } from "../utils/sampleTrim.ts";
 
-export type ParsedProject = Omit<SerializableProjectV5, "scenes"> & { scenes: Scene[] };
+export type ParsedProject = Omit<SerializableProjectV6, "scenes"> & { scenes: Scene[] };
 type IdFactory = () => string;
 const defaultIdFactory: IdFactory = () => crypto.randomUUID();
+
+/** Deliberately conservative limits: documents are user supplied and WAM state is opaque. */
+export const PLUGIN_STATE_LIMITS = {
+  maxSlots: 256,
+  maxBytes: 1_000_000,
+  maxDepth: 24,
+  maxEntries: 20_000,
+  maxStringLength: 100_000
+} as const;
 
 function invalidProject(detail?: string): never {
   throw new Error(`This file is not a valid Orbitronica project${detail ? `: ${detail}` : "."}`);
@@ -46,8 +56,74 @@ function normalizeOrbit(orbit: Partial<Orbit>): Orbit {
     spliceCount: orbit.spliceCount === undefined ? undefined : normalizeSpliceCount(orbit.spliceCount),
     spliceStartAngle: orbit.spliceStartAngle === undefined ? undefined : normalizeAngle(finite(orbit.spliceStartAngle, 0)),
     sampleStart: window.start,
-    sampleEnd: window.end
+    sampleEnd: window.end,
+    plugins: Array.isArray(orbit.plugins) ? orbit.plugins.map((slot) => ({ ...slot })) : []
   };
+}
+
+function slotIds(scenes: readonly { orbits: readonly Pick<Orbit, "plugins">[] }[]) {
+  const ids = new Set<string>();
+  for (const scene of scenes) for (const orbit of scene.orbits) for (const slot of orbit.plugins ?? []) ids.add(slot.id);
+  return ids;
+}
+
+function validatePluginSlot(slot: unknown, label: string): asserts slot is PluginSlot {
+  if (!slot || typeof slot !== "object" || Array.isArray(slot)) invalidProject(`${label} is malformed.`);
+  const value = slot as Partial<PluginSlot>;
+  if (typeof value.id !== "string" || !value.id || value.id.length > 128 ||
+    typeof value.catalogId !== "string" || !value.catalogId || value.catalogId.length > 128 ||
+    typeof value.pluginVersion !== "string" || !value.pluginVersion || value.pluginVersion.length > 64 ||
+    typeof value.bypassed !== "boolean") invalidProject(`${label} is malformed.`);
+}
+
+/** Rejects prototypes, cycles, non-finite numbers, and size bombs before WAM sees a blob. */
+export function validateJsonValue(value: unknown, label = "plugin state"): JsonValue {
+  let entries = 0;
+  const visit = (current: unknown, depth: number): JsonValue => {
+    if (depth > PLUGIN_STATE_LIMITS.maxDepth) invalidProject(`${label} exceeds maximum nesting.`);
+    if (current === null || typeof current === "boolean" || typeof current === "string") {
+      if (typeof current === "string" && current.length > PLUGIN_STATE_LIMITS.maxStringLength) invalidProject(`${label} contains an oversized string.`);
+      return current;
+    }
+    if (typeof current === "number") {
+      if (!Number.isFinite(current)) invalidProject(`${label} contains a non-finite number.`);
+      return current;
+    }
+    if (Array.isArray(current)) {
+      return current.map((item) => { if (++entries > PLUGIN_STATE_LIMITS.maxEntries) invalidProject(`${label} has too many entries.`); return visit(item, depth + 1); });
+    }
+    if (!current || typeof current !== "object" || Object.getPrototypeOf(current) !== Object.prototype) invalidProject(`${label} is not JSON-safe.`);
+    const result: Record<string, JsonValue> = {};
+    for (const [key, item] of Object.entries(current)) {
+      if (++entries > PLUGIN_STATE_LIMITS.maxEntries) invalidProject(`${label} has too many entries.`);
+      result[key] = visit(item, depth + 1);
+    }
+    return result;
+  };
+  const normalized = visit(value, 0);
+  // JSON.stringify makes the byte contract unambiguous and produces a deep clone.
+  if (new TextEncoder().encode(JSON.stringify(normalized)).byteLength > PLUGIN_STATE_LIMITS.maxBytes) {
+    invalidProject(`${label} exceeds the size limit.`);
+  }
+  return normalized;
+}
+
+export function serializePluginStates(
+  scenes: readonly Pick<Scene, "orbits">[], stateStore: ReadonlyMap<string, JsonValue> = new Map()
+): Record<string, JsonValue> {
+  const retained = slotIds(scenes);
+  if (retained.size > PLUGIN_STATE_LIMITS.maxSlots) invalidProject("too many plugin slots.");
+  const result: Record<string, JsonValue> = {};
+  let bytes = 0;
+  for (const id of retained) {
+    const state = stateStore.get(id);
+    if (state === undefined) continue;
+    const safe = validateJsonValue(state, `plugin state for slot ${id}`);
+    bytes += new TextEncoder().encode(JSON.stringify(safe)).byteLength;
+    if (bytes > PLUGIN_STATE_LIMITS.maxBytes) invalidProject("plugin state store exceeds the size limit.");
+    result[id] = safe;
+  }
+  return result;
 }
 
 function normalizePlanet(planet: Partial<Planet>): Planet {
@@ -141,23 +217,25 @@ export function serializeProject(
   scenes: readonly Scene[],
   activeSceneId: string,
   lastLoopBarLengthRadians: number,
-  master: MasterMix
-): SerializableProjectV5 {
+  master: MasterMix,
+  pluginStateStore: ReadonlyMap<string, JsonValue> = new Map()
+): SerializableProjectV6 {
   const persistedScenes = scenes.map(serializeScene);
   return {
-    schemaVersion: 5,
-    appName: "Orbitonic",
+    schemaVersion: 6,
+    appName: "Orbitronica",
     savedAt: new Date().toISOString(),
     projectName,
     scenes: persistedScenes,
     activeSceneId: persistedScenes.some((scene) => scene.id === activeSceneId)
       ? activeSceneId : persistedScenes[0]?.id ?? "",
     master: normalizeMasterMix(master),
-    lastLoopBarLengthRadians: clamp(lastLoopBarLengthRadians, .000001, TAU, Math.PI / 12)
+    lastLoopBarLengthRadians: clamp(lastLoopBarLengthRadians, .000001, TAU, Math.PI / 12),
+    pluginStates: serializePluginStates(persistedScenes, pluginStateStore)
   };
 }
 
-function requireSceneShape(value: unknown, index: number, strictV5 = true): asserts value is SerializableSceneV5 {
+function requireSceneShape(value: unknown, index: number, strictV5 = true, strictPluginSlots = false): asserts value is SerializableSceneV5 {
   if (!value || typeof value !== "object") invalidProject(`scene ${index + 1} is not an object.`);
   const scene = value as Partial<SerializableSceneV5>;
   if (typeof scene.id !== "string" || !scene.id || typeof scene.name !== "string" ||
@@ -233,6 +311,11 @@ function requireSceneShape(value: unknown, index: number, strictV5 = true): asse
     }
     if (entity.audioPath !== undefined && typeof entity.audioPath !== "string") {
       invalidProject(label("orbit", entityIndex, "audioPath"));
+    }
+    if (strictPluginSlots) {
+      if (!Array.isArray(entity.plugins)) invalidProject(label("orbit", entityIndex, "plugins"));
+      (entity.plugins as unknown[]).forEach((slot, slotIndex) =>
+        validatePluginSlot(slot, `scene ${index + 1} orbit ${entityIndex + 1} plugin ${slotIndex + 1}`));
     }
   });
   scene.planets.forEach((raw, entityIndex) => {
@@ -341,14 +424,84 @@ function migrateV4(raw: Partial<SerializableProjectV4>, createId: IdFactory): Pa
   assertValidScenes([scene]);
   scene.bars = [...scene.bars, ...scene.orbits.flatMap(createSpliceBars)];
   return {
-    schemaVersion: 5,
-    appName: "Orbitonic",
+    schemaVersion: 6,
+    appName: "Orbitronica",
     savedAt: raw.savedAt ?? new Date().toISOString(),
     projectName: raw.projectName ?? "Untitled Session",
     scenes: [scene],
     activeSceneId: scene.id,
     master: normalizeMasterMix(raw.master),
-    lastLoopBarLengthRadians: clamp(raw.lastLoopBarLengthRadians, .000001, TAU, Math.PI / 12)
+    lastLoopBarLengthRadians: clamp(raw.lastLoopBarLengthRadians, .000001, TAU, Math.PI / 12),
+    pluginStates: {}
+  };
+}
+
+function migrateV5(raw: SerializableProjectV5, createId: IdFactory): ParsedProject {
+  if (raw.appName !== "Orbitonic") invalidProject("v5 appName must be \"Orbitonic\".");
+  if (!Array.isArray(raw.scenes)) invalidProject("v5 projects require a scenes array.");
+  let scenes: Scene[];
+  if (raw.scenes.length === 0) scenes = [createEmptyScene("Scene 1", createId)];
+  else {
+    raw.scenes.forEach((scene, index) => requireSceneShape(scene, index));
+    scenes = raw.scenes.map(runtimeScene);
+  }
+  assertValidScenes(scenes);
+  scenes = scenes.map((scene) => ({ ...scene, bars: [...scene.bars, ...scene.orbits.flatMap(createSpliceBars)] }));
+  return {
+    schemaVersion: 6, appName: "Orbitronica",
+    savedAt: typeof raw.savedAt === "string" ? raw.savedAt : new Date().toISOString(),
+    projectName: typeof raw.projectName === "string" ? raw.projectName : "Untitled Session",
+    scenes,
+    activeSceneId: scenes.some((scene) => scene.id === raw.activeSceneId) ? raw.activeSceneId : scenes[0].id,
+    master: normalizeMasterMix(raw.master),
+    lastLoopBarLengthRadians: typeof raw.lastLoopBarLengthRadians === "number" && Number.isFinite(raw.lastLoopBarLengthRadians)
+      ? raw.lastLoopBarLengthRadians : Math.PI / 12,
+    pluginStates: {}
+  };
+}
+
+function parseV6(root: Record<string, unknown>, createId: IdFactory): ParsedProject {
+  if (root.appName !== "Orbitronica") invalidProject("v6 appName must be \"Orbitronica\".");
+  if (!Array.isArray(root.scenes)) invalidProject("v6 projects require a scenes array.");
+  let scenes: Scene[];
+  if (root.scenes.length === 0) scenes = [createEmptyScene("Scene 1", createId)];
+  else {
+    root.scenes.forEach((scene, index) => requireSceneShape(scene, index, true, true));
+    scenes = (root.scenes as SerializableSceneV5[]).map(runtimeScene);
+  }
+  assertValidScenes(scenes);
+  const slots = slotIds(scenes);
+  if (slots.size > PLUGIN_STATE_LIMITS.maxSlots) invalidProject("too many plugin slots.");
+  const seenSlotIds = new Set<string>();
+  for (const scene of scenes) for (const orbit of scene.orbits) for (const slot of orbit.plugins ?? []) {
+    if (seenSlotIds.has(slot.id)) invalidProject("plugin slot IDs must be globally unique.");
+    seenSlotIds.add(slot.id);
+  }
+  const rawStates = root.pluginStates;
+  if (!rawStates || typeof rawStates !== "object" || Array.isArray(rawStates) || Object.getPrototypeOf(rawStates) !== Object.prototype) {
+    invalidProject("v6 projects require a pluginStates object.");
+  }
+  const pluginStates: Record<string, JsonValue> = {};
+  let bytes = 0;
+  for (const [id, state] of Object.entries(rawStates as Record<string, unknown>)) {
+    if (!slots.has(id)) invalidProject(`plugin state references unknown slot ${id}.`);
+    const safe = validateJsonValue(state, `plugin state for slot ${id}`);
+    bytes += new TextEncoder().encode(JSON.stringify(safe)).byteLength;
+    if (bytes > PLUGIN_STATE_LIMITS.maxBytes) invalidProject("plugin state store exceeds the size limit.");
+    pluginStates[id] = safe;
+  }
+  scenes = scenes.map((scene) => ({ ...scene, bars: [...scene.bars, ...scene.orbits.flatMap(createSpliceBars)] }));
+  const requestedActiveId = typeof root.activeSceneId === "string" ? root.activeSceneId : "";
+  return {
+    schemaVersion: 6, appName: "Orbitronica",
+    savedAt: typeof root.savedAt === "string" ? root.savedAt : new Date().toISOString(),
+    projectName: typeof root.projectName === "string" ? root.projectName : "Untitled Session",
+    scenes,
+    activeSceneId: scenes.some((scene) => scene.id === requestedActiveId) ? requestedActiveId : scenes[0].id,
+    master: normalizeMasterMix(root.master as Partial<MasterMix> | null),
+    lastLoopBarLengthRadians: typeof root.lastLoopBarLengthRadians === "number" && Number.isFinite(root.lastLoopBarLengthRadians)
+      ? root.lastLoopBarLengthRadians : Math.PI / 12,
+    pluginStates
   };
 }
 
@@ -360,37 +513,10 @@ export function parseProject(text: string, createId: IdFactory = defaultIdFactor
   if (root.schemaVersion === undefined || root.schemaVersion === 2 || root.schemaVersion === 3 || root.schemaVersion === 4) {
     return migrateV4(root as Partial<SerializableProjectV4>, createId);
   }
-  if (typeof root.schemaVersion === "number" && root.schemaVersion > 5) {
-    throw new Error(`Unsupported Orbitronica schema version ${root.schemaVersion}. This app supports versions 2 through 5.`);
+  if (typeof root.schemaVersion === "number" && root.schemaVersion > 6) {
+    throw new Error(`Unsupported Orbitronica schema version ${root.schemaVersion}. This app supports versions 2 through 6.`);
   }
-  if (root.schemaVersion !== 5) invalidProject(`unsupported schemaVersion ${String(root.schemaVersion)}.`);
-  if (root.appName !== "Orbitonic") invalidProject("v5 appName must be \"Orbitonic\".");
-  if (!Array.isArray(root.scenes)) invalidProject("v5 projects require a scenes array.");
-
-  let scenes: Scene[];
-  if (root.scenes.length === 0) {
-    scenes = [createEmptyScene("Scene 1", createId)];
-  } else {
-    root.scenes.forEach((scene, index) => requireSceneShape(scene, index));
-    scenes = (root.scenes as SerializableSceneV5[]).map(runtimeScene);
-  }
-  assertValidScenes(scenes);
-  scenes = scenes.map((scene) => ({
-    ...scene,
-    bars: [...scene.bars, ...scene.orbits.flatMap(createSpliceBars)]
-  }));
-  const requestedActiveId = typeof root.activeSceneId === "string" ? root.activeSceneId : "";
-  const activeSceneId = scenes.some((scene) => scene.id === requestedActiveId)
-    ? requestedActiveId : scenes[0].id;
-  return {
-    schemaVersion: 5,
-    appName: "Orbitonic",
-    savedAt: typeof root.savedAt === "string" ? root.savedAt : new Date().toISOString(),
-    projectName: typeof root.projectName === "string" ? root.projectName : "Untitled Session",
-    scenes,
-    activeSceneId,
-    master: normalizeMasterMix(root.master as Partial<MasterMix> | null),
-    lastLoopBarLengthRadians: typeof root.lastLoopBarLengthRadians === "number" &&
-      Number.isFinite(root.lastLoopBarLengthRadians) ? root.lastLoopBarLengthRadians : Math.PI / 12
-  };
+  if (root.schemaVersion === 5) return migrateV5(root as unknown as SerializableProjectV5, createId);
+  if (root.schemaVersion === 6) return parseV6(root, createId);
+  invalidProject(`unsupported schemaVersion ${String(root.schemaVersion)}.`);
 }

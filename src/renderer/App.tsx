@@ -857,9 +857,17 @@ export default function App() {
 
   async function performProjectSave(currentPath?: string) {
     if (!window.orbitonicAPI) return flash("Project saving is only available in the desktop app.");
+    // This is a save barrier, not dirty tracking: every live WAM is sampled on
+    // every save. The serializer only reads the committed store after the barrier.
+    try {
+      await audioEngine.snapshotOrbitPluginStates();
+    } catch (error) {
+      flash(error instanceof Error ? error.message : "Plugin state could not be captured; project was not saved.");
+      return;
+    }
     const project = serializeProject(
       projectName || "Untitled Session", scenes, activeSceneId, lastLoopBarLengthRadians,
-      { volume: masterVolume, pan: masterPan }
+      { volume: masterVolume, pan: masterPan }, audioEngine.getPluginStateStore()
     );
     const assets = scenes.flatMap((scene) => scene.orbits).flatMap((orbit) => {
       const asset = audioEngine.getProjectAsset(orbit.id);
@@ -891,6 +899,9 @@ export default function App() {
     }
     try {
       const project = parseProject(result.text);
+      // Parsing has already validated JSON shape/limits. Keep the restored store
+      // frozen until the active-scene transition hydrates its slots.
+      const restoredPluginStates = new Map(Object.entries(project.pluginStates));
       const assetMap = new Map((result.assets ?? []).map((asset) => [asset.orbitId, asset]));
       const missing: string[] = [];
       const restoredScenes: Scene[] = [];
@@ -943,6 +954,7 @@ export default function App() {
           prepareActiveSceneTransition(project.activeSceneId, true);
           resetParameterHistoryWindow();
           projectIds.current = restoredProjectIds;
+          audioEngine.replacePluginStateStore(restoredPluginStates);
           setScenes(restoredScenes);
           setActiveSceneId(project.activeSceneId);
           setMasterVolume(project.master.volume);
