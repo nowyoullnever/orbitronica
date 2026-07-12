@@ -30,8 +30,8 @@
     "wait-on": "^8.0.1"
   },
   "build": {
-    "appId": "com.orbitonic.mvp",
-    "productName": "Orbitonic MVP",
+    "appId": "com.orbitronica.app",
+    "productName": "Orbitronica",
     "files": [
       "dist/**/*",
       "dist-electron/**/*",

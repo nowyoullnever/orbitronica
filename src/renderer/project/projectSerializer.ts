@@ -14,7 +14,7 @@ type IdFactory = () => string;
 const defaultIdFactory: IdFactory = () => crypto.randomUUID();
 
 function invalidProject(detail?: string): never {
-  throw new Error(`This file is not a valid Orbitonic project${detail ? `: ${detail}` : "."}`);
+  throw new Error(`This file is not a valid Orbitronica project${detail ? `: ${detail}` : "."}`);
 }
 
 const finite = (value: unknown, fallback: number) => typeof value === "number" && Number.isFinite(value) ? value : fallback;
@@ -361,7 +361,7 @@ export function parseProject(text: string, createId: IdFactory = defaultIdFactor
     return migrateV4(root as Partial<SerializableProjectV4>, createId);
   }
   if (typeof root.schemaVersion === "number" && root.schemaVersion > 5) {
-    throw new Error(`Unsupported Orbitonic schema version ${root.schemaVersion}. This app supports versions 2 through 5.`);
+    throw new Error(`Unsupported Orbitronica schema version ${root.schemaVersion}. This app supports versions 2 through 5.`);
   }
   if (root.schemaVersion !== 5) invalidProject(`unsupported schemaVersion ${String(root.schemaVersion)}.`);
   if (root.appName !== "Orbitonic") invalidProject("v5 appName must be \"Orbitonic\".");

@@ -11,6 +11,8 @@ import { installAppMenu } from "./appMenu.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+app.setName("Orbitronica");
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1440,
@@ -18,7 +20,7 @@ function createWindow() {
     minWidth: 960,
     minHeight: 640,
     backgroundColor: "#f4f3ee",
-    title: "Orbitonic MVP",
+    title: "Orbitronica",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       sandbox: true,
@@ -55,9 +57,9 @@ ipcMain.handle("project:save", async (_event, payload: SavePayload, currentPath?
     let projectPath = currentPath;
     if (!projectPath) {
       const result = await dialog.showSaveDialog({
-        title: "Save Orbitonic Project",
+        title: "Save Orbitronica Project",
         defaultPath: `${payload.project.projectName ?? "Untitled Session"}.orb`,
-        filters: [{ name: "Orbitonic Project", extensions: projectDialogExtensions }]
+        filters: [{ name: "Orbitronica Project", extensions: projectDialogExtensions }]
       });
       if (result.canceled || !result.filePath) return { ok: false, canceled: true };
       projectPath = newProjectPath(result.filePath);
@@ -88,9 +90,9 @@ ipcMain.handle("project:save", async (_event, payload: SavePayload, currentPath?
 ipcMain.handle("project:open", async () => {
   try {
     const result = await dialog.showOpenDialog({
-      title: "Open Orbitonic Project",
+      title: "Open Orbitronica Project",
       properties: ["openFile"],
-      filters: [{ name: "Orbitonic Project", extensions: projectDialogExtensions }]
+      filters: [{ name: "Orbitronica Project", extensions: projectDialogExtensions }]
     });
     if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true };
     const projectPath = result.filePaths[0];
