@@ -34,7 +34,7 @@ export type ProjectAudioInput = {
 
 export type StagedProjectAudio = ProjectAudioInput & { buffer: AudioBuffer };
 
-export type RecordedPcm = Blob & { channels: Float32Array[]; sampleRate: number };
+export type RecordedPcm = { channels: Float32Array[]; sampleRate: number };
 
 type RecordingSession = {
   id: number;
@@ -43,6 +43,7 @@ type RecordingSession = {
   resolve?: () => void;
   reject?: (error: Error) => void;
   timeout?: number;
+  result?: RecordedPcm;
 };
 
 const PCM_WORKLET_SOURCE = `
@@ -677,7 +678,11 @@ class AudioEngine {
     node.connect(pull);
     pull.connect(context.destination);
     node.port.onmessage = ({ data }) => this.handleRecordingMessage(data as Record<string, unknown>);
-    node.onprocessorerror = () => this.failRecording(new Error("AudioWorklet recording failed."));
+    // A processor error can arrive after this disconnected node has been replaced.
+    // Never let a stale node tear down a new recording session.
+    node.onprocessorerror = () => {
+      if (this.recordingNode === node) this.failRecording(new Error("AudioWorklet recording failed."));
+    };
     this.recordingNode = node;
     this.recordingPull = pull;
     return node;
@@ -697,9 +702,9 @@ class AudioEngine {
       window.clearTimeout(session.timeout);
       const channels = session.chunks.map((parts) => this.joinRecordingChunks(parts));
       this.recordingSession = null;
-      const result = Object.assign(new Blob([], { type: "application/octet-stream" }), { channels, sampleRate: this.getContext().sampleRate }) as RecordedPcm;
+      const result: RecordedPcm = { channels, sampleRate: this.getContext().sampleRate };
+      session.result = result;
       session.resolve?.();
-      (session as RecordingSession & { result?: RecordedPcm }).result = result;
     }
   }
 
@@ -745,7 +750,7 @@ class AudioEngine {
     const acknowledgement = this.waitForRecordingAck(session);
     this.recordingNode.port.postMessage({ type: "stop", recordingId: session.id });
     await acknowledgement;
-    const result = (session as RecordingSession & { result?: RecordedPcm }).result;
+    const result = session.result;
     if (!result) throw new Error("AudioWorklet stopped without captured audio.");
     return result;
   }

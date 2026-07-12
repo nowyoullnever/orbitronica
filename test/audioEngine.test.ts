@@ -58,6 +58,9 @@ test("recording path is lazy AudioWorklet PCM capture with acknowledged session 
   for (const token of ["AudioWorkletNode", "recordingId", "started", "stopped", "processorerror", "2048", "URL.revokeObjectURL"]) {
     assert.ok(source.includes(token), `missing recording protocol token: ${token}`);
   }
+  assert.match(source, /export type RecordedPcm = \{ channels: Float32Array\[\]\; sampleRate: number \}/);
+  assert.doesNotMatch(source, /RecordedPcm = Blob/);
+  assert.match(source, /if \(this\.recordingNode === node\) this\.failRecording/);
 });
 
 test("master setters remain lazy and initialize the first graph with stored values", async () => {

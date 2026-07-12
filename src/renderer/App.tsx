@@ -55,7 +55,6 @@ type AppClipboard = {
 type RecordingPreferencesApi = {
   getPreferences?: () => Promise<{ export: { sampleFormat: WavSampleFormat } }>;
 };
-type CapturedRecording = { channels: Float32Array[]; sampleRate: number };
 type MenuAction = "open-project" | "save-project" | "save-project-as" | "preferences";
 
 const cleanPlanet = (planet: Planet): Planet => ({
@@ -962,7 +961,7 @@ export default function App() {
         recordingStarted = true;
         flash("Recording started.");
       } else {
-        const recording = await audioEngine.stopRecording() as unknown as CapturedRecording;
+        const recording = await audioEngine.stopRecording();
         setIsRecording(false);
         setRecordingPhase("encoding");
         const bytes = encodeWav(recording.channels, recording.sampleRate, recordingSampleFormat);
