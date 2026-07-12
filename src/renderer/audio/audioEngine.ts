@@ -397,6 +397,12 @@ class AudioEngine {
   async freezeOrbitPluginRack(orbitId: string): Promise<void> { await this.orbitWamRacks.get(orbitId)?.freeze(); }
   async snapshotOrbitPluginStates(): Promise<void> { await Promise.all([...this.orbitWamRacks.values()].map((rack) => rack.snapshotActiveState())); }
   getOrbitPluginStatus(orbitId: string, slotId: string): PluginRuntimeStatus { return this.orbitWamRacks.get(orbitId)?.getStatus(slotId) ?? "idle"; }
+  async mountOrbitPluginGui(orbitId: string, slotId: string, container: HTMLElement): Promise<void> {
+    await this.orbitWamRacks.get(orbitId)?.mountGui(slotId, container);
+  }
+  async unmountOrbitPluginGui(orbitId: string, slotId: string): Promise<void> {
+    await this.orbitWamRacks.get(orbitId)?.unmountGui(slotId);
+  }
   getPluginStateStore(): ReadonlyMap<string, import("./wamHost.ts").JsonValue> { return this.pluginStateStore; }
   prunePluginStateSlots(retainedSlotIds: ReadonlySet<string>) { prunePluginStates(this.pluginStateStore, retainedSlotIds); }
   copyPluginSlotStates(source: readonly PluginSlot[] | undefined, destination: readonly PluginSlot[] | undefined) {

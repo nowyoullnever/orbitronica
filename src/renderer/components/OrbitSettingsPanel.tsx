@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import type { Orbit, OrbitMode, Planet, SequenceRetriggerMode } from "../state/types";
+import { useEffect, useRef, useState } from "react";
+import type { Orbit, OrbitMode, Planet, PluginSlot, SequenceRetriggerMode } from "../state/types";
+import { WAM_CATALOG } from "../audio/wamCatalog";
 import {
   getOrbitTapeRate, getPlanetEffectiveSpeed, getSampleEnd, getSampleStart,
   getTapeStyleRuntimeRateOnly, rateToCents, SPLICE_MAX_PIECES
@@ -46,7 +47,59 @@ type Props = {
   onCopyPlanet: (planetId: string) => void;
   onPastePlanetToOrbit: (orbitId: string) => void;
   onDeletePlanet: (planetId: string) => void;
+  onAddPlugin: () => void;
+  onMovePlugin: (slotId: string, direction: -1 | 1) => void;
+  onBypassPlugin: (slotId: string, bypassed: boolean) => void;
+  onRemovePlugin: (slotId: string) => void;
+  pluginStatus: (slotId: string) => "idle" | "loading" | "ready" | "unavailable";
+  onMountPluginGui: (slotId: string, container: HTMLElement) => Promise<void>;
+  onUnmountPluginGui: (slotId: string) => Promise<void>;
 };
+
+function PluginGui({ slot, status, onMount, onUnmount }: {
+  slot: PluginSlot;
+  status: "idle" | "loading" | "ready" | "unavailable";
+  onMount: (slotId: string, container: HTMLElement) => Promise<void>;
+  onUnmount: (slotId: string) => Promise<void>;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const container = ref.current;
+    if (!container || status !== "ready") return;
+    void onMount(slot.id, container);
+    return () => { void onUnmount(slot.id); };
+  }, [slot.id, status, onMount, onUnmount]);
+  return <div className="wam-plugin-gui" ref={ref} aria-label="Plugin editor" />;
+}
+
+function PluginRack({ orbit, props }: { orbit: Orbit; props: Props }) {
+  const slots = orbit.plugins ?? [];
+  return <section className="settings-section plugin-rack" data-testid="plugin-rack">
+    <div className="panel-eyebrow">PLUGINS - {slots.length}</div>
+    <button type="button" onClick={props.onAddPlugin}>Add Burns Simple Delay</button>
+    {slots.length === 0 && <p className="no-planets">Add an approved effect to this orbit.</p>}
+    {slots.map((slot, index) => {
+      const status = props.pluginStatus(slot.id);
+      const catalog = WAM_CATALOG[slot.catalogId as keyof typeof WAM_CATALOG];
+      return <div className="plugin-slot" key={slot.id} data-plugin-status={status}>
+        <div className="plugin-slot-header">
+          <strong>{catalog?.id === "burns-simple-delay" ? "Burns Simple Delay" : "Unavailable plugin"}</strong>
+          <small>{status === "ready" ? (slot.bypassed ? "bypassed" : "ready") : status}</small>
+        </div>
+        <div className="plugin-actions">
+          <button type="button" aria-label="Move plugin earlier" disabled={index === 0} onClick={() => props.onMovePlugin(slot.id, -1)}>↑</button>
+          <button type="button" aria-label="Move plugin later" disabled={index === slots.length - 1} onClick={() => props.onMovePlugin(slot.id, 1)}>↓</button>
+          <label><input type="checkbox" checked={slot.bypassed} onChange={(event) => props.onBypassPlugin(slot.id, event.target.checked)} /> Bypass</label>
+          <button type="button" className="danger" onClick={() => props.onRemovePlugin(slot.id)}>Remove</button>
+        </div>
+        {status === "unavailable" && <p role="status">Plugin unavailable; its saved state is retained.</p>}
+        {status === "loading" && <p role="status">Loading plugin…</p>}
+        {status === "ready" && !slot.bypassed && <PluginGui slot={slot} status={status}
+          onMount={props.onMountPluginGui} onUnmount={props.onUnmountPluginGui} />}
+      </div>;
+    })}
+  </section>;
+}
 
 function NameEditor({ value, onCommit }: { value: string; onCommit: (value: string) => void }) {
   const [draft, setDraft] = useState(value);
@@ -268,6 +321,8 @@ export function OrbitSettingsPanel(props: Props) {
             <button className="danger" onClick={props.onDeleteOrbit}>Delete Orbit</button>
           </div>
         </section>
+
+        <PluginRack orbit={orbit} props={props} />
 
         <section className="settings-section">
           <div className="panel-eyebrow">PLANETS - {orbitPlanets.length}</div>

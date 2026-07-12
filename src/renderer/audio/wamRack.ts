@@ -26,6 +26,7 @@ export class OrbitWamRack {
   private generation = 0;
   private desired: readonly PluginSlot[] = [];
   private disposed = false;
+  private guis = new Map<string, HTMLElement>();
 
   private readonly input: AudioNode;
   private readonly destination: AudioNode;
@@ -38,6 +39,32 @@ export class OrbitWamRack {
 
   getRuntime(slotId: string) { return this.runtimes.get(slotId); }
   getStatus(slotId: string): PluginRuntimeStatus { return this.runtimes.get(slotId)?.status ?? "idle"; }
+  /** Mounting is idempotent and late createGui results are destroyed, which makes
+   * the React StrictMode mount/unmount probe safe. */
+  async mountGui(slotId: string, container: HTMLElement): Promise<void> {
+    const runtime = this.runtimes.get(slotId);
+    if (!runtime || runtime.status !== "ready" || runtime.disposed || !runtime.instance.createGui) return;
+    const existing = this.guis.get(slotId);
+    if (existing) { if (existing.parentElement !== container) container.append(existing); return; }
+    const instance = runtime.instance;
+    const createGui = instance.createGui!;
+    try {
+      const gui = await createGui();
+      if (this.disposed || runtime.disposed || this.runtimes.get(slotId) !== runtime || runtime.instance !== instance) {
+        await instance.destroyGui?.(gui); gui.remove(); return;
+      }
+      const prior = this.guis.get(slotId);
+      if (prior) { await instance.destroyGui?.(gui); gui.remove(); return; }
+      this.guis.set(slotId, gui); container.append(gui);
+    } catch { this.diagnostic("hydrate-failed", slotId); }
+  }
+  async unmountGui(slotId: string): Promise<void> {
+    const gui = this.guis.get(slotId); if (!gui) return;
+    this.guis.delete(slotId);
+    const runtime = this.runtimes.get(slotId);
+    try { await runtime?.instance.destroyGui?.(gui); } catch { this.diagnostic("destroy-failed", slotId); }
+    try { gui.remove(); } catch { /* detached plugin GUI */ }
+  }
   /** A missing/unavailable runtime remains dry; durable bypass is never mutated. */
   effectiveBypass(slot: PluginSlot) { return slot.bypassed || this.getStatus(slot.id) !== "ready"; }
   snapshotStates() { return new Map([...this.states].map(([id, value]) => [id, cloneJson(value)])); }
@@ -110,7 +137,7 @@ export class OrbitWamRack {
   }
   private async dispose(runtime: PluginRuntime) {
     if (runtime.disposed) return;
-    runtime.disposed = true; this.runtimes.delete(runtime.slotId);
+    runtime.disposed = true; await this.unmountGui(runtime.slotId); this.runtimes.delete(runtime.slotId);
     if (runtime.instance?.audioNode) {
       this.disconnectOwned(this.input, runtime.instance.audioNode);
       this.disconnectOwned(runtime.instance.audioNode, this.destination);

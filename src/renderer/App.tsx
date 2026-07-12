@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { SetStateAction } from "react";
 import { audioEngine, type ProjectAudioInput } from "./audio/audioEngine";
 import { collectRetainedPluginSlotIds } from "./audio/wamRack";
+import { WAM_CATALOG } from "./audio/wamCatalog";
 import { encodeWav, type WavSampleFormat } from "./audio/wavEncoder";
 import { CanvasStage } from "./components/CanvasStage";
 import { ContextMenu } from "./components/ContextMenu";
@@ -111,6 +112,7 @@ export default function App() {
   const [clipboard, setClipboard] = useState<AppClipboard>(null);
   const [isDuplicatingScene, setIsDuplicatingScene] = useState(false);
   const [waveformPeaksByOrbit, setWaveformPeaksByOrbit] = useState<Map<string, Float32Array>>(() => new Map());
+  const [, setPluginRuntimeRevision] = useState(0);
   const uploadPoint = useRef({ x: 450, y: 350 });
   const fileInput = useRef<HTMLInputElement>(null);
   const undoStack = useRef<HistorySnapshot[]>([]);
@@ -1012,6 +1014,24 @@ export default function App() {
     setOrbits((current) => current.map((orbit) => orbit.id === orbitId ? { ...orbit, ...changes } : orbit));
   }
 
+  function reconcileOrbitPlugins(orbit: Orbit) {
+    setPluginRuntimeRevision((revision) => revision + 1);
+    void audioEngine.reconcileOrbitPluginRack(orbit.id, orbit.plugins ?? []).catch(() => {
+      // The rack publishes an unavailable/dry placeholder rather than breaking
+      // the native orbit path. UI status is refreshed in either outcome.
+    }).finally(() => setPluginRuntimeRevision((revision) => revision + 1));
+  }
+
+  function changeOrbitPlugins(orbitId: string, transform: (plugins: NonNullable<Orbit["plugins"]>) => NonNullable<Orbit["plugins"]>) {
+    const current = stateRef.current.orbits.find((orbit) => orbit.id === orbitId);
+    if (!current) return;
+    const plugins = transform([...(current.plugins ?? [])]);
+    pushHistory();
+    const nextOrbit = { ...current, plugins };
+    setOrbits((orbits) => orbits.map((orbit) => orbit.id === orbitId ? nextOrbit : orbit));
+    reconcileOrbitPlugins(nextOrbit);
+  }
+
   function setOrbitMode(orbitId: string, mode: OrbitMode) {
     audioEngine.stopAllActivePlaybacksForOrbit(orbitId);
     updateOrbit(orbitId, { mode });
@@ -1399,6 +1419,34 @@ export default function App() {
         selectedOrbit && updateOrbit(selectedOrbit.id, { sequenceRetriggerMode })}
       onDuplicate={() => selectedOrbit && duplicateOrbit(selectedOrbit.id)}
       onDeleteOrbit={deleteSelection}
+      onAddPlugin={() => {
+        if (!selectedOrbit) return;
+        const entry = WAM_CATALOG["burns-simple-delay"];
+        changeOrbitPlugins(selectedOrbit.id, (plugins) => [...plugins, {
+          id: projectId(), catalogId: entry.id, pluginVersion: entry.pluginVersion, bypassed: false
+        }]);
+      }}
+      onMovePlugin={(slotId, direction) => {
+        if (!selectedOrbit) return;
+        changeOrbitPlugins(selectedOrbit.id, (plugins) => {
+          const index = plugins.findIndex((slot) => slot.id === slotId);
+          const next = index + direction;
+          if (index < 0 || next < 0 || next >= plugins.length) return plugins;
+          [plugins[index], plugins[next]] = [plugins[next], plugins[index]];
+          return plugins;
+        });
+      }}
+      onBypassPlugin={(slotId, bypassed) => selectedOrbit && changeOrbitPlugins(selectedOrbit.id,
+        (plugins) => plugins.map((slot) => slot.id === slotId ? { ...slot, bypassed } : slot))}
+      onRemovePlugin={(slotId) => selectedOrbit && changeOrbitPlugins(selectedOrbit.id,
+        (plugins) => plugins.filter((slot) => slot.id !== slotId))}
+      pluginStatus={(slotId) => selectedOrbit ? audioEngine.getOrbitPluginStatus(selectedOrbit.id, slotId) : "idle"}
+      onMountPluginGui={(slotId, container) => selectedOrbit
+        ? audioEngine.mountOrbitPluginGui(selectedOrbit.id, slotId, container)
+        : Promise.resolve()}
+      onUnmountPluginGui={(slotId) => selectedOrbit
+        ? audioEngine.unmountOrbitPluginGui(selectedOrbit.id, slotId)
+        : Promise.resolve()}
       onPlanetSpeedPreview={previewPlanetSpeed}
       onPlanetSpeedCommit={(planetId, speed) => void commitPlanetSpeed(planetId, speed)}
       onOrbitTapeRateApply={applyOrbitTapeRate}
