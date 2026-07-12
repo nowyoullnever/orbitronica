@@ -32,6 +32,15 @@ export function getWamCatalogEntry(id: string): WamCatalogEntry | undefined {
   return WAM_CATALOG[id as WamCatalogId];
 }
 
+/**
+ * Restore is allowlist-driven, not producer-version-gated. `pluginVersion` in
+ * a document identifies the state producer for future migrations; a known
+ * trusted catalog entry still gets one guarded hydrate attempt when it differs.
+ */
+export function resolveCatalogEntryForRestore(catalogId: string, _storedPluginVersion: string): WamCatalogEntry | undefined {
+  return getWamCatalogEntry(catalogId);
+}
+
 /** Resolves only a compiled allowlist asset under the current renderer root. */
 export function catalogEntryUrl(entry: WamCatalogEntry, locationHref = window.location.href): string {
   return new URL(`./${entry.entry}`, locationHref).toString();

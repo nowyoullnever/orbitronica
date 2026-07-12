@@ -64,3 +64,11 @@ loader deadline, retry/circuit-breaker, persistence, or user-install policy.
 Those requirements remain mandatory before catalog expansion. If the package,
 manifest hash, Electron, WAM SDK, Vite asset handling, or builder layout
 changes, set this gate back to `disabled` until the smoke is rerun.
+
+## Timing compensation exclusion
+
+Plugin delay compensation (PDC), including `audioNode.getCompensationDelay()`,
+is intentionally excluded from this MVP. Chains run correctly within an orbit,
+but different orbit chains may have different plugin latency and can cause
+inter-orbit drift. Do not imply sample-accurate inter-orbit alignment
+until a separate compensation design and regression matrix are approved.

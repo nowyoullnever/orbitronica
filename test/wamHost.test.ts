@@ -80,10 +80,12 @@ test("pre-fader insert round-trips state, GUI, and the dry connection during cle
 });
 
 test("trusted catalog is closed and maps only the frozen Burns entry", async () => {
-  const { WAM_CATALOG, getWamCatalogEntry, catalogEntryUrl } = await import("../src/renderer/audio/wamCatalog.ts");
+  const { WAM_CATALOG, getWamCatalogEntry, resolveCatalogEntryForRestore, catalogEntryUrl } = await import("../src/renderer/audio/wamCatalog.ts");
   assert.deepEqual(Object.keys(WAM_CATALOG), ["burns-simple-delay"]);
   assert.equal(getWamCatalogEntry("untrusted-url"), undefined);
   assert.equal(getWamCatalogEntry("burns-simple-delay")?.license, "MIT");
+  assert.equal(resolveCatalogEntryForRestore("burns-simple-delay", "0.0.1")?.pluginVersion, "0.2.54", "version mismatch must still attempt trusted restore");
+  assert.equal(resolveCatalogEntryForRestore("untrusted-url", "0.2.54"), undefined);
   assert.equal(catalogEntryUrl(WAM_CATALOG["burns-simple-delay"], "file:///bundle/index.html"), "file:///bundle/wam/burns-simple-delay/index.js");
 });
 

@@ -40,8 +40,12 @@ test("frozen trusted WAM payload is hash-locked and packaged file smoke is requi
     /redacted fixed ring of 64 entries/,
     /256 slots; 1,000,000 bytes/,
     /save.*stages every live state and commits none if any read fails/is,
+    /PDC.*getCompensationDelay.*excluded/is,
     /Re-run `npm run verify:wam-assets`, `npm run build`, and\n`npm run smoke:packaged-wam`/
   ]) assert.match(operationalRecord, requirement);
+
+  assert.match(record, /PDC.*getCompensationDelay.*excluded/is);
+  assert.match(record, /inter-orbit drift/i);
 
   assert.deepEqual(Object.keys(manifest.assets).sort(), ["descriptor.json", "index.js", "screenshot.png"]);
   for (const [file, expectedHash] of Object.entries(manifest.assets)) {

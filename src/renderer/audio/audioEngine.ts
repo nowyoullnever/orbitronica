@@ -2,7 +2,7 @@ import { SimpleFilter, SoundTouch, WebAudioBufferSource } from "soundtouchjs";
 import type { Orbit, PluginSlot, SequenceRetriggerMode } from "../state/types";
 import { createFLStylePanNode, type FLStylePanNode } from "./flStylePan.ts";
 import { WamHost, type WamInsert, type WamModuleLoader } from "./wamHost.ts";
-import { getWamCatalogEntry, loadCatalogModule, type WamCatalogId } from "./wamCatalog.ts";
+import { getWamCatalogEntry, loadCatalogModule, resolveCatalogEntryForRestore, type WamCatalogId } from "./wamCatalog.ts";
 import { OrbitWamRack, prunePluginStates, type PluginRuntimeStatus } from "./wamRack.ts";
 
 type ActivePlayback = {
@@ -386,8 +386,11 @@ class AudioEngine {
     const runtime = this.orbitRuntimes.get(orbitId);
     if (!runtime) throw new Error(`Audio runtime is unavailable for orbit "${orbitId}".`);
     const rack = new OrbitWamRack(runtime.input, runtime.panNode.input, async (slot) => {
-      const entry = getWamCatalogEntry(slot.catalogId);
-      if (!entry || entry.pluginVersion !== slot.pluginVersion) throw new Error("WAM catalog entry is unavailable.");
+      // The stored version is state provenance. Known trusted plugins attempt
+      // restoration across a version difference; setState failure remains dry
+      // and preserves the original blob for a later migration.
+      const entry = resolveCatalogEntryForRestore(slot.catalogId, slot.pluginVersion);
+      if (!entry) throw new Error("WAM catalog entry is unavailable.");
       return this.wamHost.createPluginInstance(this.getContext(), () => loadCatalogModule(entry), entry.id);
     }, this.pluginStateStore);
     this.orbitWamRacks.set(orbitId, rack); return rack;
