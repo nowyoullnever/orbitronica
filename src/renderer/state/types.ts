@@ -98,16 +98,24 @@ export type ViewportState = {
   offsetY: number;
 };
 
-export type HistorySnapshot = {
+export type Scene = {
+  id: string;
+  name: string;
   orbits: Orbit[];
   planets: Planet[];
   bars: TriggerBar[];
+  viewport: ViewportState;
   selection: Selection;
   multiSelection: MultiSelection;
+};
+
+export type HistorySnapshot = {
+  scenes: Scene[];
+  activeSceneId: string;
   master: MasterMix;
 };
 
-export type SerializableProject = {
+export type SerializableProjectV4 = {
   schemaVersion: 4;
   appName: "Orbitonic";
   savedAt: string;
@@ -119,6 +127,29 @@ export type SerializableProject = {
   master: MasterMix;
   ui?: Selection;
 };
+
+export type SerializableSceneV5 = {
+  id: string;
+  name: string;
+  orbits: Orbit[];
+  planets: Planet[];
+  bars: TriggerBar[];
+  viewport: ViewportState;
+  selection: Selection;
+};
+
+export type SerializableProjectV5 = {
+  schemaVersion: 5;
+  appName: "Orbitonic";
+  savedAt: string;
+  projectName: string;
+  scenes: SerializableSceneV5[];
+  activeSceneId: string;
+  master: MasterMix;
+  lastLoopBarLengthRadians: number;
+};
+
+export type SerializableProject = SerializableProjectV5;
 
 export type ContextMenuState = {
   x: number;

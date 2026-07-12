@@ -24,6 +24,16 @@ type OrbitAudioRuntime = {
 
 type WaveformListener = (orbitId: string, peaks: Float32Array | null) => void;
 
+export type ProjectAudioInput = {
+  orbitId: string;
+  fileName: string;
+  bytes: Uint8Array;
+  volume: number;
+  pan: number;
+};
+
+export type StagedProjectAudio = ProjectAudioInput & { buffer: AudioBuffer };
+
 class AudioEngine {
   private context: AudioContext | null = null;
   private buffers = new Map<string, AudioBuffer>();
@@ -35,6 +45,7 @@ class AudioEngine {
   private reverseBuffers = new Map<string, AudioBuffer>();
   private rawFiles = new Map<string, { fileName: string; bytes: Uint8Array }>();
   private orbitRuntimes = new Map<string, OrbitAudioRuntime>();
+  private orbitPanValues = new Map<string, number>();
   private active = new Map<string, ActivePlayback>();
   private masterGain: GainNode | null = null;
   private masterPanner: StereoPannerNode | null = null;
@@ -131,6 +142,68 @@ class AudioEngine {
     this.rawFiles.set(orbitId, { fileName, bytes: copy });
     this.registerBuffer(orbitId, buffer, volume);
     return buffer;
+  }
+
+  /** Decodes a complete candidate project without mutating the live audio graph. */
+  async stageProjectAudio(inputs: readonly ProjectAudioInput[]): Promise<StagedProjectAudio[]> {
+    const context = this.getContext();
+    const staged: StagedProjectAudio[] = [];
+    for (const input of inputs) {
+      const bytes = new Uint8Array(input.bytes);
+      const buffer = await context.decodeAudioData(bytes.buffer.slice(0));
+      staged.push({ ...input, bytes, buffer });
+    }
+    return staged;
+  }
+
+  /** Installs one pre-decoded, globally unique orbit without disturbing existing project audio. */
+  installStagedOrbitAudio(item: StagedProjectAudio): void {
+    if (this.buffers.has(item.orbitId) || this.rawFiles.has(item.orbitId) || this.orbitRuntimes.has(item.orbitId)) {
+      throw new Error(`Audio already exists for orbit "${item.orbitId}".`);
+    }
+    try {
+      this.rawFiles.set(item.orbitId, { fileName: item.fileName, bytes: new Uint8Array(item.bytes) });
+      this.registerBuffer(item.orbitId, item.buffer, item.volume);
+      this.setOrbitAudioPan(item.orbitId, item.pan);
+    } catch (error) {
+      this.removeOrbit(item.orbitId);
+      throw error;
+    }
+  }
+
+  /** Atomically replaces live project audio; failed graph installation restores the old assets. */
+  replaceProjectAudio(staged: readonly StagedProjectAudio[]): void {
+    const old = [...this.buffers].map(([orbitId, buffer]) => ({
+      orbitId,
+      buffer,
+      raw: this.rawFiles.get(orbitId),
+      volume: this.orbitRuntimes.get(orbitId)?.gainNode.gain.value ?? 1,
+      pan: this.orbitPanValues.get(orbitId) ?? 0
+    }));
+    const oldProcessed = new Map(this.processedBuffers);
+    const oldReverse = new Map(this.reverseBuffers);
+    const clear = () => {
+      const ids = new Set([...this.buffers.keys(), ...this.rawFiles.keys(), ...this.orbitRuntimes.keys()]);
+      ids.forEach((id) => this.removeOrbit(id));
+    };
+    try {
+      clear();
+      for (const item of staged) {
+        this.rawFiles.set(item.orbitId, { fileName: item.fileName, bytes: new Uint8Array(item.bytes) });
+        this.registerBuffer(item.orbitId, item.buffer, item.volume);
+        this.setOrbitAudioPan(item.orbitId, item.pan);
+      }
+    } catch (error) {
+      clear();
+      for (const item of old) {
+        if (item.raw) this.rawFiles.set(item.orbitId, item.raw);
+        this.registerBuffer(item.orbitId, item.buffer, item.volume);
+        this.setOrbitAudioPan(item.orbitId, item.pan);
+      }
+      this.processedBuffers = oldProcessed;
+      this.reverseBuffers = oldReverse;
+      throw error;
+    }
   }
 
   private registerBuffer(orbitId: string, buffer: AudioBuffer, volume: number) {
@@ -456,6 +529,7 @@ class AudioEngine {
   }
 
   setOrbitAudioPan(orbitId: string, audioPan: number) {
+    this.orbitPanValues.set(orbitId, audioPan);
     this.orbitRuntimes.get(orbitId)?.panNode.setPan(audioPan);
   }
 
@@ -603,6 +677,7 @@ class AudioEngine {
       try { runtime.gainNode.disconnect(); } catch { /* already disconnected */ }
     }
     this.orbitRuntimes.delete(orbitId);
+    this.orbitPanValues.delete(orbitId);
   }
 
   pruneOrbits(retainedOrbitIds: ReadonlySet<string>) {

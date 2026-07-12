@@ -2,6 +2,9 @@ import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  describeProjectAssets, portableAudioPath, rewriteProjectAudioPaths
+} from "./projectAssets.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -14,7 +17,8 @@ function createWindow() {
     backgroundColor: "#f4f3ee",
     title: "Orbitonic MVP",
     webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
+      preload: path.join(__dirname, "preload.cjs"),
+      sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
       backgroundThrottling: false
@@ -29,10 +33,7 @@ function createWindow() {
 }
 
 type SavePayload = {
-  project: Record<string, unknown> & {
-    projectName?: string;
-    orbits?: Array<{ id: string; audioName: string; audioPath?: string }>;
-  };
+  project: Record<string, unknown> & { projectName?: string };
   assets: Array<{ orbitId: string; fileName: string; bytes: Uint8Array }>;
 };
 
@@ -61,14 +62,9 @@ ipcMain.handle("project:save", async (_event, payload: SavePayload, currentPath?
       while (usedNames.has(name)) name = `${String(index + 1).padStart(3, "0")}_${suffix++}_${safeBase}`;
       usedNames.add(name);
       await fs.writeFile(path.join(audioDir, name), Buffer.from(asset.bytes));
-      audioPaths[asset.orbitId] = `audio/${name}`;
+      audioPaths[asset.orbitId] = portableAudioPath(name);
     }
-    const project = structuredClone(payload.project) as SavePayload["project"];
-    if (Array.isArray(project.orbits)) {
-      project.orbits = project.orbits.map((orbit) => ({
-        ...orbit, audioPath: audioPaths[orbit.id] ?? orbit.audioPath
-      }));
-    }
+    const project = rewriteProjectAudioPaths(payload.project, audioPaths);
     await fs.writeFile(projectPath, JSON.stringify(project, null, 2), "utf8");
     return { ok: true, path: projectPath };
   } catch (error) {
@@ -86,18 +82,18 @@ ipcMain.handle("project:open", async () => {
     if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true };
     const projectPath = result.filePaths[0];
     const text = await fs.readFile(projectPath, "utf8");
-    const project = JSON.parse(text) as { orbits?: Array<{ id: string; audioPath?: string }> };
+    const project = JSON.parse(text) as unknown;
     const assets: Array<{ orbitId: string; bytes?: Uint8Array; error?: string }> = [];
-    for (const orbit of project.orbits ?? []) {
-      if (!orbit.audioPath) {
-        assets.push({ orbitId: orbit.id, error: "No audio path saved." });
+    for (const descriptor of describeProjectAssets(project, path.dirname(projectPath))) {
+      if (descriptor.error || !descriptor.absolutePath) {
+        assets.push({ orbitId: descriptor.orbitId, error: descriptor.error ?? "No audio path saved." });
         continue;
       }
       try {
-        const bytes = await fs.readFile(path.resolve(path.dirname(projectPath), orbit.audioPath));
-        assets.push({ orbitId: orbit.id, bytes: new Uint8Array(bytes) });
+        const bytes = await fs.readFile(descriptor.absolutePath);
+        assets.push({ orbitId: descriptor.orbitId, bytes: new Uint8Array(bytes) });
       } catch {
-        assets.push({ orbitId: orbit.id, error: `Missing audio: ${orbit.audioPath}` });
+        assets.push({ orbitId: descriptor.orbitId, error: `Missing audio: ${descriptor.audioPath}` });
       }
     }
     return { ok: true, path: projectPath, text, assets };
