@@ -123,6 +123,7 @@ export default function App() {
   const playbackEpoch = useRef(0);
   const clipboardRef = useRef<AppClipboard>(null);
   const sceneDuplicationPending = useRef(false);
+  const recordingInFlight = useRef(false);
   const actionsRef = useRef<Record<MenuAction, () => void | Promise<void>>>({
     "open-project": () => undefined,
     "save-project": () => undefined,
@@ -947,7 +948,9 @@ export default function App() {
   }
 
   async function toggleRecording() {
+    if (recordingInFlight.current) return;
     if (recordingPhase !== "idle" && recordingPhase !== "recording") return;
+    recordingInFlight.current = true;
     let recordingStarted = false;
     try {
       if (recordingPhase === "idle") {
@@ -974,6 +977,7 @@ export default function App() {
       flash(error instanceof Error ? error.message : "Recording failed.");
     } finally {
       if (!recordingStarted) setRecordingPhase("idle");
+      recordingInFlight.current = false;
     }
   }
 

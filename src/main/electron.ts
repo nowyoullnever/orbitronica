@@ -122,10 +122,10 @@ ipcMain.handle("recording:save", async (_event, bytes: Uint8Array, suggestedName
     const result = await dialog.showSaveDialog({
       title: "Save Recording",
       defaultPath: suggestedName,
-      filters: [{ name: "WebM Audio", extensions: ["webm"] }]
+      filters: [{ name: "WAV Audio", extensions: ["wav"] }]
     });
     if (result.canceled || !result.filePath) return { ok: false, canceled: true };
-    const filePath = result.filePath.endsWith(".webm") ? result.filePath : `${result.filePath}.webm`;
+    const filePath = /\.wav$/i.test(result.filePath) ? result.filePath : `${result.filePath}.wav`;
     await fs.writeFile(filePath, Buffer.from(bytes));
     return { ok: true, path: filePath };
   } catch (error) {

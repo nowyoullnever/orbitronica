@@ -9,5 +9,8 @@ test("native menu routes focused-window actions without stealing canvas keyboard
   assert.match(source, /webContents\.send\("menu:action", action\)/);
   assert.match(source, /customEdit\("Undo", "undo"\)/);
   assert.match(source, /customEdit\("Redo", "redo"\)/);
-  assert.doesNotMatch(source, /accelerator\s*:/);
+  assert.match(source, /label: "Open…", accelerator: "CmdOrCtrl\+O"/);
+  assert.match(source, /label: "Save", accelerator: "CmdOrCtrl\+S"/);
+  assert.match(source, /label: "Save As…", accelerator: "CmdOrCtrl\+Shift\+S"/);
+  assert.doesNotMatch(source, /customEdit\([^\n]+accelerator/);
 });

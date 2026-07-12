@@ -17,9 +17,9 @@ export function installAppMenu() {
   const template: any[] = [
     ...(process.platform === "darwin" ? [{ label: app.name, submenu: [{ role: "about" }, preferences, { type: "separator" }, { role: "services" }, { role: "hide" }, { role: "hideOthers" }, { role: "quit" }] }] : []),
     { label: "File", submenu: [
-      { label: "Open…", click: () => send("open-project") },
-      { label: "Save", click: () => send("save-project") },
-      { label: "Save As…", click: () => send("save-project-as") },
+      { label: "Open…", accelerator: "CmdOrCtrl+O", click: () => send("open-project") },
+      { label: "Save", accelerator: "CmdOrCtrl+S", click: () => send("save-project") },
+      { label: "Save As…", accelerator: "CmdOrCtrl+Shift+S", click: () => send("save-project-as") },
       { role: "close" }
     ] },
     { label: "Edit", submenu: [
