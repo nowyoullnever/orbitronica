@@ -426,6 +426,17 @@ class AudioEngine {
       if (state !== undefined) this.pluginStateStore.set(to[index].id, JSON.parse(JSON.stringify(state)));
     }
   }
+  /** Scene duplication supplies an explicit old→new map, never array position. */
+  copyPluginStatesBySlotMap(slotIds: ReadonlyMap<string, string>): readonly string[] {
+    const staged = new Map<string, import("./wamHost.ts").JsonValue>();
+    for (const [sourceId, targetId] of slotIds) {
+      const state = this.pluginStateStore.get(sourceId);
+      if (state !== undefined) staged.set(targetId, JSON.parse(JSON.stringify(state)));
+    }
+    for (const [targetId, state] of staged) this.pluginStateStore.set(targetId, state);
+    return [...staged.keys()];
+  }
+  removePluginSlotStates(slotIds: readonly string[]) { for (const slotId of slotIds) this.pluginStateStore.delete(slotId); }
   getScenePluginRuntimeOwner() { return this.scenePluginRuntimeOwner; }
   /**
    * Gate-first, last-wins scene runtime transaction. App owns document

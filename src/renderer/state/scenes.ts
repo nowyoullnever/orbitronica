@@ -1,6 +1,6 @@
 import type {
   HistorySnapshot, MasterMix, MultiSelection, Orbit, Planet, Scene, Selection, TriggerBar,
-  ViewportState
+  ViewportState, PluginSlot
 } from "./types.ts";
 import { normalizeSpliceCount, spliceBarSpecs } from "../utils/geometry.ts";
 
@@ -67,7 +67,10 @@ function collectDirectSceneIds(scenes: readonly Scene[]): Set<string> {
   const ids = new Set<string>();
   for (const scene of scenes) {
     ids.add(scene.id);
-    scene.orbits.forEach((item) => ids.add(item.id));
+    scene.orbits.forEach((item) => {
+      ids.add(item.id);
+      item.plugins?.forEach((slot) => ids.add(slot.id));
+    });
     scene.planets.forEach((item) => ids.add(item.id));
     scene.bars.filter((item) => item.source !== "splice").forEach((item) => ids.add(item.id));
   }
@@ -431,13 +434,17 @@ function remapMultiSelection(selection: MultiSelection, ids: Map<string, string>
 export type SceneDuplicatePlan = {
   scene: Scene;
   orbitIdMap: ReadonlyMap<string, string>;
+  pluginSlotIdMap: ReadonlyMap<string, string>;
 };
 
 export function collectSceneIds(scenes: readonly Scene[]): Set<string> {
   const ids = new Set<string>();
   for (const scene of scenes) {
     ids.add(scene.id);
-    scene.orbits.forEach((item) => ids.add(item.id));
+    scene.orbits.forEach((item) => {
+      ids.add(item.id);
+      item.plugins?.forEach((slot) => ids.add(slot.id));
+    });
     scene.planets.forEach((item) => ids.add(item.id));
     scene.bars.forEach((item) => ids.add(item.id));
     scene.orbits.flatMap(impliedSpliceBarIds).forEach((id) => ids.add(id));
@@ -450,6 +457,7 @@ export function planSceneDuplicate(
   options: {
     createId?: IdFactory;
     createOrbitId?: (orbit: Orbit) => string;
+    createPluginSlotId?: (slot: PluginSlot) => string;
     name?: string;
     occupiedIds?: Iterable<string>;
   } = {}
@@ -458,6 +466,7 @@ export function planSceneDuplicate(
   const occupied = collectSceneIds([source]);
   for (const id of options.occupiedIds ?? []) occupied.add(id);
   const ids = new Map<string, string>();
+  const pluginSlotIds = new Map<string, string>();
   const freshId = (oldId: string, derivedIds: (candidate: string) => string[] = () => []) => {
     for (let attempt = 0; attempt < 1000; attempt++) {
       const next = createId();
@@ -470,11 +479,20 @@ export function planSceneDuplicate(
     }
     throw new Error(`ID factory could not produce a unique ID for "${oldId}".`);
   };
+  const freshPluginSlotId = (slot: PluginSlot) => {
+    const next = options.createPluginSlotId ? options.createPluginSlotId(slot) : createId();
+    if (!next || occupied.has(next)) throw new Error(`Plugin slot ID allocator produced occupied ID "${next}".`);
+    occupied.add(next);
+    pluginSlotIds.set(slot.id, next);
+    return next;
+  };
+  const clonePlugins = (orbit: Orbit) => (orbit.plugins ?? []).map((slot) => ({ ...slot, id: freshPluginSlotId(slot) }));
   const sceneId = freshId(source.id);
   const orbits = source.orbits.map((orbit) => {
     if (!options.createOrbitId) return {
       ...orbit,
-      id: freshId(orbit.id, (candidate) => impliedSpliceBarIds({ ...orbit, id: candidate }))
+      id: freshId(orbit.id, (candidate) => impliedSpliceBarIds({ ...orbit, id: candidate })),
+      plugins: clonePlugins(orbit)
     };
     const next = options.createOrbitId(orbit);
     const derived = impliedSpliceBarIds({ ...orbit, id: next });
@@ -484,7 +502,7 @@ export function planSceneDuplicate(
     occupied.add(next);
     derived.forEach((id) => occupied.add(id));
     ids.set(orbit.id, next);
-    return { ...orbit, id: next };
+    return { ...orbit, id: next, plugins: clonePlugins(orbit) };
   });
   const planets = source.planets.map((planet) => ({
     ...projectPlanetForHistory(planet),
@@ -519,7 +537,8 @@ export function planSceneDuplicate(
   assertValidScenes([scene]);
   return {
     scene,
-    orbitIdMap: new Map(source.orbits.map((orbit) => [orbit.id, ids.get(orbit.id)!]))
+    orbitIdMap: new Map(source.orbits.map((orbit) => [orbit.id, ids.get(orbit.id)!])),
+    pluginSlotIdMap: pluginSlotIds
   };
 }
 

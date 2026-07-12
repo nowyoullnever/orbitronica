@@ -139,3 +139,68 @@ test("scene transition revokes a pending rack create before freezing its orbit",
   assert.equal(audioEngine.getOrbitPluginStatus(orbitId, plugin.id), "idle");
   audioEngine.removeOrbit(orbitId);
 });
+
+test("scene duplication clones external WAM state by its slot map without aliasing source state", () => {
+  const engine = audioEngine as any;
+  engine.pluginStateStore.clear();
+  engine.pluginStateStore.set("source-slot", { nested: [1] });
+  const copied = audioEngine.copyPluginStatesBySlotMap(new Map([["source-slot", "duplicate-slot"]]));
+  assert.deepEqual(copied, ["duplicate-slot"]);
+  (engine.pluginStateStore.get("duplicate-slot") as any).nested.push(2);
+  assert.deepEqual(engine.pluginStateStore.get("source-slot"), { nested: [1] });
+  audioEngine.removePluginSlotStates(copied);
+  assert.equal(engine.pluginStateStore.has("duplicate-slot"), false);
+  engine.pluginStateStore.clear();
+});
+
+/**
+ * This is a deterministic signal-level analogue of the live graph:
+ * orbit input -> WAM rack -> pan -> orbit gain -> master pan -> PCM recorder.
+ * It exercises the real rack rewiring code rather than a separate export path.
+ */
+class SignalNode {
+  edges = new Set<SignalNode>();
+  readonly transform: (sample: number) => number;
+  constructor(transform: (sample: number) => number = (sample) => sample) { this.transform = transform; }
+  connect(node: SignalNode) { this.edges.add(node); return node as unknown as AudioNode; }
+  disconnect(node?: SignalNode) { if (node) this.edges.delete(node); else this.edges.clear(); }
+}
+
+function captureMasterPcm(source: SignalNode, sample: number, recorder: SignalNode) {
+  const visit = (node: SignalNode, value: number, seen = new Set<SignalNode>()): number[] => {
+    if (seen.has(node)) return [];
+    const next = node.transform(value);
+    if (node === recorder) return [next];
+    const branch = new Set(seen); branch.add(node);
+    return [...node.edges].flatMap((edge) => visit(edge, next, branch));
+  };
+  return visit(source, sample);
+}
+
+test("master PCM export captures the active WAM insert, but bypassed or unavailable slots stay dry", async () => {
+  const input = new SignalNode();
+  const panInput = new SignalNode();
+  const panOutput = new SignalNode();
+  const orbitGain = new SignalNode();
+  const masterPan = new SignalNode();
+  const recorder = new SignalNode();
+  panInput.connect(panOutput); panOutput.connect(orbitGain); orbitGain.connect(masterPan); masterPan.connect(recorder);
+  const state = new Map();
+  const slot = { id: "export-slot", catalogId: "burns-simple-delay", pluginVersion: "0.2.54", bypassed: false };
+  const rack = new OrbitWamRack(input as unknown as AudioNode, panInput as unknown as AudioNode,
+    async () => ({ audioNode: new SignalNode((sample) => sample * 2) as unknown as AudioNode }), state);
+
+  await rack.reconcile([slot]);
+  assert.deepEqual(captureMasterPcm(input, .25, recorder), [.5], "the recorder taps the post-WAM master signal");
+
+  await rack.reconcile([{ ...slot, bypassed: true }]);
+  assert.deepEqual(captureMasterPcm(input, .25, recorder), [.25], "bypass restores the native dry route");
+
+  const unavailableInput = new SignalNode();
+  unavailableInput.connect(panInput);
+  const unavailableRack = new OrbitWamRack(unavailableInput as unknown as AudioNode, panInput as unknown as AudioNode,
+    async () => { throw new Error("catalog unavailable"); }, new Map());
+  await unavailableRack.reconcile([{ ...slot, id: "unavailable-slot" }]);
+  assert.equal(unavailableRack.getStatus("unavailable-slot"), "unavailable");
+  assert.deepEqual(captureMasterPcm(unavailableInput, .25, recorder), [.25], "unavailable runtimes remain native and dry");
+});

@@ -310,9 +310,12 @@ export default function App() {
     undoStack.current.push(snapshot());
     if (undoStack.current.length > MAX_HISTORY) undoStack.current.shift();
     redoStack.current = [];
+    const previous = stateRef.current.scenes.find((scene) => scene.id === stateRef.current.activeSceneId);
+    const target = nextScenes.find((scene) => scene.id === nextActiveSceneId);
     prepareActiveSceneTransition(nextActiveSceneId);
     setScenes(nextScenes);
     setActiveSceneId(nextActiveSceneId);
+    scheduleScenePluginTransition(previous?.orbits ?? [], target?.orbits ?? [], nextActiveSceneId);
     pruneUnreferencedAudio(nextScenes);
     setIsDirty(true);
   }
@@ -362,6 +365,7 @@ export default function App() {
         name: `${source.name} Copy`,
         createId: projectId,
         createOrbitId: (orbit) => projectOrbitId(orbit.spliceCount),
+        createPluginSlotId: () => projectId(),
         occupiedIds: collectHistoryProjectIds(baseScenes, undoStack.current, redoStack.current)
       });
     } catch (error) {
@@ -370,6 +374,7 @@ export default function App() {
     }
     sceneDuplicationPending.current = true;
     setIsDuplicatingScene(true);
+    let copiedPluginStateIds: readonly string[] = [];
     try {
       const duplicate = await stageSceneDuplicate(source, plan, {
         stage: (sourceOrbitId, targetOrbitId) => {
@@ -381,21 +386,33 @@ export default function App() {
         },
         rollback: (targetOrbitId) => audioEngine.removeOrbit(targetOrbitId)
       });
+      // External state is copied only after every target audio runtime staged.
+      copiedPluginStateIds = audioEngine.copyPluginStatesBySlotMap(plan.pluginSlotIdMap);
       if (stateRef.current.scenes !== baseScenes) {
         for (const targetOrbitId of plan.orbitIdMap.values()) audioEngine.removeOrbit(targetOrbitId);
+        audioEngine.removePluginSlotStates(copiedPluginStateIds);
         flash("Scene changed while duplication was in progress; duplication was canceled.");
         return;
       }
       const sourceIndex = baseScenes.findIndex((scene) => scene.id === source.id);
       const next = baseScenes.slice();
       next.splice(sourceIndex + 1, 0, duplicate);
-      commitSceneDocument(next, duplicate.id);
+      try { commitSceneDocument(next, duplicate.id); }
+      catch (error) {
+        for (const targetOrbitId of plan.orbitIdMap.values()) audioEngine.removeOrbit(targetOrbitId);
+        audioEngine.removePluginSlotStates(copiedPluginStateIds);
+        throw error;
+      }
       for (const planet of duplicate.planets) {
         if (planet.speed !== 1 || planet.pitchCents) {
           void audioEngine.processPlanetBuffer(planet.orbitId, planet.id, planet.speed, planet.pitchCents);
         }
       }
     } catch (error) {
+      // stageSceneDuplicate rolls back partial audio itself; this additionally
+      // covers a later state-copy or document-publication failure.
+      for (const targetOrbitId of plan.orbitIdMap.values()) audioEngine.removeOrbit(targetOrbitId);
+      audioEngine.removePluginSlotStates(copiedPluginStateIds);
       flash(error instanceof Error ? error.message : "Scene could not be duplicated.");
     } finally {
       sceneDuplicationPending.current = false;

@@ -59,6 +59,15 @@ test("all document replacement paths reconcile the active WAM scene", () => {
   assert.match(open, /scheduleScenePluginTransition\(previousOrbits, restoredActiveOrbits/);
 });
 
+test("scene duplication maps plugin slots after audio staging and uses the normal gate-first transition", () => {
+  const duplicate = body("duplicateActiveScene", "restoreSnapshot");
+  const commit = body("commitSceneDocument", "publishPreRecordedSceneEdit");
+  assert.ok(duplicate.indexOf("stageSceneDuplicate") < duplicate.indexOf("copyPluginStatesBySlotMap"));
+  assert.match(duplicate, /createPluginSlotId: \(\) => projectId\(\)/);
+  assert.match(duplicate, /removePluginSlotStates\(copiedPluginStateIds\)/);
+  assert.match(commit, /scheduleScenePluginTransition\(previous\?\.orbits/);
+});
+
 test("multi-file imports pin their starting scene but allow unrelated target edits after decode", () => {
   const imports = body("handleFiles", "saveProject");
   const createOrbit = body("createOrbitFromAudio", "handleFiles");
