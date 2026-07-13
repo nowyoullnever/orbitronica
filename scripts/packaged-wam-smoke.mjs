@@ -33,4 +33,7 @@ const result = JSON.parse(marker[1]);
 if (result.status !== "pass" || result.origin !== "file:") {
   throw new Error(`Packaged WAM smoke did not prove file:// success: ${marker[1]}`);
 }
+if (result.rackRemovalCompleted !== true || result.cleanupDidNotBlockHost !== true) {
+  throw new Error(`Packaged WAM smoke did not prove non-blocking rack removal: ${marker[1]}`);
+}
 console.log(`Packaged WAM smoke passed with ${path.relative(process.cwd(), executable)}.`);

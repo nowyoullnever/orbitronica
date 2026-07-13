@@ -9,12 +9,34 @@ export type PluginRuntime = {
   generation: number;
   disposed: boolean;
   destroyPromise?: Promise<void>;
+  cleanupPromise?: Promise<void>;
 };
 export type WamRackFactory = (slot: PluginSlot) => Promise<WamPluginInstance>;
 export type WamRackDiagnostic = (
-  reason: "late-instance-disposed" | "hydrate-failed" | "destroy-failed",
+  reason:
+    | "late-instance-disposed"
+    | "hydrate-failed"
+    | "destroy-failed"
+    | "gui-cleanup-failed"
+    | "cleanup-timeout"
+    | "state-timeout",
   slotId: string,
 ) => void;
+export type OrbitWamRackOptions = Readonly<{
+  cleanupDeadlineMs?: number;
+  stateDeadlineMs?: number;
+}>;
+
+type MountedGui = { gui: HTMLElement; runtime: PluginRuntime };
+type RetiredRuntimeCleanup = {
+  runtime: PluginRuntime;
+  mountedGui?: MountedGui;
+};
+
+const defaultRackOptions = {
+  cleanupDeadlineMs: 5_000,
+  stateDeadlineMs: 5_000,
+} as const;
 
 /**
  * Owns exactly the WAM edges for one orbit. Native AudioNode.disconnect() without
@@ -26,28 +48,28 @@ export class OrbitWamRack {
   private generation = 0;
   private desired: readonly PluginSlot[] = [];
   private disposed = false;
-  private guis = new Map<
-    string,
-    { gui: HTMLElement; runtime: PluginRuntime }
-  >();
+  private guis = new Map<string, MountedGui>();
 
   private readonly input: AudioNode;
   private readonly destination: AudioNode;
   private readonly create: WamRackFactory;
   private readonly states: Map<string, JsonValue>;
   private readonly diagnostic: WamRackDiagnostic;
+  private readonly options: Required<OrbitWamRackOptions>;
   constructor(
     input: AudioNode,
     destination: AudioNode,
     create: WamRackFactory,
     states: Map<string, JsonValue>,
     diagnostic: WamRackDiagnostic = () => undefined,
+    options: OrbitWamRackOptions = {},
   ) {
     this.input = input;
     this.destination = destination;
     this.create = create;
     this.states = states;
     this.diagnostic = diagnostic;
+    this.options = { ...defaultRackOptions, ...options };
   }
 
   getRuntime(slotId: string) {
@@ -94,14 +116,14 @@ export class OrbitWamRack {
         this.runtimes.get(slotId) !== runtime ||
         runtime.instance !== instance
       ) {
-        await instance.destroyGui?.(gui);
         gui.remove();
+        this.startGuiCleanup(instance, gui, slotId);
         return;
       }
       const prior = this.guis.get(slotId);
       if (prior) {
-        await instance.destroyGui?.(gui);
         gui.remove();
+        this.startGuiCleanup(instance, gui, slotId);
         return;
       }
       this.guis.set(slotId, { gui, runtime });
@@ -117,19 +139,15 @@ export class OrbitWamRack {
     const mounted = this.guis.get(slotId);
     if (!mounted || (expectedRuntime && mounted.runtime !== expectedRuntime))
       return;
-    // Delete before awaiting plugin code. A newer runtime may mount while the
-    // old destroyGui is pending; its mapping must remain untouched.
+    // Delete and detach before invoking plugin code. A newer runtime may mount
+    // while old destroyGui is pending; its mapping must remain untouched.
     if (this.guis.get(slotId) === mounted) this.guis.delete(slotId);
-    try {
-      await mounted.runtime.instance.destroyGui?.(mounted.gui);
-    } catch {
-      this.diagnostic("destroy-failed", slotId);
-    }
     try {
       mounted.gui.remove();
     } catch {
       /* detached plugin GUI */
     }
+    void this.startGuiCleanup(mounted.runtime.instance, mounted.gui, slotId);
   }
   /** A missing/unavailable runtime remains dry; durable bypass is never mutated. */
   effectiveBypass(slot: PluginSlot) {
@@ -151,14 +169,14 @@ export class OrbitWamRack {
     this.generation = generation;
     this.desired = slots.map((slot) => ({ ...slot }));
     const desiredIds = new Set(slots.map((slot) => slot.id));
-    await Promise.all(
-      [...this.runtimes.values()]
-        .filter((runtime) => !desiredIds.has(runtime.slotId))
-        .map((runtime) => this.dispose(runtime)),
-    );
+    const retired = [...this.runtimes.values()]
+      .filter((runtime) => !desiredIds.has(runtime.slotId))
+      .map((runtime) => this.retireRuntime(runtime))
+      .filter((record): record is RetiredRuntimeCleanup => Boolean(record));
     // Publish dry or fully-ready topology immediately; async work never makes a
     // half-connected chain audible.
     this.rewire();
+    for (const record of retired) this.startRetiredCleanup(record);
     await Promise.all(slots.map((slot) => this.ensure(slot, generation)));
     if (!this.disposed && generation === this.generation) this.rewire();
   }
@@ -170,7 +188,10 @@ export class OrbitWamRack {
     // non-cancellable create. Retire that placeholder and start a generation-
     // owned attempt; the old result observes `disposed`/identity mismatch and
     // destroys itself instead of leaving the latest request loading forever.
-    if (prior?.status === "loading") prior.disposed = true;
+    if (prior && !prior.disposed) {
+      const retired = this.retireRuntime(prior);
+      if (retired) this.startRetiredCleanup(retired);
+    }
     const placeholder: PluginRuntime = {
       slotId: slot.id,
       instance: null as unknown as WamPluginInstance,
@@ -188,7 +209,7 @@ export class OrbitWamRack {
     try {
       const instance = await this.create(slot);
       if (!ownsLease()) {
-        await this.destroyInstance(instance, slot.id);
+        this.startInstanceDestroy(instance, slot.id);
         this.diagnostic("late-instance-disposed", slot.id);
         return;
       }
@@ -196,16 +217,20 @@ export class OrbitWamRack {
       const saved = this.states.get(slot.id);
       try {
         if (saved !== undefined && instance.setState) {
-          await instance.setState(cloneJsonValue(saved));
+          await this.runStateOperation(
+            slot.id,
+            () => instance.setState!(cloneJsonValue(saved)),
+          );
         }
       } catch {
         // A superseding reconcile owns this slot now. Do not publish an old
         // failure into its placeholder; retire only this instance.
         if (!ownsLease()) {
-          await this.destroyRuntimeInstance(placeholder);
+          this.startRuntimeDestroy(placeholder);
           this.diagnostic("late-instance-disposed", slot.id);
           return;
         }
+        this.startRuntimeDestroy(placeholder);
         placeholder.status = "unavailable";
         this.diagnostic("hydrate-failed", slot.id);
         return;
@@ -213,7 +238,7 @@ export class OrbitWamRack {
       // setState is asynchronous too: re-check ownership after it settles so a
       // stale hydrate cannot revive, leak, or rewire a retired instance.
       if (!ownsLease()) {
-        await this.destroyRuntimeInstance(placeholder);
+        this.startRuntimeDestroy(placeholder);
         this.diagnostic("late-instance-disposed", slot.id);
         return;
       }
@@ -256,7 +281,10 @@ export class OrbitWamRack {
         try {
           captured.set(
             runtime.slotId,
-            cloneJsonValue((await runtime.instance.getState()) as JsonValue),
+            cloneJsonValue((await this.runStateOperation(
+              runtime.slotId,
+              () => runtime.instance.getState!(),
+            )) as JsonValue),
           );
         } catch {
           this.diagnostic("hydrate-failed", runtime.slotId);
@@ -283,7 +311,10 @@ export class OrbitWamRack {
           return;
         captured.set(
           runtime.slotId,
-          cloneJsonValue((await runtime.instance.getState()) as JsonValue),
+          cloneJsonValue((await this.runStateOperation(
+            runtime.slotId,
+            () => runtime.instance.getState!(),
+          )) as JsonValue),
         );
       }),
     );
@@ -324,23 +355,130 @@ export class OrbitWamRack {
     upstream.connect(this.destination);
   }
 
-  private async destroyInstance(instance: WamPluginInstance, slotId: string) {
+  private superviseCleanup(
+    slotId: string,
+    operation: () => Promise<void> | void,
+    failure: "destroy-failed" | "gui-cleanup-failed",
+  ): Promise<void> {
+    const diagnostic = this.diagnostic;
+    const deadlineMs = this.options.cleanupDeadlineMs;
+    let task: Promise<void>;
     try {
-      await instance.destroy?.();
+      task = Promise.resolve(operation());
     } catch {
-      this.diagnostic("destroy-failed", slotId);
+      diagnostic(failure, slotId);
+      return Promise.resolve();
     }
+    const settled = task.then(
+      () => "resolved" as const,
+      () => "rejected" as const,
+    );
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        diagnostic("cleanup-timeout", slotId);
+        resolve();
+      }, deadlineMs);
+      void settled.then((outcome) => {
+        clearTimeout(timeout);
+        if (outcome === "rejected") diagnostic(failure, slotId);
+        resolve();
+      });
+    });
   }
-  private destroyRuntimeInstance(runtime: PluginRuntime): Promise<void> {
-    return (runtime.destroyPromise ??= this.destroyInstance(
-      runtime.instance,
+
+  private async runStateOperation<T>(
+    slotId: string,
+    operation: () => Promise<T> | T,
+  ): Promise<T> {
+    let task: Promise<T>;
+    try {
+      task = Promise.resolve(operation());
+    } catch (error) {
+      throw error;
+    }
+    // A timeout or superseding generation can stop awaiting the plugin call.
+    // Keep an explicit rejection sink on the original non-cancellable Promise
+    // so a later vendor rejection never escapes as an unhandled rejection.
+    void task.catch(() => undefined);
+    const settled = task.then(
+      (value) => ({ outcome: "resolved" as const, value }),
+      (error) => ({ outcome: "rejected" as const, error }),
+    );
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<{ outcome: "timeout" }>((resolve) => {
+      timeout = setTimeout(
+        () => resolve({ outcome: "timeout" }),
+        this.options.stateDeadlineMs,
+      );
+    });
+    const result = await Promise.race([settled, deadline]);
+    if (timeout) clearTimeout(timeout);
+    if (result.outcome === "timeout") {
+      this.diagnostic("state-timeout", slotId);
+      throw new Error("wam-state-timeout");
+    }
+    if (result.outcome === "rejected") throw result.error;
+    return result.value;
+  }
+
+  private startGuiCleanup(
+    instance: WamPluginInstance,
+    gui: HTMLElement,
+    slotId: string,
+  ): Promise<void> {
+    if (!instance.destroyGui) return Promise.resolve();
+    return this.superviseCleanup(
+      slotId,
+      () => instance.destroyGui!(gui),
+      "gui-cleanup-failed",
+    );
+  }
+
+  private startInstanceDestroy(
+    instance: WamPluginInstance,
+    slotId: string,
+  ): void {
+    if (!instance.destroy) return;
+    void this.superviseCleanup(
+      slotId,
+      () => instance.destroy!(),
+      "destroy-failed",
+    );
+  }
+
+  private startRuntimeDestroy(runtime: PluginRuntime): Promise<void> {
+    if (!runtime.instance?.destroy) return Promise.resolve();
+    return (runtime.destroyPromise ??= this.superviseCleanup(
       runtime.slotId,
+      () => runtime.instance.destroy!(),
+      "destroy-failed",
     ));
   }
-  private async dispose(runtime: PluginRuntime) {
-    if (runtime.disposed) return;
+
+  private startRetiredCleanup(record: RetiredRuntimeCleanup): void {
+    const { runtime, mountedGui } = record;
+    runtime.cleanupPromise ??= Promise.all([
+      mountedGui
+        ? this.startGuiCleanup(runtime.instance, mountedGui.gui, runtime.slotId)
+        : Promise.resolve(),
+      this.startRuntimeDestroy(runtime),
+    ]).then(() => undefined);
+    void runtime.cleanupPromise;
+  }
+
+  private retireRuntime(runtime: PluginRuntime): RetiredRuntimeCleanup | undefined {
+    if (runtime.disposed) return undefined;
     runtime.disposed = true;
-    await this.unmountGui(runtime.slotId, runtime);
+    const mountedGui = this.guis.get(runtime.slotId);
+    const ownedGui = mountedGui?.runtime === runtime ? mountedGui : undefined;
+    if (ownedGui && this.guis.get(runtime.slotId) === ownedGui) {
+      this.guis.delete(runtime.slotId);
+      try {
+        ownedGui.gui.remove();
+      } catch {
+        /* detached plugin GUI */
+      }
+    }
     // Never let an old teardown erase a newer same-slot runtime.
     if (this.runtimes.get(runtime.slotId) === runtime) {
       this.runtimes.delete(runtime.slotId);
@@ -361,7 +499,7 @@ export class OrbitWamRack {
         this.disconnectOwned(node, otherNode);
       }
     }
-    await this.destroyRuntimeInstance(runtime);
+    return { runtime, ...(ownedGui ? { mountedGui: ownedGui } : {}) };
   }
   async freeze(allowDisposed = false): Promise<void> {
     // Freeze is a destructive transaction. It owns a lease and stages state
@@ -375,8 +513,11 @@ export class OrbitWamRack {
     if ((!allowDisposed && this.disposed) || lease !== this.generation) return;
     for (const [slotId, value] of capturedStates)
       this.states.set(slotId, value);
-    await Promise.all(capturedRuntimes.map((runtime) => this.dispose(runtime)));
+    const retired = capturedRuntimes
+      .map((runtime) => this.retireRuntime(runtime))
+      .filter((record): record is RetiredRuntimeCleanup => Boolean(record));
     if (!this.disposed && lease === this.generation) this.rewire();
+    for (const record of retired) this.startRetiredCleanup(record);
   }
   async disposeAll(): Promise<void> {
     this.disposed = true;

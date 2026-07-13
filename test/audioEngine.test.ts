@@ -155,7 +155,7 @@ test("newest A→B→A scene transition retains an active rack while stale freez
       return { fresh: true };
     },
     destroy: async () => { destroys++; }
-  }), engine.pluginStateStore);
+  }), engine.pluginStateStore, () => undefined, { stateDeadlineMs: 5 });
   engine.orbitWamRacks.set(orbitId, rack);
   await audioEngine.reconcileOrbitPluginRack(orbitId, [plugin], 100);
 
@@ -168,6 +168,45 @@ test("newest A→B→A scene transition retains an active rack while stale freez
   assert.equal(audioEngine.getScenePluginRuntimeOwner(), "A");
   assert.equal(audioEngine.getOrbitPluginStatus(orbitId, plugin.id), "ready");
   assert.equal(destroys, 0, "stale freeze must not destroy the current A runtime");
+  audioEngine.removeOrbit(orbitId);
+});
+
+test("scene transition publishes its target while outgoing plugin destroy remains pending", async () => {
+  const orbitId = "wam-pending-destroy-transition";
+  await audioEngine.decodeBytes(orbitId, "pending.wav", new Uint8Array([9]));
+  const engine = audioEngine as any;
+  const runtime = engine.orbitRuntimes.get(orbitId);
+  const plugin = { id: "pending-destroy-slot", catalogId: "burns-simple-delay", pluginVersion: "0.2.54", bypassed: false };
+  const never = new Promise<void>(() => undefined);
+  let destroys = 0;
+  const rack = new OrbitWamRack(
+    runtime.input,
+    runtime.panNode.input,
+    async () => ({
+      audioNode: new FakeNode() as unknown as AudioNode,
+      getState: async () => ({ feedback: .25 }),
+      destroy: () => { destroys++; return never; },
+    }),
+    engine.pluginStateStore,
+    () => undefined,
+    { cleanupDeadlineMs: 5 },
+  );
+  engine.orbitWamRacks.set(orbitId, rack);
+  await audioEngine.reconcileOrbitPluginRack(orbitId, [plugin], 110);
+
+  const outcome = await Promise.race([
+    audioEngine.transitionScenePluginRacks(
+      [{ id: orbitId, plugins: [plugin] } as any],
+      [],
+      111,
+      "target-without-plugin",
+    ).then(() => "completed"),
+    new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 50)),
+  ]);
+
+  assert.equal(outcome, "completed");
+  assert.equal(destroys, 1);
+  assert.equal(audioEngine.getScenePluginRuntimeOwner(), "target-without-plugin");
   audioEngine.removeOrbit(orbitId);
 });
 

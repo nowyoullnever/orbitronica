@@ -63,8 +63,11 @@ test("packaged smoke uses the real production Electron entry rather than the dev
   assert.match(harness, /path\.join\(dist, "wam", "burns-simple-delay"/);
   assert.match(rendererSmoke, /initializeWamHost/);
   assert.match(rendererSmoke, /orbitronica-pcm-capture/);
-  assert.match(rendererSmoke, /await instance\.createGui\(\)/);
-  assert.match(rendererSmoke, /instance\.destroyGui\(gui\)/);
+  assert.match(rendererSmoke, /await rack\.mountGui\(slot\.id, document\.body\)/);
+  assert.match(rendererSmoke, /await Promise\.race\(\[/);
+  assert.match(rendererSmoke, /rack\.reconcile\(\[\]\)/);
+  assert.match(harness, /rackRemovalCompleted/);
+  assert.match(harness, /cleanupDidNotBlockHost/);
   assert.match(main, /wam-smoke\.html/);
   assert.equal(path.basename(new URL("public/wam/burns-simple-delay/index.js", root).pathname), "index.js");
 });

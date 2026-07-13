@@ -39,6 +39,132 @@ test("removing a downstream plugin severs the surviving neighbour's dangling edg
   assert.equal(input.edges.has(a), true);
 });
 
+test("pending third-party destroy cannot block dry topology publication", async () => {
+  const input = new Node(), destination = new Node(), wam = new Node();
+  const never = new Promise<void>(() => undefined);
+  const diagnostics: string[] = [];
+  let destroys = 0;
+  const rack = new OrbitWamRack(
+    input as unknown as AudioNode,
+    destination as unknown as AudioNode,
+    async () => ({
+      audioNode: wam as unknown as AudioNode,
+      destroy: () => { destroys++; return never; },
+    }),
+    new Map(),
+    (reason) => diagnostics.push(reason),
+    { cleanupDeadlineMs: 5 },
+  );
+  await rack.reconcile([slot("a")]);
+
+  const removal = rack.reconcile([]);
+  assert.equal(input.edges.has(wam), false, "removed node is detached before the first await");
+  assert.equal(input.edges.has(destination), true, "dry path is published before the first await");
+  const outcome = await Promise.race([
+    removal.then(() => "completed"),
+    new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 50)),
+  ]);
+
+  assert.equal(outcome, "completed");
+  assert.equal(destroys, 1);
+  assert.equal(input.edges.has(wam), false);
+  assert.equal(input.edges.has(destination), true);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(diagnostics.includes("cleanup-timeout"), true);
+});
+
+test("pending downstream destroy cannot leave a surviving plugin disconnected", async () => {
+  const input = new Node(), destination = new Node(), a = new Node(), b = new Node();
+  const never = new Promise<void>(() => undefined);
+  const rack = new OrbitWamRack(
+    input as unknown as AudioNode,
+    destination as unknown as AudioNode,
+    async (item) => ({
+      audioNode: (item.id === "a" ? a : b) as unknown as AudioNode,
+      ...(item.id === "b" ? { destroy: () => never } : {}),
+    }),
+    new Map(),
+    () => undefined,
+    { cleanupDeadlineMs: 5 },
+  );
+  await rack.reconcile([slot("a"), slot("b")]);
+
+  const removal = rack.reconcile([slot("a")]);
+  assert.equal(a.edges.has(b), false, "dangling edge is severed before the first await");
+  assert.equal(a.edges.has(destination), true, "survivor is published before the first await");
+  const outcome = await Promise.race([
+    removal.then(() => "completed"),
+    new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 50)),
+  ]);
+
+  assert.equal(outcome, "completed");
+  assert.equal(input.edges.has(a), true);
+  assert.equal(a.edges.has(b), false);
+  assert.equal(a.edges.has(destination), true);
+});
+
+test("pending destroyGui cannot delay runtime retirement or rewire", async () => {
+  const input = new Node(), destination = new Node(), wam = new Node();
+  const never = new Promise<void>(() => undefined);
+  let guiRemovals = 0;
+  const gui = { parentElement: null, remove: () => { guiRemovals++; } } as unknown as HTMLElement;
+  const container = { append() {} } as unknown as HTMLElement;
+  const rack = new OrbitWamRack(
+    input as unknown as AudioNode,
+    destination as unknown as AudioNode,
+    async () => ({
+      audioNode: wam as unknown as AudioNode,
+      createGui: async () => gui,
+      destroyGui: () => never,
+    }),
+    new Map(),
+    () => undefined,
+    { cleanupDeadlineMs: 5 },
+  );
+  await rack.reconcile([slot("a")]);
+  await rack.mountGui("a", container);
+
+  const outcome = await Promise.race([
+    rack.reconcile([]).then(() => "completed"),
+    new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 50)),
+  ]);
+
+  assert.equal(outcome, "completed");
+  assert.equal(guiRemovals, 1);
+  assert.equal(input.edges.has(wam), false);
+  assert.equal(input.edges.has(destination), true);
+});
+
+test("cleanup rejection is diagnosed and repeated lifecycle calls destroy exactly once", async () => {
+  const input = new Node(), destination = new Node(), wam = new Node();
+  const diagnostics: string[] = [];
+  const gui = { parentElement: null, remove() {} } as unknown as HTMLElement;
+  const container = { append() {} } as unknown as HTMLElement;
+  let destroys = 0, guiDestroys = 0;
+  const rack = new OrbitWamRack(
+    input as unknown as AudioNode,
+    destination as unknown as AudioNode,
+    async () => ({
+      audioNode: wam as unknown as AudioNode,
+      createGui: async () => gui,
+      destroyGui: async () => { guiDestroys++; throw new Error("gui cleanup failed"); },
+      destroy: async () => { destroys++; throw new Error("cleanup failed"); },
+    }),
+    new Map(),
+    (reason) => diagnostics.push(reason),
+    { cleanupDeadlineMs: 5 },
+  );
+  await rack.reconcile([slot("a")]);
+  await rack.mountGui("a", container);
+  await Promise.all([rack.reconcile([]), rack.freeze(), rack.disposeAll()]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(destroys, 1);
+  assert.equal(guiDestroys, 1);
+  assert.equal(diagnostics.includes("destroy-failed"), true);
+  assert.equal(diagnostics.includes("gui-cleanup-failed"), true);
+});
+
 test("late instance is destroyed and never wired after a newer reconcile", async () => {
   const input = new Node(), destination = new Node(), late = new Node(); let resolve!: (value: any) => void; let destroys = 0;
   const rack = new OrbitWamRack(input as unknown as AudioNode, destination as unknown as AudioNode, () => new Promise((done) => { resolve = done; }), new Map());
@@ -88,6 +214,81 @@ test("save capture stages every ready slot and does not mutate durable state on 
   await rack.reconcile([slot("a"), slot("b")]);
   await assert.rejects(rack.captureActiveStateForSave(), /read failed/);
   assert.deepEqual(states.get("a"), { old: true });
+});
+
+test("freeze state timeout preserves last-good state and still completes teardown", async () => {
+  const input = new Node(), destination = new Node(), wam = new Node();
+  const never = new Promise<unknown>(() => undefined);
+  const states = new Map<string, any>([["a", { lastGood: true }]]);
+  const diagnostics: string[] = [];
+  let destroys = 0;
+  const rack = new OrbitWamRack(
+    input as unknown as AudioNode,
+    destination as unknown as AudioNode,
+    async () => ({
+      audioNode: wam as unknown as AudioNode,
+      getState: () => never,
+      destroy: () => { destroys++; },
+    }),
+    states,
+    (reason) => diagnostics.push(reason),
+    { cleanupDeadlineMs: 5, stateDeadlineMs: 5 },
+  );
+  await rack.reconcile([slot("a")]);
+
+  await rack.freeze();
+
+  assert.deepEqual(states.get("a"), { lastGood: true });
+  assert.equal(diagnostics.includes("state-timeout"), true);
+  assert.equal(destroys, 1);
+  assert.equal(input.edges.has(destination), true);
+});
+
+test("save state timeout rejects atomically instead of publishing a partial capture", async () => {
+  const input = new Node(), destination = new Node(), first = new Node(), second = new Node();
+  const never = new Promise<unknown>(() => undefined);
+  const states = new Map<string, any>([["a", { old: true }]]);
+  const rack = new OrbitWamRack(
+    input as unknown as AudioNode,
+    destination as unknown as AudioNode,
+    async (item) => ({
+      audioNode: (item.id === "a" ? first : second) as unknown as AudioNode,
+      getState: item.id === "a" ? async () => ({ fresh: true }) : () => never,
+    }),
+    states,
+    () => undefined,
+    { stateDeadlineMs: 5 },
+  );
+  await rack.reconcile([slot("a"), slot("b")]);
+
+  await assert.rejects(rack.captureActiveStateForSave(), /wam-state-timeout/);
+  assert.deepEqual(states.get("a"), { old: true });
+});
+
+test("setState timeout leaves durable state intact and retires the unusable instance once", async () => {
+  const input = new Node(), destination = new Node(), wam = new Node();
+  const never = new Promise<void>(() => undefined);
+  const states = new Map<string, any>([["a", { feedback: .4 }]]);
+  let destroys = 0;
+  const rack = new OrbitWamRack(
+    input as unknown as AudioNode,
+    destination as unknown as AudioNode,
+    async () => ({
+      audioNode: wam as unknown as AudioNode,
+      setState: () => never,
+      destroy: () => { destroys++; },
+    }),
+    states,
+    () => undefined,
+    { cleanupDeadlineMs: 5, stateDeadlineMs: 5 },
+  );
+
+  await rack.reconcile([slot("a")]);
+
+  assert.equal(rack.getStatus("a"), "unavailable");
+  assert.deepEqual(states.get("a"), { feedback: .4 });
+  assert.equal(destroys, 1);
+  assert.equal(input.edges.has(destination), true);
 });
 
 test("slot state is independent of history metadata and clone receives fresh ids", () => {
@@ -142,7 +343,7 @@ for (const outcome of ["resolve", "reject"] as const) {
     const input = new Node(), destination = new Node(), oldNode = new Node(), currentNode = new Node();
     const setOld = deferred<void>();
     const states = new Map<string, any>([["a", { feedback: .2 }]]);
-    let calls = 0, oldDestroys = 0, currentDestroys = 0;
+    let calls = 0, oldSetStateCalls = 0, oldDestroys = 0, currentDestroys = 0;
     const rack = new OrbitWamRack(
       input as unknown as AudioNode,
       destination as unknown as AudioNode,
@@ -150,7 +351,7 @@ for (const outcome of ["resolve", "reject"] as const) {
         calls++;
         if (calls === 1) return {
           audioNode: oldNode as unknown as AudioNode,
-          setState: () => setOld.promise,
+          setState: () => { oldSetStateCalls++; return setOld.promise; },
           destroy: () => { oldDestroys++; },
         };
         return {
@@ -162,7 +363,7 @@ for (const outcome of ["resolve", "reject"] as const) {
       states,
     );
     const first = rack.reconcile([slot("a")], 1);
-    while (calls < 1) await new Promise((done) => setTimeout(done, 0));
+    while (oldSetStateCalls < 1) await new Promise((done) => setTimeout(done, 0));
     const latest = rack.reconcile([slot("a")], 2);
     while (calls < 2) await new Promise((done) => setTimeout(done, 0));
     if (outcome === "resolve") setOld.resolve(); else setOld.reject(new Error("stale restore failed"));
@@ -203,11 +404,10 @@ test("delayed old destroyGui cannot erase a newer GUI mapping or audio runtime",
   await rack.reconcile([slot("a")]);
   await rack.mountGui("a", container);
   const oldRemoval = rack.reconcile([]);
-  while (rack.getRuntime("a")?.disposed !== true) await new Promise((done) => setTimeout(done, 0));
+  await oldRemoval;
   await rack.reconcile([slot("a")]);
   await rack.mountGui("a", container);
   releaseOldGui.resolve();
-  await oldRemoval;
   assert.equal(rack.getStatus("a"), "ready");
   assert.equal(input.edges.has(currentNode), true);
   assert.equal(input.edges.has(oldNode), false);
