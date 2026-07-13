@@ -46,20 +46,34 @@ type Circuit = { failures: number; detached: number; openUntil: number };
 type HostRegistration = { groupId?: string };
 const defaultOptions = { deadlineMs: 5_000, circuitThreshold: 2, circuitCooldownMs: 15_000, maxDetachedPerCatalog: 1, diagnosticCapacity: 64 } as const;
 
-function jsonClone(value: unknown, seen = new Set<object>()): JsonValue {
+/** Copy only JSON values at the WAM boundary; retain neither plugin objects nor lossy numbers. */
+export function cloneJsonValue(value: unknown, seen = new Set<object>()): JsonValue {
   if (value === null || typeof value === "boolean" || typeof value === "string") return value;
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new Error("invalid-state");
     return value;
   }
-  if (Array.isArray(value)) return value.map((item) => jsonClone(item, seen));
-  if (typeof value === "object") {
+  if (Array.isArray(value)) {
     if (seen.has(value)) throw new Error("invalid-state");
     seen.add(value);
-    const result: Record<string, JsonValue> = {};
-    for (const [key, item] of Object.entries(value as Record<string, unknown>)) result[key] = jsonClone(item, seen);
-    seen.delete(value);
-    return result;
+    try { return value.map((item) => cloneJsonValue(item, seen)); }
+    finally { seen.delete(value); }
+  }
+  if (typeof value === "object") {
+    if (Object.getPrototypeOf(value) !== Object.prototype) throw new Error("invalid-state");
+    if (seen.has(value)) throw new Error("invalid-state");
+    seen.add(value);
+    try {
+      const result: Record<string, JsonValue> = {};
+      for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+        // Assignment to __proto__ invokes Object.prototype's legacy setter.
+        // Define an own enumerable data property so JSON keys remain data.
+        Object.defineProperty(result, key, {
+          value: cloneJsonValue(item, seen), enumerable: true, configurable: true, writable: true
+        });
+      }
+      return result;
+    } finally { seen.delete(value); }
   }
   throw new Error("invalid-state");
 }
@@ -69,89 +83,14 @@ const initializeSdkHost: WamHostInitializer = async (context) => {
   return initializeWamHost(context);
 };
 
-export class WamInsert {
-  private cleanedUp = false;
-  private gui: HTMLElement | null = null;
-  private guiCreation: Promise<HTMLElement | null> | null = null;
-  private readonly source: AudioNode;
-  private readonly destination: AudioNode;
-  private readonly instance: WamPluginInstance;
-  private readonly emit: (event: WamDiagnostic["event"], outcome: WamDiagnostic["outcome"], severity: WamDiagnosticSeverity, reason?: WamDiagnostic["reason"]) => void;
-
-  constructor(
-    source: AudioNode,
-    destination: AudioNode,
-    instance: WamPluginInstance,
-    emit: (event: WamDiagnostic["event"], outcome: WamDiagnostic["outcome"], severity: WamDiagnosticSeverity, reason?: WamDiagnostic["reason"]) => void
-  ) {
-    this.source = source;
-    this.destination = destination;
-    this.instance = instance;
-    this.emit = emit;
-  }
-
-  async getState(): Promise<WamState> {
-    this.emit("state", "started", "info");
-    try {
-      const state = jsonClone(await this.instance.getState?.());
-      this.emit("state", "ready", "info");
-      return state;
-    } catch { this.emit("state", "failed", "warning", "invalid-state"); throw new Error("invalid-state"); }
-  }
-
-  async setState(state: JsonValue): Promise<void> {
-    this.emit("state", "started", "info");
-    try { await this.instance.setState?.(jsonClone(state)); this.emit("state", "ready", "info"); }
-    catch { this.emit("state", "failed", "warning", "invalid-state"); throw new Error("invalid-state"); }
-  }
-
-  async mountGui(container: HTMLElement): Promise<HTMLElement | null> {
-    if (!this.instance.createGui || this.cleanedUp) return null;
-    this.emit("gui", "started", "info");
-    const creation = Promise.resolve(this.instance.createGui()).then((gui) => {
-      // The SDK contract is HTMLElement; structural checking keeps the host testable
-      // without constructing a DOM and rejects arbitrary module return values.
-      if (!gui || typeof (gui as { remove?: unknown }).remove !== "function") throw new Error("operation-failed");
-      return gui;
-    });
-    this.guiCreation = creation;
-    try {
-      const gui = await creation;
-      if (this.cleanedUp || this.guiCreation !== creation) { await this.destroyGui(gui); return null; }
-      this.gui?.remove();
-      container.append(gui);
-      this.gui = gui;
-      this.emit("gui", "ready", "info");
-      return gui;
-    } catch { this.emit("gui", "failed", "warning", "operation-failed"); return null; }
-  }
-
-  private async destroyGui(gui: HTMLElement): Promise<void> {
-    try { await this.instance.destroyGui?.(gui); } catch { /* third-party cleanup cannot block fallback */ }
-    try { gui.remove(); } catch { /* detached GUI */ }
-  }
-
-  async cleanup(): Promise<void> {
-    if (this.cleanedUp) return;
-    this.cleanedUp = true;
-    this.emit("cleanup", "started", "info");
-    const gui = this.gui;
-    this.gui = null;
-    if (gui) await this.destroyGui(gui);
-    // A late GUI result observes cleanedUp and is destroyed by mountGui.
-    try { this.source.disconnect(this.instance.audioNode); } catch { /* already disconnected */ }
-    try { this.instance.audioNode.disconnect(this.destination); } catch { /* already disconnected */ }
-    try { this.source.connect(this.destination); } catch { /* native fallback */ }
-    try { await this.instance.destroy?.(); } catch { /* destroy is best-effort */ }
-    this.emit("cleanup", "ready", "info");
-  }
-}
-
 export class WamHost {
   private readonly initializeHost: WamHostInitializer;
   private readonly opts: Required<Omit<WamHostOptions, "now" | "correlation">> & Pick<WamHostOptions, "now" | "correlation">;
   private readonly hostInitializations = new WeakMap<AudioContext, Promise<HostRegistration>>();
-  private readonly moduleLoads = new WeakMap<AudioContext, Promise<WamPluginModule>>();
+  // A single AudioContext can host more than one catalog entry.  Keep the
+  // expensive SDK module load deduplicated per entry, rather than letting the
+  // first catalog loaded for a context impersonate every later plugin.
+  private readonly moduleLoads = new WeakMap<AudioContext, Map<string, Promise<WamPluginModule>>>();
   private readonly circuits = new Map<string, Circuit>();
   private readonly diagnostics: WamDiagnostic[] = [];
   private droppedDiagnostics = 0;
@@ -236,10 +175,21 @@ export class WamHost {
   }
 
   private async loadModule(context: AudioContext, loader: WamModuleLoader, hostGroupId: string | undefined, catalogId: string): Promise<WamPluginModule> {
-    const cached = this.moduleLoads.get(context); if (cached) return cached;
+    let loadsForContext = this.moduleLoads.get(context);
+    if (!loadsForContext) {
+      loadsForContext = new Map();
+      this.moduleLoads.set(context, loadsForContext);
+    }
+    const cached = loadsForContext.get(catalogId); if (cached) return cached;
     const load = this.bounded(catalogId, "module-load", loader(context, hostGroupId));
-    this.moduleLoads.set(context, load);
-    try { return await load; } catch (error) { this.moduleLoads.delete(context); throw error; }
+    loadsForContext.set(catalogId, load);
+    try { return await load; } catch (error) {
+      // Do not evict an independently cached catalog entry, and do not let a
+      // late failure erase a retry which has already replaced this promise.
+      if (loadsForContext.get(catalogId) === load) loadsForContext.delete(catalogId);
+      if (loadsForContext.size === 0) this.moduleLoads.delete(context);
+      throw error;
+    }
   }
 
   /** Creates an unconnected instance for a rack that owns its own topology. */
@@ -249,20 +199,4 @@ export class WamHost {
     return this.bounded(catalogId, "instance-create", module.createInstance(context, registration.groupId), async (late) => { await late.destroy?.(); });
   }
 
-  async insertPreFader(context: AudioContext, source: AudioNode, destination: AudioNode, loader: WamModuleLoader, catalogId = "spike"): Promise<WamInsert> {
-    const registration = await this.initialize(context);
-    const module = await this.loadModule(context, loader, registration.groupId, catalogId);
-    const instance = await this.bounded(catalogId, "instance-create", module.createInstance(context, registration.groupId), async (late) => { await late.destroy?.(); });
-    const started = this.now(); const correlation = this.correlation();
-    try {
-      source.disconnect(destination); source.connect(instance.audioNode); instance.audioNode.connect(destination);
-      return new WamInsert(source, destination, instance, (event, outcome, severity, reason) => this.emit(event, outcome, severity, catalogId, correlation, started, reason));
-    } catch {
-      try { source.disconnect(instance.audioNode); } catch { /* incomplete connection */ }
-      try { instance.audioNode.disconnect(destination); } catch { /* incomplete connection */ }
-      try { source.connect(destination); } catch { /* native fallback */ }
-      await instance.destroy?.();
-      throw new Error("wam-operation-failed");
-    }
-  }
 }

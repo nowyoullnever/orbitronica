@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { WamHost, type WamModuleLoader } from "../src/renderer/audio/wamHost.ts";
+import { cloneJsonValue, WamHost, type WamModuleLoader } from "../src/renderer/audio/wamHost.ts";
 
 class FakeNode {
   readonly edges = new Set<FakeNode>();
@@ -22,13 +22,11 @@ test("initializes a WAM module once per context and retries failed initializatio
     loads++;
     return { createInstance: async () => ({ audioNode: new FakeNode() as unknown as AudioNode, getState: async () => ({}), setState: async () => {} }) };
   };
-  const source = new FakeNode();
-  const destination = new FakeNode();
   await Promise.all([
-    host.insertPreFader(context, source as unknown as AudioNode, destination as unknown as AudioNode, loader),
-    host.insertPreFader(context, source as unknown as AudioNode, destination as unknown as AudioNode, loader)
+    host.createPluginInstance(context, loader),
+    host.createPluginInstance(context, loader)
   ]);
-  await host.insertPreFader(secondContext, source as unknown as AudioNode, destination as unknown as AudioNode, loader);
+  await host.createPluginInstance(secondContext, loader);
   assert.equal(loads, 2);
   assert.equal(hostInitializations, 2);
 
@@ -38,45 +36,37 @@ test("initializes a WAM module once per context and retries failed initializatio
     if (++attempts === 1) throw new Error("registration failed");
     return { createInstance: async () => ({ audioNode: new FakeNode() as unknown as AudioNode, getState: async () => ({}), setState: async () => {} }) };
   };
-  await assert.rejects(retryHost.insertPreFader(context, source as unknown as AudioNode, destination as unknown as AudioNode, flaky));
-  await retryHost.insertPreFader(context, source as unknown as AudioNode, destination as unknown as AudioNode, flaky);
+  await assert.rejects(retryHost.createPluginInstance(context, flaky));
+  await retryHost.createPluginInstance(context, flaky);
   assert.equal(attempts, 2);
 });
 
-test("pre-fader insert round-trips state, GUI, and the dry connection during cleanup", async () => {
+test("caches modules per catalog within one context and retries only the failed catalog", async () => {
   const host = new WamHost(async () => {});
-  const source = new FakeNode();
-  const destination = new FakeNode();
-  const wamNode = new FakeNode();
-  source.connect(destination);
-  let state: unknown = { mix: .25 };
-  let destroyed = 0;
-  let removed = 0;
-  const gui = { remove: () => { removed++; } } as unknown as HTMLElement;
-  const loader: WamModuleLoader = async () => ({
-    createInstance: async () => ({
-      audioNode: wamNode as unknown as AudioNode,
-      getState: async () => state,
-      setState: async (next) => { state = next; },
-      createGui: () => gui,
-      destroy: async () => { destroyed++; }
-    })
-  });
-  const insert = await host.insertPreFader(context, source as unknown as AudioNode, destination as unknown as AudioNode, loader);
-  assert.equal(source.edges.has(destination), false, "dry route is replaced before the orbit gain/fader");
-  assert.equal(source.edges.has(wamNode), true);
-  assert.equal(wamNode.edges.has(destination), true);
-  await insert.setState({ mix: .8, enabled: true });
-  assert.deepEqual(await insert.getState(), { mix: .8, enabled: true });
-  const container = { append: (element: HTMLElement) => assert.equal(element, gui) } as unknown as HTMLElement;
-  await insert.mountGui(container);
-  await insert.cleanup();
-  await insert.cleanup();
-  assert.equal(removed, 1);
-  assert.equal(destroyed, 1);
-  assert.equal(source.edges.has(wamNode), false);
-  assert.equal(wamNode.edges.has(destination), false);
-  assert.equal(source.edges.has(destination), true, "cleanup restores the dry pre-fader route");
+  let loadsA = 0;
+  let loadsB = 0;
+  const loaderA: WamModuleLoader = async () => {
+    loadsA++;
+    return { createInstance: async () => ({ audioNode: new FakeNode() as unknown as AudioNode }) };
+  };
+  const loaderB: WamModuleLoader = async () => {
+    loadsB++;
+    if (loadsB === 1) throw new Error("B is temporarily unavailable");
+    return { createInstance: async () => ({ audioNode: new FakeNode() as unknown as AudioNode }) };
+  };
+
+  await host.createPluginInstance(context, loaderA, "catalog-a");
+  await assert.rejects(host.createPluginInstance(context, loaderB, "catalog-b"), /wam-operation-failed/);
+  await host.createPluginInstance(context, loaderA, "catalog-a");
+  await Promise.all([
+    host.createPluginInstance(context, loaderB, "catalog-b"),
+    host.createPluginInstance(context, loaderB, "catalog-b")
+  ]);
+  await host.createPluginInstance(context, loaderA, "catalog-a");
+  await host.createPluginInstance(context, loaderB, "catalog-b");
+
+  assert.equal(loadsA, 1, "A→B→A must retain A's module cache entry");
+  assert.equal(loadsB, 2, "a failed B load retries without evicting A, then concurrent B loads deduplicate");
 });
 
 test("trusted catalog is closed and maps only the frozen Burns entry", async () => {
@@ -129,9 +119,8 @@ test("timeout opens a bounded catalog circuit and late instance is destroyed", a
       return { audioNode: new FakeNode() as unknown as AudioNode, destroy: () => { destroyed++; } };
     }
   });
-  const source = new FakeNode(); const destination = new FakeNode(); source.connect(destination);
-  await assert.rejects(host.insertPreFader(context, source as unknown as AudioNode, destination as unknown as AudioNode, loader, "burns-simple-delay"), /wam-timeout/);
-  await assert.rejects(host.insertPreFader(context, source as unknown as AudioNode, destination as unknown as AudioNode, loader, "burns-simple-delay"), /wam-circuit-open/);
+  await assert.rejects(host.createPluginInstance(context, loader, "burns-simple-delay"), /wam-timeout/);
+  await assert.rejects(host.createPluginInstance(context, loader, "burns-simple-delay"), /wam-circuit-open/);
   await new Promise((done) => setTimeout(done, 50));
   assert.equal(destroyed, 1, JSON.stringify(host.getDiagnostics()));
   const diagnostics = host.getDiagnostics();
@@ -140,14 +129,14 @@ test("timeout opens a bounded catalog circuit and late instance is destroyed", a
   assert.equal(JSON.stringify(diagnostics), JSON.stringify(diagnostics).replace(/https?:\/\//g, ""), "diagnostics do not retain raw URLs");
 });
 
-test("state boundary rejects non-JSON values without passing them to plugins", async () => {
-  const host = new WamHost(async () => {});
-  const source = new FakeNode(); const destination = new FakeNode(); source.connect(destination);
-  let passed = false;
-  const insert = await host.insertPreFader(context, source as unknown as AudioNode, destination as unknown as AudioNode, async () => ({
-    createInstance: async () => ({ audioNode: new FakeNode() as unknown as AudioNode, setState: async () => { passed = true; }, getState: async () => ({ valid: Infinity }) })
-  }));
-  await assert.rejects(insert.setState({ invalid: undefined } as unknown as { invalid: never }), /invalid-state/);
-  assert.equal(passed, false);
-  await assert.rejects(insert.getState(), /invalid-state/);
+test("state boundary rejects non-JSON values without lossy coercion", () => {
+  assert.deepEqual(cloneJsonValue({ valid: [1, true, null] }), { valid: [1, true, null] });
+  assert.throws(() => cloneJsonValue({ invalid: undefined }), /invalid-state/);
+  assert.throws(() => cloneJsonValue({ invalid: Infinity }), /invalid-state/);
+  assert.throws(() => cloneJsonValue(new Date()), /invalid-state/);
+  const circular: unknown[] = []; circular.push(circular);
+  assert.throws(() => cloneJsonValue(circular), /invalid-state/);
+  const protoKey = cloneJsonValue(JSON.parse('{"__proto__":{"state":"data"}}')) as Record<string, unknown>;
+  assert.equal(Object.getPrototypeOf(protoKey), Object.prototype);
+  assert.deepEqual(Object.getOwnPropertyDescriptor(protoKey, "__proto__")?.value, { state: "data" });
 });

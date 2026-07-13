@@ -312,10 +312,15 @@ export default function App() {
     redoStack.current = [];
     const previous = stateRef.current.scenes.find((scene) => scene.id === stateRef.current.activeSceneId);
     const target = nextScenes.find((scene) => scene.id === nextActiveSceneId);
-    prepareActiveSceneTransition(nextActiveSceneId);
+    // Scene metadata changes retain the orbit array by reference. Rehydrating an
+    // unchanged active rack would destroy live WAMs and cause an avoidable dropout.
+    const shouldTransition = previous?.id !== target?.id || previous?.orbits !== target?.orbits;
+    if (shouldTransition) prepareActiveSceneTransition(nextActiveSceneId);
     setScenes(nextScenes);
     setActiveSceneId(nextActiveSceneId);
-    scheduleScenePluginTransition(previous?.orbits ?? [], target?.orbits ?? [], nextActiveSceneId);
+    if (shouldTransition) {
+      scheduleScenePluginTransition(previous?.orbits ?? [], target?.orbits ?? [], nextActiveSceneId);
+    }
     pruneUnreferencedAudio(nextScenes);
     setIsDirty(true);
   }
@@ -887,24 +892,23 @@ export default function App() {
     // every save. The serializer only reads the committed store after the barrier.
     try {
       await audioEngine.snapshotOrbitPluginStates();
+      const project = serializeProject(
+        projectName || "Untitled Session", scenes, activeSceneId, lastLoopBarLengthRadians,
+        { volume: masterVolume, pan: masterPan }, audioEngine.getPluginStateStore()
+      );
+      const assets = scenes.flatMap((scene) => scene.orbits).flatMap((orbit) => {
+        const asset = audioEngine.getProjectAsset(orbit.id);
+        return asset ? [{ orbitId: orbit.id, fileName: asset.fileName, bytes: asset.bytes }] : [];
+      });
+      const result = await window.orbitonicAPI.saveProject({ project, assets }, currentPath);
+      if (result.ok) {
+        setProjectPath(result.path);
+        setIsDirty(false);
+        flash("Project saved.");
+      } else if (!result.canceled) flash(result.error ?? "Project could not be saved.");
     } catch (error) {
-      flash(error instanceof Error ? error.message : "Plugin state could not be captured; project was not saved.");
-      return;
+      flash(error instanceof Error ? error.message : "Project could not be saved.");
     }
-    const project = serializeProject(
-      projectName || "Untitled Session", scenes, activeSceneId, lastLoopBarLengthRadians,
-      { volume: masterVolume, pan: masterPan }, audioEngine.getPluginStateStore()
-    );
-    const assets = scenes.flatMap((scene) => scene.orbits).flatMap((orbit) => {
-      const asset = audioEngine.getProjectAsset(orbit.id);
-      return asset ? [{ orbitId: orbit.id, fileName: asset.fileName, bytes: asset.bytes }] : [];
-    });
-    const result = await window.orbitonicAPI.saveProject({ project, assets }, currentPath);
-    if (result.ok) {
-      setProjectPath(result.path);
-      setIsDirty(false);
-      flash("Project saved.");
-    } else if (!result.canceled) flash(result.error ?? "Project could not be saved.");
   }
 
   async function saveProject() {

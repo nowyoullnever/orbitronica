@@ -205,6 +205,22 @@ test("v6 keeps slot metadata in scenes and only current slot JSON state in the e
   assert.throws(() => parseProject(JSON.stringify(malformed)), /unknown slot/);
 });
 
+test("v6 plugin slots are canonicalized on save and reject undocumented fields on load", () => {
+  const source = scene("s", { orbits: [orbit("o", {
+    plugins: [{
+      id: "slot", catalogId: "burns-simple-delay", pluginVersion: "0.2.54", bypassed: false,
+      state: { mustNotPersist: true }
+    } as any]
+  })] });
+  const encoded = serializeProject("plugins", [source], "s", 1, { volume: 1, pan: 0 });
+  assert.deepEqual(encoded.scenes[0].orbits[0].plugins, [{
+    id: "slot", catalogId: "burns-simple-delay", pluginVersion: "0.2.54", bypassed: false
+  }]);
+  const malformed = structuredClone(encoded) as any;
+  malformed.scenes[0].orbits[0].plugins[0].state = { injected: true };
+  assert.throws(() => parseProject(JSON.stringify(malformed)), /unsupported fields/);
+});
+
 test("v6 rejects unsafe or oversized plugin state while v5 migrates with an empty store", () => {
   const legacy = serializeProject("old", [scene("s")], "s", 1, { volume: 1, pan: 0 });
   const v5 = { ...legacy, schemaVersion: 5 as const, appName: "Orbitonic" as const } as any;

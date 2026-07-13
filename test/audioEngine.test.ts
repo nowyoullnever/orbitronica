@@ -140,6 +140,37 @@ test("scene transition revokes a pending rack create before freezing its orbit",
   audioEngine.removeOrbit(orbitId);
 });
 
+test("newest A→B→A scene transition retains an active rack while stale freeze snapshots", async () => {
+  const orbitId = "wam-freeze-reconcile-race";
+  await audioEngine.decodeBytes(orbitId, "race.wav", new Uint8Array([8]));
+  const engine = audioEngine as any;
+  const runtime = engine.orbitRuntimes.get(orbitId);
+  const plugin = { id: "freeze-slot", catalogId: "burns-simple-delay", pluginVersion: "0.2.54", bypassed: false };
+  let releaseSnapshot!: () => void;
+  let destroys = 0;
+  const rack = new OrbitWamRack(runtime.input, runtime.panNode.input, async () => ({
+    audioNode: new FakeNode() as unknown as AudioNode,
+    getState: async () => {
+      await new Promise<void>((resolve) => { releaseSnapshot = resolve; });
+      return { fresh: true };
+    },
+    destroy: async () => { destroys++; }
+  }), engine.pluginStateStore);
+  engine.orbitWamRacks.set(orbitId, rack);
+  await audioEngine.reconcileOrbitPluginRack(orbitId, [plugin], 100);
+
+  const toB = audioEngine.transitionScenePluginRacks([{ id: orbitId, plugins: [plugin] } as any], [], 101, "B");
+  while (!releaseSnapshot) await new Promise((done) => setTimeout(done, 0));
+  const backToA = audioEngine.transitionScenePluginRacks([], [{ id: orbitId, plugins: [plugin] } as any], 102, "A");
+  await backToA;
+  releaseSnapshot();
+  assert.equal(await toB, false);
+  assert.equal(audioEngine.getScenePluginRuntimeOwner(), "A");
+  assert.equal(audioEngine.getOrbitPluginStatus(orbitId, plugin.id), "ready");
+  assert.equal(destroys, 0, "stale freeze must not destroy the current A runtime");
+  audioEngine.removeOrbit(orbitId);
+});
+
 test("scene duplication clones external WAM state by its slot map without aliasing source state", () => {
   const engine = audioEngine as any;
   engine.pluginStateStore.clear();

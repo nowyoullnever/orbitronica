@@ -17,5 +17,5 @@ test("plugin GUI lifecycle awaits creation and cleans late or StrictMode-unmount
   assert.match(panel, /void onMount\(slot\.id, container\)/);
   assert.match(panel, /void onUnmount\(slot\.id\)/);
   assert.match(rack, /const gui = await createGui\(\)/);
-  assert.match(rack, /await this\.unmountGui\(runtime\.slotId\)/);
+  assert.match(rack, /await this\.unmountGui\(runtime\.slotId, runtime\)/);
 });

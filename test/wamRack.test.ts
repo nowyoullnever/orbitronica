@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { OrbitWamRack, SceneWamCoordinator, collectRetainedPluginSlotIds, duplicatePluginSlots, prunePluginStates } from "../src/renderer/audio/wamRack.ts";
+import { OrbitWamRack, collectRetainedPluginSlotIds, duplicatePluginSlots, prunePluginStates } from "../src/renderer/audio/wamRack.ts";
 import type { PluginSlot } from "../src/renderer/state/types.ts";
 
 class Node {
@@ -85,11 +85,119 @@ test("slot state is independent of history metadata and clone receives fresh ids
   assert.equal(state.has("a"), true); assert.equal(state.has("orphan"), false);
 });
 
-test("scene coordinator is last-wins and publishes ownership only after hydrate", async () => {
-  const calls: string[] = []; let release!: () => void;
-  const slow = { freeze: async () => { calls.push("freeze"); }, reconcile: async () => { calls.push("slow"); await new Promise<void>((done) => { release = done; }); } };
-  const fast = { freeze: async () => { calls.push("freeze-fast"); }, reconcile: async () => { calls.push("fast"); } };
-  const coordinator = new SceneWamCoordinator((id) => id === "b" ? [{ rack: slow, slots: [slot("b")] }] : [{ rack: fast, slots: [slot("c")] }]);
-  const old = coordinator.transition("a", "b"); while (!release) await new Promise((done) => setTimeout(done, 0)); const newer = coordinator.transition("b", "c"); release();
-  assert.equal(await newer, true); assert.equal(await old, false); assert.equal(coordinator.runtimeOwnerSceneId, "c"); assert.deepEqual(calls, ["freeze-fast", "slow", "freeze", "fast"]);
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+test("a stale freeze cannot destroy, dry-rewire, or overwrite a newer same-slot reconcile", async () => {
+  const input = new Node(), destination = new Node(), wam = new Node();
+  const read = deferred<any>();
+  const states = new Map<string, any>([["a", { before: true }]]);
+  let destroys = 0;
+  const rack = new OrbitWamRack(
+    input as unknown as AudioNode,
+    destination as unknown as AudioNode,
+    async () => ({
+      audioNode: wam as unknown as AudioNode,
+      getState: () => read.promise,
+      destroy: () => { destroys++; },
+    }),
+    states,
+  );
+  await rack.reconcile([slot("a")]);
+  const staleFreeze = rack.freeze();
+  await rack.reconcile([slot("a")]);
+  states.set("a", { newest: true });
+  read.resolve({ stale: true });
+  await staleFreeze;
+  assert.equal(destroys, 0);
+  assert.equal(rack.getStatus("a"), "ready");
+  assert.equal(input.edges.has(wam), true);
+  assert.equal(input.edges.has(destination), false);
+  assert.deepEqual(states.get("a"), { newest: true });
+});
+
+for (const outcome of ["resolve", "reject"] as const) {
+  test(`a stale setState ${outcome} retires only its old instance`, async () => {
+    const input = new Node(), destination = new Node(), oldNode = new Node(), currentNode = new Node();
+    const setOld = deferred<void>();
+    const states = new Map<string, any>([["a", { feedback: .2 }]]);
+    let calls = 0, oldDestroys = 0, currentDestroys = 0;
+    const rack = new OrbitWamRack(
+      input as unknown as AudioNode,
+      destination as unknown as AudioNode,
+      async () => {
+        calls++;
+        if (calls === 1) return {
+          audioNode: oldNode as unknown as AudioNode,
+          setState: () => setOld.promise,
+          destroy: () => { oldDestroys++; },
+        };
+        return {
+          audioNode: currentNode as unknown as AudioNode,
+          setState: async () => undefined,
+          destroy: () => { currentDestroys++; },
+        };
+      },
+      states,
+    );
+    const first = rack.reconcile([slot("a")], 1);
+    while (calls < 1) await new Promise((done) => setTimeout(done, 0));
+    const latest = rack.reconcile([slot("a")], 2);
+    while (calls < 2) await new Promise((done) => setTimeout(done, 0));
+    if (outcome === "resolve") setOld.resolve(); else setOld.reject(new Error("stale restore failed"));
+    await Promise.all([first, latest]);
+    assert.equal(oldDestroys, 1);
+    assert.equal(currentDestroys, 0);
+    assert.equal(rack.getStatus("a"), "ready");
+    assert.equal(input.edges.has(oldNode), false);
+    assert.equal(input.edges.has(currentNode), true);
+  });
+}
+
+test("delayed old destroyGui cannot erase a newer GUI mapping or audio runtime", async () => {
+  const input = new Node(), destination = new Node(), oldNode = new Node(), currentNode = new Node();
+  const releaseOldGui = deferred<void>();
+  const oldGui = { parentElement: null, remove() {} } as unknown as HTMLElement;
+  const currentGui = { parentElement: null, remove() {} } as unknown as HTMLElement;
+  const container = { append() {} } as unknown as HTMLElement;
+  let creates = 0;
+  const rack = new OrbitWamRack(
+    input as unknown as AudioNode,
+    destination as unknown as AudioNode,
+    async () => {
+      creates++;
+      if (creates === 1) return {
+        audioNode: oldNode as unknown as AudioNode,
+        createGui: async () => oldGui,
+        destroyGui: () => releaseOldGui.promise,
+      };
+      return {
+        audioNode: currentNode as unknown as AudioNode,
+        createGui: async () => currentGui,
+        destroyGui: async () => undefined,
+      };
+    },
+    new Map(),
+  );
+  await rack.reconcile([slot("a")]);
+  await rack.mountGui("a", container);
+  const oldRemoval = rack.reconcile([]);
+  while (rack.getRuntime("a")?.disposed !== true) await new Promise((done) => setTimeout(done, 0));
+  await rack.reconcile([slot("a")]);
+  await rack.mountGui("a", container);
+  releaseOldGui.resolve();
+  await oldRemoval;
+  assert.equal(rack.getStatus("a"), "ready");
+  assert.equal(input.edges.has(currentNode), true);
+  assert.equal(input.edges.has(oldNode), false);
+  // A second mount observes the newer GUI rather than recreating it, proving
+  // the old delayed teardown did not remove its slot mapping.
+  await rack.mountGui("a", container);
 });

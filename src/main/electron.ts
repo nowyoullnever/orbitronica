@@ -74,8 +74,14 @@ function getPreferencesStore() {
   return preferencesStore;
 }
 
-ipcMain.handle("preferences:get", () => getPreferencesStore().get());
-ipcMain.handle("preferences:set", (_event, patch) => getPreferencesStore().set(patch));
+ipcMain.handle("preferences:get", (event) => {
+  requireTrustedSender(event);
+  return getPreferencesStore().get();
+});
+ipcMain.handle("preferences:set", (event, patch) => {
+  requireTrustedSender(event);
+  return getPreferencesStore().set(patch);
+});
 
 ipcMain.handle("project:save", async (event, payload: unknown, currentPath?: unknown) => {
   try {
@@ -149,8 +155,9 @@ ipcMain.handle("project:open", async (event) => {
   }
 });
 
-ipcMain.handle("recording:save", async (_event, bytes: Uint8Array, suggestedName: string) => {
+ipcMain.handle("recording:save", async (event, bytes: Uint8Array, suggestedName: string) => {
   try {
+    requireTrustedSender(event);
     const result = await dialog.showSaveDialog({
       title: "Save Recording",
       defaultPath: suggestedName,

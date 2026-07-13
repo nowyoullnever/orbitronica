@@ -22,3 +22,13 @@ test("sandboxed preload source and build contract require a CommonJS artifact", 
   }
   assert.match(preload, /onMenuAction[\s\S]*return \(\) => ipcRenderer\.removeListener/);
 });
+
+test("non-project filesystem IPC handlers also require the trusted renderer", () => {
+  const electron = read("src/main/electron.ts");
+  for (const channel of ["preferences:get", "preferences:set", "recording:save"]) {
+    const start = electron.indexOf(`ipcMain.handle("${channel}"`);
+    assert.ok(start >= 0, `missing ${channel}`);
+    const body = electron.slice(start, electron.indexOf("ipcMain.handle(", start + 1));
+    assert.match(body, /requireTrustedSender\(event\)/);
+  }
+});

@@ -57,8 +57,25 @@ function normalizeOrbit(orbit: Partial<Orbit>): Orbit {
     spliceStartAngle: orbit.spliceStartAngle === undefined ? undefined : normalizeAngle(finite(orbit.spliceStartAngle, 0)),
     sampleStart: window.start,
     sampleEnd: window.end,
-    plugins: Array.isArray(orbit.plugins) ? orbit.plugins.map((slot) => ({ ...slot })) : []
+    plugins: canonicalPluginSlots(orbit.plugins)
   };
+}
+
+/** Persist only the documented slot metadata; opaque state belongs in pluginStates. */
+function canonicalPluginSlots(value: unknown): PluginSlot[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((slot): PluginSlot[] => {
+    if (!slot || typeof slot !== "object" || Array.isArray(slot)) return [];
+    const candidate = slot as Partial<PluginSlot>;
+    if (typeof candidate.id !== "string" || typeof candidate.catalogId !== "string" ||
+      typeof candidate.pluginVersion !== "string" || typeof candidate.bypassed !== "boolean") return [];
+    return [{
+      id: candidate.id,
+      catalogId: candidate.catalogId,
+      pluginVersion: candidate.pluginVersion,
+      bypassed: candidate.bypassed
+    }];
+  });
 }
 
 function slotIds(scenes: readonly { orbits: readonly Pick<Orbit, "plugins">[] }[]) {
@@ -69,6 +86,10 @@ function slotIds(scenes: readonly { orbits: readonly Pick<Orbit, "plugins">[] }[
 
 function validatePluginSlot(slot: unknown, label: string): asserts slot is PluginSlot {
   if (!slot || typeof slot !== "object" || Array.isArray(slot)) invalidProject(`${label} is malformed.`);
+  const keys = Object.keys(slot);
+  if (keys.length !== 4 || keys.some((key) => !["id", "catalogId", "pluginVersion", "bypassed"].includes(key))) {
+    invalidProject(`${label} contains unsupported fields.`);
+  }
   const value = slot as Partial<PluginSlot>;
   if (typeof value.id !== "string" || !value.id || value.id.length > 128 ||
     typeof value.catalogId !== "string" || !value.catalogId || value.catalogId.length > 128 ||

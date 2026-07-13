@@ -1,8 +1,8 @@
 import { SimpleFilter, SoundTouch, WebAudioBufferSource } from "soundtouchjs";
 import type { Orbit, PluginSlot, SequenceRetriggerMode } from "../state/types";
 import { createFLStylePanNode, type FLStylePanNode } from "./flStylePan.ts";
-import { WamHost, type WamInsert, type WamModuleLoader } from "./wamHost.ts";
-import { getWamCatalogEntry, loadCatalogModule, resolveCatalogEntryForRestore, type WamCatalogId } from "./wamCatalog.ts";
+import { WamHost } from "./wamHost.ts";
+import { loadCatalogModule, resolveCatalogEntryForRestore } from "./wamCatalog.ts";
 import { OrbitWamRack, prunePluginStates, type PluginRuntimeStatus } from "./wamRack.ts";
 
 type ActivePlayback = {
@@ -89,7 +89,6 @@ class AudioEngine {
   private orbitRuntimes = new Map<string, OrbitAudioRuntime>();
   private orbitPanValues = new Map<string, number>();
   private readonly wamHost = new WamHost();
-  private orbitWamInserts = new Map<string, WamInsert>();
   /** State outlives runtime and document history; it is never embedded in Orbit. */
   private readonly pluginStateStore = new Map<string, import("./wamHost.ts").JsonValue>();
   private readonly orbitWamRacks = new Map<string, OrbitWamRack>();
@@ -340,45 +339,6 @@ class AudioEngine {
   setVolume(orbitId: string, volume: number) {
     const runtime = this.orbitRuntimes.get(orbitId);
     if (runtime) runtime.gainNode.gain.setValueAtTime(volume, this.getContext().currentTime);
-  }
-
-  /**
-   * Development-only WAM insertion point. It sits after orbit pan and before
-   * the orbit gain, so an inserted plugin is pre-fader and cleanup can restore
-   * the exact dry route without affecting master routing.
-   */
-  async attachOrbitWam(orbitId: string, loader: WamModuleLoader): Promise<WamInsert> {
-    const existing = this.orbitWamInserts.get(orbitId);
-    if (existing) return existing;
-    const runtime = this.orbitRuntimes.get(orbitId);
-    if (!runtime) throw new Error(`Audio runtime is unavailable for orbit "${orbitId}".`);
-    const insert = await this.wamHost.insertPreFader(
-      this.getContext(), runtime.panNode.output, runtime.gainNode, loader
-    );
-    this.orbitWamInserts.set(orbitId, insert);
-    return insert;
-  }
-
-  /** Attaches only a compiled allowlist item; documents never carry executable URLs. */
-  async attachOrbitCatalogWam(orbitId: string, catalogId: WamCatalogId): Promise<WamInsert> {
-    const entry = getWamCatalogEntry(catalogId);
-    if (!entry) throw new Error("WAM catalog entry is unavailable.");
-    const existing = this.orbitWamInserts.get(orbitId);
-    if (existing) return existing;
-    const runtime = this.orbitRuntimes.get(orbitId);
-    if (!runtime) throw new Error(`Audio runtime is unavailable for orbit "${orbitId}".`);
-    const insert = await this.wamHost.insertPreFader(
-      this.getContext(), runtime.panNode.output, runtime.gainNode, () => loadCatalogModule(entry), entry.id
-    );
-    this.orbitWamInserts.set(orbitId, insert);
-    return insert;
-  }
-
-  async detachOrbitWam(orbitId: string): Promise<void> {
-    const insert = this.orbitWamInserts.get(orbitId);
-    if (!insert) return;
-    this.orbitWamInserts.delete(orbitId);
-    await insert.cleanup();
   }
 
   private rackForOrbit(orbitId: string): OrbitWamRack {
@@ -939,11 +899,6 @@ class AudioEngine {
     this.rawFiles.delete(orbitId);
     const rack = this.orbitWamRacks.get(orbitId);
     if (rack) { this.orbitWamRacks.delete(orbitId); void rack.disposeAll(); }
-    const wamInsert = this.orbitWamInserts.get(orbitId);
-    if (wamInsert) {
-      this.orbitWamInserts.delete(orbitId);
-      void wamInsert.cleanup();
-    }
     const runtime = this.orbitRuntimes.get(orbitId);
     if (runtime) {
       try { runtime.input.disconnect(); } catch { /* already disconnected */ }

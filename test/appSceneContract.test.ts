@@ -68,6 +68,23 @@ test("scene duplication maps plugin slots after audio staging and uses the norma
   assert.match(commit, /scheduleScenePluginTransition\(previous\?\.orbits/);
 });
 
+test("metadata-only scene commits do not tear down an unchanged active WAM rack", () => {
+  const commit = body("commitSceneDocument", "publishPreRecordedSceneEdit");
+  assert.match(commit, /const shouldTransition = previous\?\.id !== target\?\.id \|\| previous\?\.orbits !== target\?\.orbits/);
+  assert.match(commit, /if \(shouldTransition\) prepareActiveSceneTransition/);
+  assert.match(commit, /if \(shouldTransition\) \{\s*scheduleScenePluginTransition/);
+});
+
+test("project save keeps every failure in the save barrier and never reports a failed serialize as success", () => {
+  const save = body("performProjectSave", "saveProject");
+  const tryStart = save.indexOf("try {");
+  const serialize = save.indexOf("serializeProject(");
+  const ipc = save.indexOf("window.orbitonicAPI.saveProject");
+  const catchStart = save.indexOf("} catch (error)");
+  assert.ok(tryStart >= 0 && tryStart < serialize && serialize < ipc && ipc < catchStart);
+  assert.match(save, /setIsDirty\(false\);\s*flash\("Project saved\."\);/);
+});
+
 test("multi-file imports pin their starting scene but allow unrelated target edits after decode", () => {
   const imports = body("handleFiles", "saveProject");
   const createOrbit = body("createOrbitFromAudio", "handleFiles");
