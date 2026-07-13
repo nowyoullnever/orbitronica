@@ -25,6 +25,20 @@ test("rack rewires only its owned edges and bypasses unavailable slots dry", asy
   assert.equal(input.edges.has(wam), false);
 });
 
+test("removing a downstream plugin severs the surviving neighbour's dangling edge to it", async () => {
+  const input = new Node(), destination = new Node(), a = new Node(), b = new Node();
+  const byId = new Map<string, Node>([["a", a], ["b", b]]);
+  const rack = new OrbitWamRack(input as unknown as AudioNode, destination as unknown as AudioNode,
+    async (s) => ({ audioNode: byId.get(s.id) as unknown as AudioNode }), new Map());
+  await rack.reconcile([slot("a"), slot("b")]);
+  assert.equal(a.edges.has(b), true); assert.equal(b.edges.has(destination), true);
+  await rack.reconcile([slot("a")]); // remove b (the downstream node)
+  // a must not keep feeding the removed/destroyed b (which owns a worklet + feedback loop).
+  assert.equal(a.edges.has(b), false, "surviving neighbour must not dangle into the removed node");
+  assert.equal(a.edges.has(destination), true, "a reconnects straight to destination");
+  assert.equal(input.edges.has(a), true);
+});
+
 test("late instance is destroyed and never wired after a newer reconcile", async () => {
   const input = new Node(), destination = new Node(), late = new Node(); let resolve!: (value: any) => void; let destroys = 0;
   const rack = new OrbitWamRack(input as unknown as AudioNode, destination as unknown as AudioNode, () => new Promise((done) => { resolve = done; }), new Map());

@@ -345,9 +345,21 @@ export class OrbitWamRack {
     if (this.runtimes.get(runtime.slotId) === runtime) {
       this.runtimes.delete(runtime.slotId);
     }
-    if (runtime.instance?.audioNode) {
-      this.disconnectOwned(this.input, runtime.instance.audioNode);
-      this.disconnectOwned(runtime.instance.audioNode, this.destination);
+    const node = runtime.instance?.audioNode;
+    if (node) {
+      this.disconnectOwned(this.input, node);
+      this.disconnectOwned(node, this.destination);
+      // rewire() only severs edges among the *current* runtimes, but this node
+      // has already left that set. Sever its edges to/from every surviving
+      // sibling here, or a chain neighbour's output keeps feeding this destroyed
+      // node (which owns an AudioWorklet and an internal feedback loop) — a
+      // dangling connection that silences the orbit in real Web Audio.
+      for (const other of this.runtimes.values()) {
+        const otherNode = other.instance?.audioNode;
+        if (!otherNode || other === runtime) continue;
+        this.disconnectOwned(otherNode, node);
+        this.disconnectOwned(node, otherNode);
+      }
     }
     await this.destroyRuntimeInstance(runtime);
   }
