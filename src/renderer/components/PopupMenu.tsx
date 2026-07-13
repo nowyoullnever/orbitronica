@@ -10,6 +10,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode
 } from "react";
+import { createPortal } from "react-dom";
 import {
   clampPopupPosition,
   navigateMenuIndex,
@@ -84,7 +85,7 @@ export function PopupMenu({
       reason === "escape" || (reason === "selection" && input === "keyboard")
     );
     onClose(reason);
-    if (shouldRestoreFocus) queueMicrotask(() => anchor.focus());
+    if (shouldRestoreFocus) queueMicrotask(() => anchor.focus({ preventScroll: true }));
   }, [anchor, onClose]);
 
   useLayoutEffect(() => {
@@ -106,7 +107,7 @@ export function PopupMenu({
       ? current
       : nextPosition);
     const firstItem = enabledMenuItems(menu)[0];
-    (firstItem ?? menu).focus();
+    (firstItem ?? menu).focus({ preventScroll: true });
   }, [position.x, position.y]);
 
   useLayoutEffect(() => {
@@ -146,7 +147,7 @@ export function PopupMenu({
       const items = enabledMenuItems(menu);
       const currentIndex = items.indexOf(document.activeElement as HTMLElement);
       const nextIndex = navigateMenuIndex(currentIndex, items.length, event.key as PopupNavigationKey);
-      if (nextIndex >= 0) items[nextIndex]?.focus();
+      if (nextIndex >= 0) items[nextIndex]?.focus({ preventScroll: true });
       return;
     }
 
@@ -168,22 +169,25 @@ export function PopupMenu({
   };
 
   return <PopupMenuContext.Provider value={{ select: (input) => requestClose("selection", input) }}>
-    <div
-      ref={menuRef}
-      id={id}
-      className={["popup-menu", className].filter(Boolean).join(" ")}
-      role="menu"
-      tabIndex={-1}
-      aria-label={ariaLabel}
-      style={{ left: clampedPosition.x, top: clampedPosition.y }}
-      onKeyDown={onKeyDown}
-      onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget)) requestClose("focus-leave");
-      }}
-      onClick={(event) => event.stopPropagation()}
-    >
-      {children}
-    </div>
+    {createPortal(
+      <div
+        ref={menuRef}
+        id={id}
+        className={["popup-menu", className].filter(Boolean).join(" ")}
+        role="menu"
+        tabIndex={-1}
+        aria-label={ariaLabel}
+        style={{ left: clampedPosition.x, top: clampedPosition.y }}
+        onKeyDown={onKeyDown}
+        onBlur={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) requestClose("focus-leave");
+        }}
+        onClick={(event) => event.stopPropagation()}
+      >
+        {children}
+      </div>,
+      document.body
+    )}
   </PopupMenuContext.Provider>;
 }
 
