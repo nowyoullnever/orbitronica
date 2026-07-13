@@ -46,9 +46,24 @@ test("App resolves catalog identity before allocation or mutation and permits du
 });
 
 test("plugin GUI lifecycle awaits creation and cleans late or StrictMode-unmounted GUI", () => {
-  assert.match(panel, /void onMount\(slot\.id, container\)/);
-  assert.match(panel, /void onUnmount\(slot\.id\)/);
-  assert.match(rack, /const gui = await createGui\(\)/);
+  assert.match(panel, /void onMountRef\.current\(slot\.id, container\)/);
+  assert.match(panel, /void onUnmountRef\.current\(slot\.id\)/);
+  assert.match(rack, /const gui = await this\.createGuiOnce\(slotId, instance\)/);
   assert.match(rack, /this\.startGuiCleanup\(instance, gui, slotId\)/);
   assert.match(rack, /ownedGui\.gui\.remove\(\)/);
+});
+
+test("plugin GUI mount effect depends only on slot identity and status, not per-render callbacks", () => {
+  // onMount/onUnmount close over selectedOrbit and are re-created on every App
+  // render; depending on them directly would tear down and rebuild a live
+  // plugin GUI (which owns drag state and an animation loop) on unrelated
+  // renders. Reading them through refs keeps the effect's identity stable.
+  assert.match(panel, /const onMountRef = useRef\(onMount\)/);
+  assert.match(panel, /const onUnmountRef = useRef\(onUnmount\)/);
+  assert.match(panel, /}, \[slot\.id, status\]\);/);
+});
+
+test("concurrent createGui calls for the same instance are coalesced into one in-flight promise", () => {
+  assert.match(rack, /private createGuiOnce\(/);
+  assert.match(rack, /if \(cached && cached\.instance === instance\) return cached\.promise;/);
 });

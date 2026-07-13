@@ -103,6 +103,38 @@ test("pending downstream destroy cannot leave a surviving plugin disconnected", 
   assert.equal(a.edges.has(destination), true);
 });
 
+test("concurrent mountGui calls for the same instance create the plugin GUI exactly once", async () => {
+  // Reproduces React StrictMode's mount -> cleanup -> mount probe: the effect
+  // fires twice before the async createGui() from the first call resolves.
+  // A naive implementation invokes createGui() twice, constructing two
+  // independent plugin GUI instances (each owning its own drag/animation
+  // state); only one ever gets destroyed if the plugin's destroyGui() is a
+  // no-op, leaking a live, invisible GUI that can no longer be interacted with.
+  const input = new Node(), destination = new Node(), wam = new Node();
+  const container = { append() {} } as unknown as HTMLElement;
+  let creates = 0;
+  let resolveGui!: (gui: HTMLElement) => void;
+  const gui = { parentElement: null, remove() {} } as unknown as HTMLElement;
+  const rack = new OrbitWamRack(
+    input as unknown as AudioNode,
+    destination as unknown as AudioNode,
+    async () => ({
+      audioNode: wam as unknown as AudioNode,
+      createGui: () => { creates++; return new Promise<HTMLElement>((resolve) => { resolveGui = resolve; }); },
+      destroyGui: async () => undefined,
+    }),
+    new Map(),
+  );
+  await rack.reconcile([slot("a")]);
+
+  const first = rack.mountGui("a", container);
+  const second = rack.mountGui("a", container);
+  resolveGui(gui);
+  await Promise.all([first, second]);
+
+  assert.equal(creates, 1, "createGui must be coalesced across concurrent mount calls");
+});
+
 test("pending destroyGui cannot delay runtime retirement or rewire", async () => {
   const input = new Node(), destination = new Node(), wam = new Node();
   const never = new Promise<void>(() => undefined);

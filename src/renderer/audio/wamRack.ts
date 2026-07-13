@@ -49,6 +49,7 @@ export class OrbitWamRack {
   private desired: readonly PluginSlot[] = [];
   private disposed = false;
   private guis = new Map<string, MountedGui>();
+  private guiCreations = new Map<string, { instance: WamPluginInstance; promise: Promise<HTMLElement | null> }>();
 
   private readonly input: AudioNode;
   private readonly destination: AudioNode;
@@ -107,30 +108,55 @@ export class OrbitWamRack {
       return;
     }
     const instance = runtime.instance;
-    const createGui = instance.createGui!;
-    try {
-      const gui = await createGui();
-      if (
-        this.disposed ||
-        runtime.disposed ||
-        this.runtimes.get(slotId) !== runtime ||
-        runtime.instance !== instance
-      ) {
-        gui.remove();
-        this.startGuiCleanup(instance, gui, slotId);
-        return;
-      }
-      const prior = this.guis.get(slotId);
-      if (prior) {
-        gui.remove();
-        this.startGuiCleanup(instance, gui, slotId);
-        return;
-      }
-      this.guis.set(slotId, { gui, runtime });
-      container.append(gui);
-    } catch {
-      this.diagnostic("hydrate-failed", slotId);
+    const gui = await this.createGuiOnce(slotId, instance);
+    if (!gui) return;
+    if (
+      this.disposed ||
+      runtime.disposed ||
+      this.runtimes.get(slotId) !== runtime ||
+      runtime.instance !== instance
+    ) {
+      gui.remove();
+      this.startGuiCleanup(instance, gui, slotId);
+      return;
     }
+    const prior = this.guis.get(slotId);
+    if (prior) {
+      // A concurrent mountGui call (e.g. React StrictMode's mount/cleanup/mount
+      // probe) may await the same in-flight creation. Re-parent the shared
+      // result instead of destroying and re-creating a plugin GUI that owns
+      // drag state and its own animation loop.
+      if (prior.gui.parentElement !== container) container.append(prior.gui);
+      return;
+    }
+    this.guis.set(slotId, { gui, runtime });
+    container.append(gui);
+  }
+  /** Coalesces concurrent createGui() calls for the same instance into one
+   * in-flight promise so a plugin GUI (and its internal state/animation loop)
+   * is constructed exactly once even when callers race. */
+  private createGuiOnce(
+    slotId: string,
+    instance: WamPluginInstance,
+  ): Promise<HTMLElement | null> {
+    const cached = this.guiCreations.get(slotId);
+    if (cached && cached.instance === instance) return cached.promise;
+    const createGui = instance.createGui!;
+    const promise = (async () => {
+      try {
+        return await createGui();
+      } catch {
+        this.diagnostic("hydrate-failed", slotId);
+        return null;
+      }
+    })();
+    this.guiCreations.set(slotId, { instance, promise });
+    void promise.finally(() => {
+      if (this.guiCreations.get(slotId)?.promise === promise) {
+        this.guiCreations.delete(slotId);
+      }
+    });
+    return promise;
   }
   async unmountGui(
     slotId: string,

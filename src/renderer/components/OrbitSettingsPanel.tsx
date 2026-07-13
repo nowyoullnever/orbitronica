@@ -64,12 +64,21 @@ function PluginGui({ slot, status, onMount, onUnmount }: {
   onUnmount: (slotId: string) => Promise<void>;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  // onMount/onUnmount are re-created every App render (they close over
+  // selectedOrbit). Reading them through refs keeps this effect's dependency
+  // list to [slot.id, status], so a live plugin GUI (which owns drag state and
+  // its own animation loop) is mounted once and survives unrelated re-renders
+  // instead of being torn down and rebuilt on every keystroke elsewhere in the app.
+  const onMountRef = useRef(onMount);
+  onMountRef.current = onMount;
+  const onUnmountRef = useRef(onUnmount);
+  onUnmountRef.current = onUnmount;
   useEffect(() => {
     const container = ref.current;
     if (!container || status !== "ready") return;
-    void onMount(slot.id, container);
-    return () => { void onUnmount(slot.id); };
-  }, [slot.id, status, onMount, onUnmount]);
+    void onMountRef.current(slot.id, container);
+    return () => { void onUnmountRef.current(slot.id); };
+  }, [slot.id, status]);
   return <div className="wam-plugin-gui" ref={ref} aria-label="Plugin editor" />;
 }
 
