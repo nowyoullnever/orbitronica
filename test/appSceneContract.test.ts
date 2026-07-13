@@ -37,6 +37,7 @@ test("scene transitions advance playback epochs and reject stale Canvas callback
   const transition = body("prepareActiveSceneTransition", "activateScene");
   const soundGate = body("canOrbitSound", "deletePlanet");
   assert.match(activate, /resetParameterHistoryWindow\(\)/);
+  assert.match(activate, /scheduleScenePluginTransition/);
   assert.match(transition, /designateAudibleScene/);
   assert.match(transition, /playbackEpoch\.current \+= 1/);
   assert.match(soundGate, /audibleSceneId\.current/);
@@ -46,6 +47,42 @@ test("scene transitions advance playback epochs and reject stale Canvas callback
   assert.match(app, /onSequencePlay=\{\(orbit, planet, bar, callback\)/);
   assert.match(app, /onSequenceStop=\{\(orbitId, callback\)/);
   assert.match(app, /!isCurrentPlaybackCallback\(callback\.sceneId, callback\.epoch\)/);
+});
+
+test("all document replacement paths reconcile the active WAM scene", () => {
+  const undoRedo = body("restoreSnapshot", "undo");
+  const duplicate = body("duplicateOrbit", "copyPlanet");
+  const open = body("openProject", "toggleRecording");
+  assert.match(undoRedo, /scheduleScenePluginTransition/);
+  assert.match(duplicate, /reconcileOrbitPlugins\(duplicate\)/);
+  assert.match(open, /restoredActiveOrbits/);
+  assert.match(open, /scheduleScenePluginTransition\(previousOrbits, restoredActiveOrbits/);
+});
+
+test("scene duplication maps plugin slots after audio staging and uses the normal gate-first transition", () => {
+  const duplicate = body("duplicateActiveScene", "restoreSnapshot");
+  const commit = body("commitSceneDocument", "publishPreRecordedSceneEdit");
+  assert.ok(duplicate.indexOf("stageSceneDuplicate") < duplicate.indexOf("copyPluginStatesBySlotMap"));
+  assert.match(duplicate, /createPluginSlotId: \(\) => projectId\(\)/);
+  assert.match(duplicate, /removePluginSlotStates\(copiedPluginStateIds\)/);
+  assert.match(commit, /scheduleScenePluginTransition\(previous\?\.orbits/);
+});
+
+test("metadata-only scene commits do not tear down an unchanged active WAM rack", () => {
+  const commit = body("commitSceneDocument", "publishPreRecordedSceneEdit");
+  assert.match(commit, /const shouldTransition = previous\?\.id !== target\?\.id \|\| previous\?\.orbits !== target\?\.orbits/);
+  assert.match(commit, /if \(shouldTransition\) prepareActiveSceneTransition/);
+  assert.match(commit, /if \(shouldTransition\) \{\s*scheduleScenePluginTransition/);
+});
+
+test("project save keeps every failure in the save barrier and never reports a failed serialize as success", () => {
+  const save = body("performProjectSave", "saveProject");
+  const tryStart = save.indexOf("try {");
+  const serialize = save.indexOf("serializeProject(");
+  const ipc = save.indexOf("window.orbitonicAPI.saveProject");
+  const catchStart = save.indexOf("} catch (error)");
+  assert.ok(tryStart >= 0 && tryStart < serialize && serialize < ipc && ipc < catchStart);
+  assert.match(save, /setIsDirty\(false\);\s*flash\("Project saved\."\);/);
 });
 
 test("multi-file imports pin their starting scene but allow unrelated target edits after decode", () => {

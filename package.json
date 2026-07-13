@@ -7,12 +7,15 @@
   "main": "dist-electron/electron.js",
   "scripts": {
     "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron . --dev\"",
-    "build": "tsc -b --force && node scripts/verify-preload.mjs && vite build && electron-builder --dir",
+    "verify:wam-assets": "node scripts/verify-wam-assets.mjs",
+    "build": "npm run verify:wam-assets && tsc -b --force && node scripts/verify-preload.mjs && vite build && electron-builder --dir",
+    "smoke:packaged-wam": "npm run build && node scripts/verify-wam-assets.mjs dist && node scripts/packaged-wam-smoke.mjs",
     "test": "node --experimental-strip-types --test test/*.test.ts tests/*.test.ts",
     "preview": "vite preview",
     "start": "electron ."
   },
   "dependencies": {
+    "@webaudiomodules/sdk": "0.0.12",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "soundtouchjs": "^0.1.30"

@@ -329,6 +329,23 @@ test("duplicate remaps all IDs and references, regenerates splice bars, and clea
   assert.equal(collectSceneIds([source, plan.scene]).size, 10);
 });
 
+test("scene duplication gives every WAM slot a fresh globally reserved ID and explicit state map", () => {
+  const source = scene({ orbits: [orbit("o", { plugins: [
+    { id: "slot-a", catalogId: "burns-simple-delay", pluginVersion: "0.2.54", bypassed: false },
+    { id: "slot-b", catalogId: "burns-simple-delay", pluginVersion: "0.2.54", bypassed: true }
+  ] })] });
+  const plan = planSceneDuplicate(source, {
+    createId: ids("scene-copy", "orbit-copy"),
+    createPluginSlotId: ids("slot-copy-a", "slot-copy-b"),
+    occupiedIds: ["history-slot"]
+  });
+  assert.deepEqual(plan.scene.orbits[0].plugins?.map((slot) => slot.id), ["slot-copy-a", "slot-copy-b"]);
+  assert.deepEqual([...plan.pluginSlotIdMap], [["slot-a", "slot-copy-a"], ["slot-b", "slot-copy-b"]]);
+  assert.equal(collectHistoryProjectIds([source, plan.scene]).has("slot-copy-a"), true);
+  const allocator = createProjectIdAllocatorForScenes([source, plan.scene], ids("slot-copy-a", "fresh"));
+  assert.equal(allocator.next(), "fresh", "slot IDs reserve the same project namespace as entity IDs");
+});
+
 test("duplicate remaps a selected derived splice bar to its regenerated counterpart", () => {
   const sourceOrbit = orbit("o", { spliceCount: 2 });
   const source = scene({

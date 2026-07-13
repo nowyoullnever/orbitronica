@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from "electron";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +7,7 @@ import {
 } from "./projectAssets.js";
 import { PreferencesStore } from "./preferences.js";
 import { newProjectPath, projectDialogExtensions } from "./projectPaths.js";
+import { validateProjectSavePayload } from "./projectPayload.js";
 import { installAppMenu } from "./appMenu.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -14,6 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 app.setName("Orbitronica");
 
 function createWindow() {
+  const wamSmoke = process.argv.includes("--wam-smoke");
   const win = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -29,32 +31,65 @@ function createWindow() {
       backgroundThrottling: false
     }
   });
+  mainWindow = win;
+
+  if (wamSmoke) {
+    const timeout = setTimeout(() => {
+      console.error("ORBITRONICA_WAM_SMOKE {\"status\":\"fail\",\"error\":\"renderer timeout\"}");
+      app.exit(1);
+    }, 30_000);
+    win.webContents.on("console-message", (_event, _level, message) => {
+      if (!message.startsWith("ORBITRONICA_WAM_SMOKE ")) return;
+      clearTimeout(timeout);
+      console.log(message);
+      app.exit(message.includes('"status":"pass"') ? 0 : 1);
+    });
+    win.webContents.on("did-fail-load", (_event, _errorCode, errorDescription) => {
+      clearTimeout(timeout);
+      console.error(`ORBITRONICA_WAM_SMOKE {"status":"fail","error":${JSON.stringify(errorDescription)}}`);
+      app.exit(1);
+    });
+  }
 
   if (process.argv.includes("--dev")) {
     void win.loadURL("http://localhost:5173");
   } else {
-    void win.loadFile(path.join(__dirname, "../dist/index.html"));
+    void win.loadFile(path.join(__dirname, "../dist", wamSmoke ? "wam-smoke.html" : "index.html"));
   }
 }
 
-type SavePayload = {
-  project: Record<string, unknown> & { projectName?: string };
-  assets: Array<{ orbitId: string; fileName: string; bytes: Uint8Array }>;
-};
-
 let preferencesStore: PreferencesStore | undefined;
+let mainWindow: BrowserWindow | undefined;
+let activeProjectPath: string | undefined;
+
+function ipcFailure(message: string): never { throw new Error(`Invalid project IPC payload: ${message}`); }
+function requireTrustedSender(event: IpcMainInvokeEvent) {
+  // A sandboxed renderer can still be compromised; only the window we created may
+  // request project filesystem operations. Do not use sender supplied paths as authority.
+  if (!mainWindow || event.sender !== mainWindow.webContents) ipcFailure("untrusted sender");
+}
 
 function getPreferencesStore() {
   preferencesStore ??= new PreferencesStore(path.join(app.getPath("userData"), "preferences.json"));
   return preferencesStore;
 }
 
-ipcMain.handle("preferences:get", () => getPreferencesStore().get());
-ipcMain.handle("preferences:set", (_event, patch) => getPreferencesStore().set(patch));
+ipcMain.handle("preferences:get", (event) => {
+  requireTrustedSender(event);
+  return getPreferencesStore().get();
+});
+ipcMain.handle("preferences:set", (event, patch) => {
+  requireTrustedSender(event);
+  return getPreferencesStore().set(patch);
+});
 
-ipcMain.handle("project:save", async (_event, payload: SavePayload, currentPath?: string) => {
+ipcMain.handle("project:save", async (event, payload: unknown, currentPath?: unknown) => {
   try {
-    let projectPath = currentPath;
+    requireTrustedSender(event);
+    validateProjectSavePayload(payload);
+    // The renderer can request a save, but it never grants itself a filesystem path.
+    // Existing paths must have originated from this main process's dialog/open flow.
+    let projectPath = typeof currentPath === "string" && currentPath === activeProjectPath ? activeProjectPath : undefined;
     if (!projectPath) {
       const result = await dialog.showSaveDialog({
         title: "Save Orbitronica Project",
@@ -81,14 +116,16 @@ ipcMain.handle("project:save", async (_event, payload: SavePayload, currentPath?
     }
     const project = rewriteProjectAudioPaths(payload.project, audioPaths);
     await fs.writeFile(projectPath, JSON.stringify(project, null, 2), "utf8");
+    activeProjectPath = projectPath;
     return { ok: true, path: projectPath };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
 
-ipcMain.handle("project:open", async () => {
+ipcMain.handle("project:open", async (event) => {
   try {
+    requireTrustedSender(event);
     const result = await dialog.showOpenDialog({
       title: "Open Orbitronica Project",
       properties: ["openFile"],
@@ -111,14 +148,16 @@ ipcMain.handle("project:open", async () => {
         assets.push({ orbitId: descriptor.orbitId, error: `Missing audio: ${descriptor.audioPath}` });
       }
     }
+    activeProjectPath = projectPath;
     return { ok: true, path: projectPath, text, assets };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
 
-ipcMain.handle("recording:save", async (_event, bytes: Uint8Array, suggestedName: string) => {
+ipcMain.handle("recording:save", async (event, bytes: Uint8Array, suggestedName: string) => {
   try {
+    requireTrustedSender(event);
     const result = await dialog.showSaveDialog({
       title: "Save Recording",
       defaultPath: suggestedName,

@@ -1,11 +1,13 @@
-import { useEffect, useState } from "react";
-import type { Orbit, OrbitMode, Planet, SequenceRetriggerMode } from "../state/types";
+import { useEffect, useRef, useState } from "react";
+import type { Orbit, OrbitMode, Planet, PluginSlot, SequenceRetriggerMode } from "../state/types";
+import { getWamCatalogEntry, WAM_CATALOG, type WamCatalogId } from "../audio/wamCatalog";
 import {
   getOrbitTapeRate, getPlanetEffectiveSpeed, getSampleEnd, getSampleStart,
   getTapeStyleRuntimeRateOnly, rateToCents, SPLICE_MAX_PIECES
 } from "../utils/geometry";
 import { SampleTrimEditor } from "./SampleTrimEditor";
 import { normalizeSampleWindow } from "../utils/sampleTrim";
+import { PopupMenu, PopupMenuItem, type PopupPosition } from "./PopupMenu";
 
 type Props = {
   orbit: Orbit | null;
@@ -46,7 +48,103 @@ type Props = {
   onCopyPlanet: (planetId: string) => void;
   onPastePlanetToOrbit: (orbitId: string) => void;
   onDeletePlanet: (planetId: string) => void;
+  onAddPlugin: (orbitId: string, catalogId: WamCatalogId) => void;
+  onMovePlugin: (slotId: string, direction: -1 | 1) => void;
+  onBypassPlugin: (slotId: string, bypassed: boolean) => void;
+  onRemovePlugin: (slotId: string) => void;
+  pluginStatus: (slotId: string) => "idle" | "loading" | "ready" | "unavailable";
+  onMountPluginGui: (slotId: string, container: HTMLElement) => Promise<void>;
+  onUnmountPluginGui: (slotId: string) => Promise<void>;
 };
+
+function PluginGui({ slot, status, onMount, onUnmount }: {
+  slot: PluginSlot;
+  status: "idle" | "loading" | "ready" | "unavailable";
+  onMount: (slotId: string, container: HTMLElement) => Promise<void>;
+  onUnmount: (slotId: string) => Promise<void>;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  // onMount/onUnmount are re-created every App render (they close over
+  // selectedOrbit). Reading them through refs keeps this effect's dependency
+  // list to [slot.id, status], so a live plugin GUI (which owns drag state and
+  // its own animation loop) is mounted once and survives unrelated re-renders
+  // instead of being torn down and rebuilt on every keystroke elsewhere in the app.
+  const onMountRef = useRef(onMount);
+  onMountRef.current = onMount;
+  const onUnmountRef = useRef(onUnmount);
+  onUnmountRef.current = onUnmount;
+  useEffect(() => {
+    const container = ref.current;
+    if (!container || status !== "ready") return;
+    void onMountRef.current(slot.id, container);
+    return () => { void onUnmountRef.current(slot.id); };
+  }, [slot.id, status]);
+  return <div className="wam-plugin-gui" ref={ref} aria-label="Plugin editor" />;
+}
+
+function PluginRack({ orbit, props }: { orbit: Orbit; props: Props }) {
+  const slots = orbit.plugins ?? [];
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const [selectorPosition, setSelectorPosition] = useState<PopupPosition | null>(null);
+  const selectorId = "orbit-plugin-selector";
+
+  return <section className="settings-section plugin-rack" data-testid="plugin-rack">
+    <div className="panel-eyebrow">PLUGINS - {slots.length}</div>
+    <button
+      ref={addButtonRef}
+      type="button"
+      aria-haspopup="menu"
+      aria-expanded={selectorPosition !== null}
+      aria-controls={selectorPosition ? selectorId : undefined}
+      onClick={(event) => {
+        if (selectorPosition) {
+          setSelectorPosition(null);
+          return;
+        }
+        if (event.detail > 0) {
+          setSelectorPosition({ x: event.clientX, y: event.clientY });
+          return;
+        }
+        const bounds = event.currentTarget.getBoundingClientRect();
+        setSelectorPosition({ x: bounds.left, y: bounds.bottom });
+      }}
+    >Add</button>
+    {selectorPosition && <PopupMenu
+      id={selectorId}
+      className="plugin-selector"
+      position={selectorPosition}
+      anchor={addButtonRef.current}
+      ownerKey={orbit.id}
+      ariaLabel="Add plugin"
+      onClose={() => setSelectorPosition(null)}
+    >
+      {Object.values(WAM_CATALOG).map((entry) => <PopupMenuItem
+        key={entry.id}
+        onClick={() => props.onAddPlugin(orbit.id, entry.id)}
+      >{entry.displayName}</PopupMenuItem>)}
+    </PopupMenu>}
+    {slots.length === 0 && <p className="no-planets">Add an approved effect to this orbit.</p>}
+    {slots.map((slot, index) => {
+      const status = props.pluginStatus(slot.id);
+      return <div className="plugin-slot" key={slot.id} data-plugin-status={status}>
+        <div className="plugin-slot-header">
+          <strong>{getWamCatalogEntry(slot.catalogId)?.displayName ?? "Unavailable plugin"}</strong>
+          <small>{status === "ready" ? (slot.bypassed ? "bypassed" : "ready") : status}</small>
+        </div>
+        <div className="plugin-actions">
+          <button type="button" aria-label="Move plugin earlier" disabled={index === 0} onClick={() => props.onMovePlugin(slot.id, -1)}>↑</button>
+          <button type="button" aria-label="Move plugin later" disabled={index === slots.length - 1} onClick={() => props.onMovePlugin(slot.id, 1)}>↓</button>
+          <label><input type="checkbox" checked={slot.bypassed} onChange={(event) => props.onBypassPlugin(slot.id, event.target.checked)} /> Bypass</label>
+          <button type="button" className="danger" onClick={() => props.onRemovePlugin(slot.id)}>Remove</button>
+        </div>
+        {status === "unavailable" && <p role="status">Plugin unavailable; its saved state is retained.</p>}
+        {status === "loading" && <p role="status">Loading plugin…</p>}
+        {status === "ready" && !slot.bypassed && <PluginGui slot={slot} status={status}
+          onMount={props.onMountPluginGui} onUnmount={props.onUnmountPluginGui} />}
+      </div>;
+    })}
+  </section>;
+}
 
 function NameEditor({ value, onCommit }: { value: string; onCommit: (value: string) => void }) {
   const [draft, setDraft] = useState(value);
@@ -268,6 +366,8 @@ export function OrbitSettingsPanel(props: Props) {
             <button className="danger" onClick={props.onDeleteOrbit}>Delete Orbit</button>
           </div>
         </section>
+
+        <PluginRack orbit={orbit} props={props} />
 
         <section className="settings-section">
           <div className="panel-eyebrow">PLANETS - {orbitPlanets.length}</div>

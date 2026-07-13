@@ -24,15 +24,15 @@ test("all user-facing application identity surfaces say Orbitronica", () => {
   assert.match(serializer, /Unsupported Orbitronica schema version/);
 });
 
-test("branding keeps durable project and preload compatibility tokens unchanged", () => {
+test("branding writes v6 Orbitronica while retaining legacy v5 and preload compatibility", () => {
   const serializer = read("src/renderer/project/projectSerializer.ts");
   const types = read("src/renderer/state/types.ts");
   const preload = read("src/main/preload.cts");
   const globals = read("src/renderer/global.d.ts");
 
-  assert.match(serializer, /appName: "Orbitonic"/);
-  assert.match(serializer, /root\.appName !== "Orbitonic"/);
-  assert.match(types, /appName: "Orbitonic"/);
+  assert.match(serializer, /appName: "Orbitronica"/);
+  assert.match(serializer, /raw\.appName !== "Orbitonic"/);
+  assert.match(types, /appName: "Orbitronica"/);
   assert.match(preload, /exposeInMainWorld\("orbitonicAPI"/);
   assert.match(globals, /orbitonicAPI\?:/);
 });

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { SetStateAction } from "react";
 import { audioEngine, type ProjectAudioInput } from "./audio/audioEngine";
+import { collectRetainedPluginSlotIds } from "./audio/wamRack";
+import { getWamCatalogEntry } from "./audio/wamCatalog";
 import { encodeWav, type WavSampleFormat } from "./audio/wavEncoder";
 import { CanvasStage } from "./components/CanvasStage";
 import { ContextMenu } from "./components/ContextMenu";
@@ -110,6 +112,7 @@ export default function App() {
   const [clipboard, setClipboard] = useState<AppClipboard>(null);
   const [isDuplicatingScene, setIsDuplicatingScene] = useState(false);
   const [waveformPeaksByOrbit, setWaveformPeaksByOrbit] = useState<Map<string, Float32Array>>(() => new Map());
+  const [, setPluginRuntimeRevision] = useState(0);
   const uploadPoint = useRef({ x: 450, y: 350 });
   const fileInput = useRef<HTMLInputElement>(null);
   const undoStack = useRef<HistorySnapshot[]>([]);
@@ -118,8 +121,10 @@ export default function App() {
   const projectIds = useRef(initialProjectIds);
   const parameterHistoryTimer = useRef<number>();
   // Updated synchronously at the transition boundary so stale Canvas callbacks cannot revive old audio.
-  const audibleSceneId = useRef(activeSceneId);
+  const audibleSceneId = useRef<string | null>(activeSceneId);
   const playbackEpoch = useRef(0);
+  // Separate from playbackEpoch: this cancels stale WAM hydration, not Canvas callbacks.
+  const sceneTransitionEpoch = useRef(0);
   const clipboardRef = useRef<AppClipboard>(null);
   const sceneDuplicationPending = useRef(false);
   const recordingInFlight = useRef(false);
@@ -225,6 +230,8 @@ export default function App() {
 
   function pruneUnreferencedAudio(currentScenes = stateRef.current.scenes) {
     audioEngine.pruneOrbits(collectRetainedOrbitIds(currentScenes, undoStack.current, redoStack.current));
+    const retainedScenes = [currentScenes, ...undoStack.current.map((item) => item.scenes), ...redoStack.current.map((item) => item.scenes)].flat();
+    audioEngine.prunePluginStateSlots(collectRetainedPluginSlotIds(retainedScenes));
   }
 
   function pushHistory() {
@@ -274,11 +281,28 @@ export default function App() {
     }, force);
   }
 
+  /** One reconciliation path for scene tabs, open, undo/redo and structural edits. */
+  function scheduleScenePluginTransition(previous: readonly Orbit[], target: readonly Orbit[], targetSceneId: string) {
+    const epoch = ++sceneTransitionEpoch.current;
+    audibleSceneId.current = null;
+    void audioEngine.transitionScenePluginRacks(previous, target, epoch, targetSceneId).then((ownsTarget) => {
+      if (ownsTarget && sceneTransitionEpoch.current === epoch) audibleSceneId.current = targetSceneId;
+    }).catch(() => {
+      // A single unavailable slot is dry; the rest of the target may remain audible.
+      if (sceneTransitionEpoch.current === epoch) audibleSceneId.current = targetSceneId;
+    });
+  }
+
   function activateScene(nextSceneId: string) {
     if (!stateRef.current.scenes.some((scene) => scene.id === nextSceneId)) return;
     if (!prepareActiveSceneTransition(nextSceneId)) return;
     resetParameterHistoryWindow();
     setActiveSceneId(nextSceneId);
+    // Publishing the target selection stays synchronous for the existing tab
+    // contract. Audio remains gated until the newest hydration transaction settles.
+    const previous = stateRef.current.scenes.find((scene) => scene.id === stateRef.current.activeSceneId);
+    const target = stateRef.current.scenes.find((scene) => scene.id === nextSceneId);
+    scheduleScenePluginTransition(previous?.orbits ?? [], target?.orbits ?? [], nextSceneId);
   }
 
   function commitSceneDocument(nextScenes: Scene[], nextActiveSceneId: string) {
@@ -286,9 +310,17 @@ export default function App() {
     undoStack.current.push(snapshot());
     if (undoStack.current.length > MAX_HISTORY) undoStack.current.shift();
     redoStack.current = [];
-    prepareActiveSceneTransition(nextActiveSceneId);
+    const previous = stateRef.current.scenes.find((scene) => scene.id === stateRef.current.activeSceneId);
+    const target = nextScenes.find((scene) => scene.id === nextActiveSceneId);
+    // Scene metadata changes retain the orbit array by reference. Rehydrating an
+    // unchanged active rack would destroy live WAMs and cause an avoidable dropout.
+    const shouldTransition = previous?.id !== target?.id || previous?.orbits !== target?.orbits;
+    if (shouldTransition) prepareActiveSceneTransition(nextActiveSceneId);
     setScenes(nextScenes);
     setActiveSceneId(nextActiveSceneId);
+    if (shouldTransition) {
+      scheduleScenePluginTransition(previous?.orbits ?? [], target?.orbits ?? [], nextActiveSceneId);
+    }
     pruneUnreferencedAudio(nextScenes);
     setIsDirty(true);
   }
@@ -338,6 +370,7 @@ export default function App() {
         name: `${source.name} Copy`,
         createId: projectId,
         createOrbitId: (orbit) => projectOrbitId(orbit.spliceCount),
+        createPluginSlotId: () => projectId(),
         occupiedIds: collectHistoryProjectIds(baseScenes, undoStack.current, redoStack.current)
       });
     } catch (error) {
@@ -346,6 +379,7 @@ export default function App() {
     }
     sceneDuplicationPending.current = true;
     setIsDuplicatingScene(true);
+    let copiedPluginStateIds: readonly string[] = [];
     try {
       const duplicate = await stageSceneDuplicate(source, plan, {
         stage: (sourceOrbitId, targetOrbitId) => {
@@ -357,21 +391,33 @@ export default function App() {
         },
         rollback: (targetOrbitId) => audioEngine.removeOrbit(targetOrbitId)
       });
+      // External state is copied only after every target audio runtime staged.
+      copiedPluginStateIds = audioEngine.copyPluginStatesBySlotMap(plan.pluginSlotIdMap);
       if (stateRef.current.scenes !== baseScenes) {
         for (const targetOrbitId of plan.orbitIdMap.values()) audioEngine.removeOrbit(targetOrbitId);
+        audioEngine.removePluginSlotStates(copiedPluginStateIds);
         flash("Scene changed while duplication was in progress; duplication was canceled.");
         return;
       }
       const sourceIndex = baseScenes.findIndex((scene) => scene.id === source.id);
       const next = baseScenes.slice();
       next.splice(sourceIndex + 1, 0, duplicate);
-      commitSceneDocument(next, duplicate.id);
+      try { commitSceneDocument(next, duplicate.id); }
+      catch (error) {
+        for (const targetOrbitId of plan.orbitIdMap.values()) audioEngine.removeOrbit(targetOrbitId);
+        audioEngine.removePluginSlotStates(copiedPluginStateIds);
+        throw error;
+      }
       for (const planet of duplicate.planets) {
         if (planet.speed !== 1 || planet.pitchCents) {
           void audioEngine.processPlanetBuffer(planet.orbitId, planet.id, planet.speed, planet.pitchCents);
         }
       }
     } catch (error) {
+      // stageSceneDuplicate rolls back partial audio itself; this additionally
+      // covers a later state-copy or document-publication failure.
+      for (const targetOrbitId of plan.orbitIdMap.values()) audioEngine.removeOrbit(targetOrbitId);
+      audioEngine.removePluginSlotStates(copiedPluginStateIds);
       flash(error instanceof Error ? error.message : "Scene could not be duplicated.");
     } finally {
       sceneDuplicationPending.current = false;
@@ -390,6 +436,9 @@ export default function App() {
       audioEngine.setVolume(orbitId, volume);
       audioEngine.setOrbitAudioPan(orbitId, pan);
     });
+    const prior = stateRef.current.scenes.find((scene) => scene.id === stateRef.current.activeSceneId);
+    const target = next.scenes.find((scene) => scene.id === next.activeSceneId);
+    scheduleScenePluginTransition(prior?.orbits ?? [], target?.orbits ?? [], next.activeSceneId);
   }
 
   function undo() {
@@ -531,7 +580,8 @@ export default function App() {
     const newOrbitId = projectOrbitId(source.spliceCount);
     const duplicate: Orbit = {
       ...source, id: newOrbitId, name: `${source.name} Copy`, x: source.x + 40, y: source.y + 40,
-      isMuted: false, isSolo: false
+      isMuted: false, isSolo: false,
+      plugins: source.plugins?.map((slot) => ({ ...slot, id: projectId() }))
     };
     const copiedPlanets = stateRef.current.planets.filter((planet) => planet.orbitId === source.id).map((planet) => {
       const newId = projectId();
@@ -559,6 +609,7 @@ export default function App() {
       flash("The orbit audio is unavailable.");
       return;
     }
+    audioEngine.copyPluginSlotStates(source.plugins, duplicate.plugins);
     audioEngine.setOrbitAudioPan(newOrbitId, duplicate.audioPan);
     try {
       commitSceneDocument(nextScenes, current.activeSceneId);
@@ -567,6 +618,8 @@ export default function App() {
       flash(error instanceof Error ? error.message : "The orbit could not be duplicated.");
       return;
     }
+    // Duplicates receive new slot IDs synchronously; runtime creation stays lazy.
+    reconcileOrbitPlugins(duplicate);
     for (const planet of copiedPlanets) {
       if (planet.speed !== 1 || planet.pitchCents) {
         void audioEngine.processPlanetBuffer(newOrbitId, planet.id, planet.speed, planet.pitchCents);
@@ -835,20 +888,27 @@ export default function App() {
 
   async function performProjectSave(currentPath?: string) {
     if (!window.orbitonicAPI) return flash("Project saving is only available in the desktop app.");
-    const project = serializeProject(
-      projectName || "Untitled Session", scenes, activeSceneId, lastLoopBarLengthRadians,
-      { volume: masterVolume, pan: masterPan }
-    );
-    const assets = scenes.flatMap((scene) => scene.orbits).flatMap((orbit) => {
-      const asset = audioEngine.getProjectAsset(orbit.id);
-      return asset ? [{ orbitId: orbit.id, fileName: asset.fileName, bytes: asset.bytes }] : [];
-    });
-    const result = await window.orbitonicAPI.saveProject({ project, assets }, currentPath);
-    if (result.ok) {
-      setProjectPath(result.path);
-      setIsDirty(false);
-      flash("Project saved.");
-    } else if (!result.canceled) flash(result.error ?? "Project could not be saved.");
+    // This is a save barrier, not dirty tracking: every live WAM is sampled on
+    // every save. The serializer only reads the committed store after the barrier.
+    try {
+      await audioEngine.snapshotOrbitPluginStates();
+      const project = serializeProject(
+        projectName || "Untitled Session", scenes, activeSceneId, lastLoopBarLengthRadians,
+        { volume: masterVolume, pan: masterPan }, audioEngine.getPluginStateStore()
+      );
+      const assets = scenes.flatMap((scene) => scene.orbits).flatMap((orbit) => {
+        const asset = audioEngine.getProjectAsset(orbit.id);
+        return asset ? [{ orbitId: orbit.id, fileName: asset.fileName, bytes: asset.bytes }] : [];
+      });
+      const result = await window.orbitonicAPI.saveProject({ project, assets }, currentPath);
+      if (result.ok) {
+        setProjectPath(result.path);
+        setIsDirty(false);
+        flash("Project saved.");
+      } else if (!result.canceled) flash(result.error ?? "Project could not be saved.");
+    } catch (error) {
+      flash(error instanceof Error ? error.message : "Project could not be saved.");
+    }
   }
 
   async function saveProject() {
@@ -869,6 +929,9 @@ export default function App() {
     }
     try {
       const project = parseProject(result.text);
+      // Parsing has already validated JSON shape/limits. Keep the restored store
+      // frozen until the active-scene transition hydrates its slots.
+      const restoredPluginStates = new Map(Object.entries(project.pluginStates));
       const assetMap = new Map((result.assets ?? []).map((asset) => [asset.orbitId, asset]));
       const missing: string[] = [];
       const restoredScenes: Scene[] = [];
@@ -918,9 +981,12 @@ export default function App() {
           audioEngine.replaceProjectAudio(stagedAudio);
         },
         publish: () => {
+          const previousOrbits = stateRef.current.scenes.find((scene) => scene.id === stateRef.current.activeSceneId)?.orbits ?? [];
+          const restoredActiveOrbits = restoredScenes.find((scene) => scene.id === project.activeSceneId)?.orbits ?? [];
           prepareActiveSceneTransition(project.activeSceneId, true);
           resetParameterHistoryWindow();
           projectIds.current = restoredProjectIds;
+          audioEngine.replacePluginStateStore(restoredPluginStates);
           setScenes(restoredScenes);
           setActiveSceneId(project.activeSceneId);
           setMasterVolume(project.master.volume);
@@ -932,6 +998,9 @@ export default function App() {
           setIsDirty(false);
           undoStack.current = [];
           redoStack.current = [];
+          // Only the active scene is hydrated after open; inactive scenes retain
+          // validated blobs until their own gate-first activation transaction.
+          scheduleScenePluginTransition(previousOrbits, restoredActiveOrbits, project.activeSceneId);
           if (missing.length) flash(`Project loaded with missing audio: ${missing.join(", ")}`, 5000);
           else flash("Project loaded.");
           for (const scene of restoredScenes) for (const planet of scene.planets) {
@@ -990,6 +1059,24 @@ export default function App() {
   function updateOrbit(orbitId: string, changes: Partial<Orbit>) {
     pushHistory();
     setOrbits((current) => current.map((orbit) => orbit.id === orbitId ? { ...orbit, ...changes } : orbit));
+  }
+
+  function reconcileOrbitPlugins(orbit: Orbit) {
+    setPluginRuntimeRevision((revision) => revision + 1);
+    void audioEngine.reconcileOrbitPluginRack(orbit.id, orbit.plugins ?? []).catch(() => {
+      // The rack publishes an unavailable/dry placeholder rather than breaking
+      // the native orbit path. UI status is refreshed in either outcome.
+    }).finally(() => setPluginRuntimeRevision((revision) => revision + 1));
+  }
+
+  function changeOrbitPlugins(orbitId: string, transform: (plugins: NonNullable<Orbit["plugins"]>) => NonNullable<Orbit["plugins"]>) {
+    const current = stateRef.current.orbits.find((orbit) => orbit.id === orbitId);
+    if (!current) return;
+    const plugins = transform([...(current.plugins ?? [])]);
+    pushHistory();
+    const nextOrbit = { ...current, plugins };
+    setOrbits((orbits) => orbits.map((orbit) => orbit.id === orbitId ? nextOrbit : orbit));
+    reconcileOrbitPlugins(nextOrbit);
   }
 
   function setOrbitMode(orbitId: string, mode: OrbitMode) {
@@ -1379,6 +1466,34 @@ export default function App() {
         selectedOrbit && updateOrbit(selectedOrbit.id, { sequenceRetriggerMode })}
       onDuplicate={() => selectedOrbit && duplicateOrbit(selectedOrbit.id)}
       onDeleteOrbit={deleteSelection}
+      onAddPlugin={(orbitId, catalogId) => {
+        const entry = getWamCatalogEntry(catalogId);
+        if (!entry) return;
+        changeOrbitPlugins(orbitId, (plugins) => [...plugins, {
+          id: projectId(), catalogId: entry.id, pluginVersion: entry.pluginVersion, bypassed: false
+        }]);
+      }}
+      onMovePlugin={(slotId, direction) => {
+        if (!selectedOrbit) return;
+        changeOrbitPlugins(selectedOrbit.id, (plugins) => {
+          const index = plugins.findIndex((slot) => slot.id === slotId);
+          const next = index + direction;
+          if (index < 0 || next < 0 || next >= plugins.length) return plugins;
+          [plugins[index], plugins[next]] = [plugins[next], plugins[index]];
+          return plugins;
+        });
+      }}
+      onBypassPlugin={(slotId, bypassed) => selectedOrbit && changeOrbitPlugins(selectedOrbit.id,
+        (plugins) => plugins.map((slot) => slot.id === slotId ? { ...slot, bypassed } : slot))}
+      onRemovePlugin={(slotId) => selectedOrbit && changeOrbitPlugins(selectedOrbit.id,
+        (plugins) => plugins.filter((slot) => slot.id !== slotId))}
+      pluginStatus={(slotId) => selectedOrbit ? audioEngine.getOrbitPluginStatus(selectedOrbit.id, slotId) : "idle"}
+      onMountPluginGui={(slotId, container) => selectedOrbit
+        ? audioEngine.mountOrbitPluginGui(selectedOrbit.id, slotId, container)
+        : Promise.resolve()}
+      onUnmountPluginGui={(slotId) => selectedOrbit
+        ? audioEngine.unmountOrbitPluginGui(selectedOrbit.id, slotId)
+        : Promise.resolve()}
       onPlanetSpeedPreview={previewPlanetSpeed}
       onPlanetSpeedCommit={(planetId, speed) => void commitPlanetSpeed(planetId, speed)}
       onOrbitTapeRateApply={applyOrbitTapeRate}
@@ -1419,6 +1534,7 @@ export default function App() {
     {menu && <ContextMenu menu={menu}
       sequenceMode={orbits.find((orbit) => orbit.id === menu.orbitId)?.mode === "sequence"}
       hasPlanetClipboard={clipboard?.type === "planet"}
+      onClose={() => setMenu(null)}
       onUpload={() => { setMenu(null); fileInput.current?.click(); }}
       onToggleMode={() => {
         const orbit = orbits.find((item) => item.id === menu.orbitId);

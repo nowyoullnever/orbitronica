@@ -1,4 +1,5 @@
 import type { ContextMenuState } from "../state/types";
+import { PopupMenu, PopupMenuItem, type PopupMenuCloseReason } from "./PopupMenu";
 
 export function ContextMenu({
   menu,
@@ -11,7 +12,8 @@ export function ContextMenu({
   onCopyPlanet,
   onPastePlanetHere,
   onAddPlayBar,
-  onAddStopBar
+  onAddStopBar,
+  onClose
 }: {
   menu: ContextMenuState;
   sequenceMode: boolean;
@@ -24,22 +26,29 @@ export function ContextMenu({
   onPastePlanetHere: () => void;
   onAddPlayBar: () => void;
   onAddStopBar: () => void;
+  onClose: (reason: PopupMenuCloseReason) => void;
 }) {
   return (
-    <div className="context-menu" style={{ left: menu.x, top: menu.y }} onClick={(event) => event.stopPropagation()}>
+    <PopupMenu
+      position={{ x: menu.x, y: menu.y }}
+      ariaLabel="Canvas commands"
+      className="context-menu"
+      onClose={onClose}
+      propagateEscape
+    >
       {menu.orbitId ? (
         <>
-          {menu.planetId && <button onClick={onCopyPlanet}>Copy Planet <kbd>Ctrl+C</kbd></button>}
-          {hasPlanetClipboard && <button onClick={onPastePlanetHere}>Paste Planet Here <kbd>Ctrl+V</kbd></button>}
-          {sequenceMode && <button onClick={onAddPlayBar}>Add Play Bar</button>}
-          {sequenceMode && <button onClick={onAddStopBar}>Add Stop Bar</button>}
-          <button onClick={onToggleMode}>Toggle Loop / Sequence <kbd>M</kbd></button>
-          <button onClick={onTogglePause}>Pause / Resume Orbit <kbd>Space</kbd></button>
-          <button onClick={onDuplicate}>Duplicate Orbit <kbd>Ctrl+D</kbd></button>
+          {menu.planetId && <PopupMenuItem onClick={onCopyPlanet}>Copy Planet <kbd>Ctrl+C</kbd></PopupMenuItem>}
+          {hasPlanetClipboard && <PopupMenuItem onClick={onPastePlanetHere}>Paste Planet Here <kbd>Ctrl+V</kbd></PopupMenuItem>}
+          {sequenceMode && <PopupMenuItem onClick={onAddPlayBar}>Add Play Bar</PopupMenuItem>}
+          {sequenceMode && <PopupMenuItem onClick={onAddStopBar}>Add Stop Bar</PopupMenuItem>}
+          <PopupMenuItem onClick={onToggleMode}>Toggle Loop / Sequence <kbd>M</kbd></PopupMenuItem>
+          <PopupMenuItem onClick={onTogglePause}>Pause / Resume Orbit <kbd>Space</kbd></PopupMenuItem>
+          <PopupMenuItem onClick={onDuplicate}>Duplicate Orbit <kbd>Ctrl+D</kbd></PopupMenuItem>
         </>
       ) : (
-        <button onClick={onUpload}>Upload Audio</button>
+        <PopupMenuItem onClick={onUpload}>Upload Audio</PopupMenuItem>
       )}
-    </div>
+    </PopupMenu>
   );
 }

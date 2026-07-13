@@ -1,6 +1,9 @@
 import { SimpleFilter, SoundTouch, WebAudioBufferSource } from "soundtouchjs";
-import type { SequenceRetriggerMode } from "../state/types";
+import type { Orbit, PluginSlot, SequenceRetriggerMode } from "../state/types";
 import { createFLStylePanNode, type FLStylePanNode } from "./flStylePan.ts";
+import { WamHost } from "./wamHost.ts";
+import { loadCatalogModule, resolveCatalogEntryForRestore } from "./wamCatalog.ts";
+import { OrbitWamRack, prunePluginStates, type PluginRuntimeStatus } from "./wamRack.ts";
 
 type ActivePlayback = {
   id: string;
@@ -85,6 +88,13 @@ class AudioEngine {
   private rawFiles = new Map<string, { fileName: string; bytes: Uint8Array }>();
   private orbitRuntimes = new Map<string, OrbitAudioRuntime>();
   private orbitPanValues = new Map<string, number>();
+  private readonly wamHost = new WamHost();
+  /** State outlives runtime and document history; it is never embedded in Orbit. */
+  private readonly pluginStateStore = new Map<string, import("./wamHost.ts").JsonValue>();
+  private readonly orbitWamRacks = new Map<string, OrbitWamRack>();
+  /** Independent from playback callbacks: only the newest hydrate may own audio. */
+  private scenePluginTransitionGeneration = 0;
+  private scenePluginRuntimeOwner: string | null = null;
   private active = new Map<string, ActivePlayback>();
   private masterGain: GainNode | null = null;
   private masterPanner: StereoPannerNode | null = null;
@@ -329,6 +339,87 @@ class AudioEngine {
   setVolume(orbitId: string, volume: number) {
     const runtime = this.orbitRuntimes.get(orbitId);
     if (runtime) runtime.gainNode.gain.setValueAtTime(volume, this.getContext().currentTime);
+  }
+
+  private rackForOrbit(orbitId: string): OrbitWamRack {
+    const existing = this.orbitWamRacks.get(orbitId); if (existing) return existing;
+    const runtime = this.orbitRuntimes.get(orbitId);
+    if (!runtime) throw new Error(`Audio runtime is unavailable for orbit "${orbitId}".`);
+    const rack = new OrbitWamRack(runtime.input, runtime.panNode.input, async (slot) => {
+      // The stored version is state provenance. Known trusted plugins attempt
+      // restoration across a version difference; setState failure remains dry
+      // and preserves the original blob for a later migration.
+      const entry = resolveCatalogEntryForRestore(slot.catalogId, slot.pluginVersion);
+      if (!entry) throw new Error("WAM catalog entry is unavailable.");
+      return this.wamHost.createPluginInstance(this.getContext(), () => loadCatalogModule(entry), entry.id);
+    }, this.pluginStateStore);
+    this.orbitWamRacks.set(orbitId, rack); return rack;
+  }
+
+  /** Universal rack reconciliation for structural edits, undo/redo, open and thaw. */
+  async reconcileOrbitPluginRack(orbitId: string, slots: readonly PluginSlot[], generation?: number): Promise<void> {
+    await this.rackForOrbit(orbitId).reconcile(slots, generation);
+  }
+  /** Revoke a rack's pending hydration before its scene becomes frozen. */
+  invalidateOrbitPluginRack(orbitId: string): void { this.orbitWamRacks.get(orbitId)?.invalidate(); }
+  async freezeOrbitPluginRack(orbitId: string): Promise<void> { await this.orbitWamRacks.get(orbitId)?.freeze(); }
+  /** Commit WAM state only after every active rack produced a valid snapshot. */
+  async snapshotOrbitPluginStates(): Promise<void> {
+    const staged = await Promise.all([...this.orbitWamRacks.values()].map((rack) => rack.captureActiveStateForSave()));
+    for (const states of staged) for (const [slotId, value] of states) this.pluginStateStore.set(slotId, value);
+  }
+  getOrbitPluginStatus(orbitId: string, slotId: string): PluginRuntimeStatus { return this.orbitWamRacks.get(orbitId)?.getStatus(slotId) ?? "idle"; }
+  async mountOrbitPluginGui(orbitId: string, slotId: string, container: HTMLElement): Promise<void> {
+    await this.orbitWamRacks.get(orbitId)?.mountGui(slotId, container);
+  }
+  async unmountOrbitPluginGui(orbitId: string, slotId: string): Promise<void> {
+    await this.orbitWamRacks.get(orbitId)?.unmountGui(slotId);
+  }
+  getPluginStateStore(): ReadonlyMap<string, import("./wamHost.ts").JsonValue> { return this.pluginStateStore; }
+  /** Replaces only durable, already-validated state during an open transaction. */
+  replacePluginStateStore(states: ReadonlyMap<string, import("./wamHost.ts").JsonValue>) {
+    this.pluginStateStore.clear();
+    for (const [slotId, value] of states) this.pluginStateStore.set(slotId, JSON.parse(JSON.stringify(value)));
+  }
+  prunePluginStateSlots(retainedSlotIds: ReadonlySet<string>) { prunePluginStates(this.pluginStateStore, retainedSlotIds); }
+  copyPluginSlotStates(source: readonly PluginSlot[] | undefined, destination: readonly PluginSlot[] | undefined) {
+    const from = source ?? [], to = destination ?? [];
+    for (let index = 0; index < Math.min(from.length, to.length); index++) {
+      const state = this.pluginStateStore.get(from[index].id);
+      if (state !== undefined) this.pluginStateStore.set(to[index].id, JSON.parse(JSON.stringify(state)));
+    }
+  }
+  /** Scene duplication supplies an explicit old→new map, never array position. */
+  copyPluginStatesBySlotMap(slotIds: ReadonlyMap<string, string>): readonly string[] {
+    const staged = new Map<string, import("./wamHost.ts").JsonValue>();
+    for (const [sourceId, targetId] of slotIds) {
+      const state = this.pluginStateStore.get(sourceId);
+      if (state !== undefined) staged.set(targetId, JSON.parse(JSON.stringify(state)));
+    }
+    for (const [targetId, state] of staged) this.pluginStateStore.set(targetId, state);
+    return [...staged.keys()];
+  }
+  removePluginSlotStates(slotIds: readonly string[]) { for (const slotId of slotIds) this.pluginStateStore.delete(slotId); }
+  getScenePluginRuntimeOwner() { return this.scenePluginRuntimeOwner; }
+  /**
+   * Gate-first, last-wins scene runtime transaction. App owns document
+   * publication; this boundary owns WAM lifetime and never lets an older
+   * hydration publish ownership after a newer request has arrived.
+   */
+  async transitionScenePluginRacks(previous: readonly Orbit[], target: readonly Orbit[], generation: number, targetSceneId?: string): Promise<boolean> {
+    this.scenePluginTransitionGeneration = Math.max(this.scenePluginTransitionGeneration, generation);
+    const current = () => generation === this.scenePluginTransitionGeneration;
+    this.scenePluginRuntimeOwner = null;
+    // Invalidate synchronously, before the first await in freeze. Otherwise a
+    // pending create() can settle during state capture and rewire a frozen rack.
+    previous.forEach((orbit) => this.invalidateOrbitPluginRack(orbit.id));
+    await Promise.all(previous.map((orbit) => this.freezeOrbitPluginRack(orbit.id)));
+    if (!current()) return false;
+    await Promise.all(target.filter((orbit) => (orbit.plugins?.length ?? 0) > 0 && this.orbitRuntimes.has(orbit.id))
+      .map((orbit) => this.reconcileOrbitPluginRack(orbit.id, orbit.plugins ?? [], generation)));
+    if (!current()) return false;
+    this.scenePluginRuntimeOwner = targetSceneId ?? null;
+    return true;
   }
 
   private normalizedSpeed(speed: number) {
@@ -806,6 +897,8 @@ class AudioEngine {
       if (key.startsWith(`${orbitId}:`)) this.reverseBuffers.delete(key);
     }
     this.rawFiles.delete(orbitId);
+    const rack = this.orbitWamRacks.get(orbitId);
+    if (rack) { this.orbitWamRacks.delete(orbitId); void rack.disposeAll(); }
     const runtime = this.orbitRuntimes.get(orbitId);
     if (runtime) {
       try { runtime.input.disconnect(); } catch { /* already disconnected */ }
