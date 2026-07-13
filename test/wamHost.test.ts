@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 import { cloneJsonValue, WamHost, type WamModuleLoader } from "../src/renderer/audio/wamHost.ts";
 
@@ -69,10 +70,39 @@ test("caches modules per catalog within one context and retries only the failed 
   assert.equal(loadsB, 2, "a failed B load retries without evicting A, then concurrent B loads deduplicate");
 });
 
-test("trusted catalog is closed and maps only the frozen Burns entry", async () => {
-  const { WAM_CATALOG, getWamCatalogEntry, resolveCatalogEntryForRestore, catalogEntryUrl } = await import("../src/renderer/audio/wamCatalog.ts");
+test("trusted catalog preserves identity and non-empty presentation metadata", async () => {
+  const { WAM_CATALOG } = await import("../src/renderer/audio/wamCatalog.ts");
   assert.deepEqual(Object.keys(WAM_CATALOG), ["burns-simple-delay"]);
-  assert.equal(getWamCatalogEntry("untrusted-url"), undefined);
+  for (const [catalogId, entry] of Object.entries(WAM_CATALOG)) {
+    assert.equal(entry.id, catalogId, `catalog key ${catalogId} must equal entry.id`);
+    assert.equal(typeof entry.displayName, "string");
+    assert.ok(entry.displayName.trim().length > 0, `${catalogId} must have a non-empty displayName`);
+    assert.ok(entry.pluginVersion.length > 0);
+    assert.ok(entry.entry.length > 0);
+    assert.ok(entry.descriptor.length > 0);
+  }
+});
+
+test("catalog typing is generic without widening the literal ID union", () => {
+  const catalog = fs.readFileSync(new URL("../src/renderer/audio/wamCatalog.ts", import.meta.url), "utf8");
+  assert.match(catalog, /displayName:\s*string/);
+  assert.match(catalog, /pluginVersion:\s*string/);
+  assert.match(catalog, /hasGui:\s*boolean/);
+  assert.match(catalog, /export type WamCatalogId = keyof typeof WAM_CATALOG/);
+  assert.doesNotMatch(catalog, /id:\s*"burns-simple-delay"/,
+    "catalog entry metadata must accept heterogeneous future trusted plugins");
+});
+
+test("catalog runtime lookup returns only own trusted IDs", async () => {
+  const { WAM_CATALOG, getWamCatalogEntry } = await import("../src/renderer/audio/wamCatalog.ts");
+  for (const unknownId of ["untrusted-url", "__proto__", "constructor", "toString"]) {
+    assert.equal(getWamCatalogEntry(unknownId), undefined, `${unknownId} is not an own catalog ID`);
+  }
+  assert.equal(getWamCatalogEntry("burns-simple-delay"), WAM_CATALOG["burns-simple-delay"]);
+});
+
+test("trusted catalog restore and URL resolution remain allowlist-driven", async () => {
+  const { WAM_CATALOG, getWamCatalogEntry, resolveCatalogEntryForRestore, catalogEntryUrl } = await import("../src/renderer/audio/wamCatalog.ts");
   assert.equal(getWamCatalogEntry("burns-simple-delay")?.license, "MIT");
   assert.equal(resolveCatalogEntryForRestore("burns-simple-delay", "0.0.1")?.pluginVersion, "0.2.54", "version mismatch must still attempt trusted restore");
   assert.equal(resolveCatalogEntryForRestore("untrusted-url", "0.2.54"), undefined);

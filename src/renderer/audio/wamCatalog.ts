@@ -5,18 +5,28 @@
 import type { JsonValue, WamPluginInstance, WamPluginModule } from "./wamHost.ts";
 
 export type WamCatalogEntry = Readonly<{
-  id: "burns-simple-delay";
-  pluginVersion: "0.2.54";
-  packageVersion: "0.2.54";
-  license: "MIT";
-  entry: "wam/burns-simple-delay/index.js";
-  descriptor: "wam/burns-simple-delay/descriptor.json";
-  hasGui: true;
+  id: string;
+  displayName: string;
+  pluginVersion: string;
+  packageVersion: string;
+  license: string;
+  entry: string;
+  descriptor: string;
+  hasGui: boolean;
 }>;
 
-export const WAM_CATALOG = {
-  "burns-simple-delay": {
-    id: "burns-simple-delay",
+function defineWamCatalog<const Catalog extends Record<string, WamCatalogEntry>>(
+  catalog: Catalog & { [Id in keyof Catalog]: Readonly<{ id: Id }> }
+): Catalog {
+  return catalog;
+}
+
+const burnsSimpleDelayId = "burns-simple-delay";
+
+export const WAM_CATALOG = defineWamCatalog({
+  [burnsSimpleDelayId]: {
+    id: burnsSimpleDelayId,
+    displayName: "Burns Simple Delay",
     pluginVersion: "0.2.54",
     packageVersion: "0.2.54",
     license: "MIT",
@@ -24,11 +34,12 @@ export const WAM_CATALOG = {
     descriptor: "wam/burns-simple-delay/descriptor.json",
     hasGui: true
   }
-} as const satisfies Record<string, WamCatalogEntry>;
+});
 
 export type WamCatalogId = keyof typeof WAM_CATALOG;
 
 export function getWamCatalogEntry(id: string): WamCatalogEntry | undefined {
+  if (!Object.prototype.hasOwnProperty.call(WAM_CATALOG, id)) return undefined;
   return WAM_CATALOG[id as WamCatalogId];
 }
 

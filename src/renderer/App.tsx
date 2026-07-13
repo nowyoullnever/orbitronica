@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { SetStateAction } from "react";
 import { audioEngine, type ProjectAudioInput } from "./audio/audioEngine";
 import { collectRetainedPluginSlotIds } from "./audio/wamRack";
-import { WAM_CATALOG } from "./audio/wamCatalog";
+import { getWamCatalogEntry } from "./audio/wamCatalog";
 import { encodeWav, type WavSampleFormat } from "./audio/wavEncoder";
 import { CanvasStage } from "./components/CanvasStage";
 import { ContextMenu } from "./components/ContextMenu";
@@ -1466,10 +1466,10 @@ export default function App() {
         selectedOrbit && updateOrbit(selectedOrbit.id, { sequenceRetriggerMode })}
       onDuplicate={() => selectedOrbit && duplicateOrbit(selectedOrbit.id)}
       onDeleteOrbit={deleteSelection}
-      onAddPlugin={() => {
-        if (!selectedOrbit) return;
-        const entry = WAM_CATALOG["burns-simple-delay"];
-        changeOrbitPlugins(selectedOrbit.id, (plugins) => [...plugins, {
+      onAddPlugin={(orbitId, catalogId) => {
+        const entry = getWamCatalogEntry(catalogId);
+        if (!entry) return;
+        changeOrbitPlugins(orbitId, (plugins) => [...plugins, {
           id: projectId(), catalogId: entry.id, pluginVersion: entry.pluginVersion, bypassed: false
         }]);
       }}
@@ -1534,6 +1534,7 @@ export default function App() {
     {menu && <ContextMenu menu={menu}
       sequenceMode={orbits.find((orbit) => orbit.id === menu.orbitId)?.mode === "sequence"}
       hasPlanetClipboard={clipboard?.type === "planet"}
+      onClose={() => setMenu(null)}
       onUpload={() => { setMenu(null); fileInput.current?.click(); }}
       onToggleMode={() => {
         const orbit = orbits.find((item) => item.id === menu.orbitId);

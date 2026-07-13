@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import type { Orbit, OrbitMode, Planet, PluginSlot, SequenceRetriggerMode } from "../state/types";
-import { WAM_CATALOG } from "../audio/wamCatalog";
+import { getWamCatalogEntry, WAM_CATALOG, type WamCatalogId } from "../audio/wamCatalog";
 import {
   getOrbitTapeRate, getPlanetEffectiveSpeed, getSampleEnd, getSampleStart,
   getTapeStyleRuntimeRateOnly, rateToCents, SPLICE_MAX_PIECES
 } from "../utils/geometry";
 import { SampleTrimEditor } from "./SampleTrimEditor";
 import { normalizeSampleWindow } from "../utils/sampleTrim";
+import { PopupMenu, PopupMenuItem, type PopupPosition } from "./PopupMenu";
 
 type Props = {
   orbit: Orbit | null;
@@ -47,7 +48,7 @@ type Props = {
   onCopyPlanet: (planetId: string) => void;
   onPastePlanetToOrbit: (orbitId: string) => void;
   onDeletePlanet: (planetId: string) => void;
-  onAddPlugin: () => void;
+  onAddPlugin: (orbitId: string, catalogId: WamCatalogId) => void;
   onMovePlugin: (slotId: string, direction: -1 | 1) => void;
   onBypassPlugin: (slotId: string, bypassed: boolean) => void;
   onRemovePlugin: (slotId: string) => void;
@@ -74,16 +75,51 @@ function PluginGui({ slot, status, onMount, onUnmount }: {
 
 function PluginRack({ orbit, props }: { orbit: Orbit; props: Props }) {
   const slots = orbit.plugins ?? [];
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const [selectorPosition, setSelectorPosition] = useState<PopupPosition | null>(null);
+  const selectorId = "orbit-plugin-selector";
+
   return <section className="settings-section plugin-rack" data-testid="plugin-rack">
     <div className="panel-eyebrow">PLUGINS - {slots.length}</div>
-    <button type="button" onClick={props.onAddPlugin}>Add Burns Simple Delay</button>
+    <button
+      ref={addButtonRef}
+      type="button"
+      aria-haspopup="menu"
+      aria-expanded={selectorPosition !== null}
+      aria-controls={selectorPosition ? selectorId : undefined}
+      onClick={(event) => {
+        if (selectorPosition) {
+          setSelectorPosition(null);
+          return;
+        }
+        if (event.detail > 0) {
+          setSelectorPosition({ x: event.clientX, y: event.clientY });
+          return;
+        }
+        const bounds = event.currentTarget.getBoundingClientRect();
+        setSelectorPosition({ x: bounds.left, y: bounds.bottom });
+      }}
+    >Add</button>
+    {selectorPosition && <PopupMenu
+      id={selectorId}
+      className="plugin-selector"
+      position={selectorPosition}
+      anchor={addButtonRef.current}
+      ownerKey={orbit.id}
+      ariaLabel="Add plugin"
+      onClose={() => setSelectorPosition(null)}
+    >
+      {Object.values(WAM_CATALOG).map((entry) => <PopupMenuItem
+        key={entry.id}
+        onClick={() => props.onAddPlugin(orbit.id, entry.id)}
+      >{entry.displayName}</PopupMenuItem>)}
+    </PopupMenu>}
     {slots.length === 0 && <p className="no-planets">Add an approved effect to this orbit.</p>}
     {slots.map((slot, index) => {
       const status = props.pluginStatus(slot.id);
-      const catalog = WAM_CATALOG[slot.catalogId as keyof typeof WAM_CATALOG];
       return <div className="plugin-slot" key={slot.id} data-plugin-status={status}>
         <div className="plugin-slot-header">
-          <strong>{catalog?.id === "burns-simple-delay" ? "Burns Simple Delay" : "Unavailable plugin"}</strong>
+          <strong>{getWamCatalogEntry(slot.catalogId)?.displayName ?? "Unavailable plugin"}</strong>
           <small>{status === "ready" ? (slot.bypassed ? "bypassed" : "ready") : status}</small>
         </div>
         <div className="plugin-actions">
