@@ -6,6 +6,8 @@
   "description": "Orbit-based experimental music live editor",
   "main": "dist-electron/electron.js",
   "scripts": {
+    "postinstall": "node scripts/fetch-font.mjs",
+    "fetch:font": "node scripts/fetch-font.mjs",
     "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron . --dev\"",
     "verify:wam-assets": "node scripts/verify-wam-assets.mjs",
     "build": "npm run verify:wam-assets && tsc -b --force && node scripts/verify-preload.mjs && vite build && electron-builder --dir",

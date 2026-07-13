@@ -5,3 +5,8 @@ release
 *.log
 .omx
 *.tsbuildinfo
+
+# Mapo Flower Island font — license prohibits redistribution, so it is never
+# committed. `npm install` (or `npm run fetch:font`) downloads it from source.
+MapoFlowerIsland.woff
+MapoFlowerIsland.otf
