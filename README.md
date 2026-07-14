@@ -82,7 +82,7 @@ npm run smoke:packaged-wam   # build + verify the packaged WAM effect end-to-end
 
 Each orbit can host a chain of [Web Audio Modules 2.0](https://www.webaudiomodules.com/) effect plugins. To keep the app safe by default, Orbitronica ships a **trusted, allow-listed rack** rather than an open plugin loader: bundled plugins are pinned by content hash and loaded only from immutable, verified files — no user-, project-, or IPC-supplied plugin URLs are ever executed.
 
-The Phase-1 catalog bundles immutable **Burns Simple Delay** and **Burns Simple EQ** artifacts from [burns-audio-wam](https://github.com/boourns/burns-audio-wam) (MIT), plus first-party **Orbitronica Filter** and **Orbitronica Overdrive**. Orbitronica Overdrive is the catalog's only distortion/overdrive path; **Burns Distortion is not bundled**. Catalog integrity is enforced by `npm run verify:wam-assets` and proven end-to-end in a real `AudioContext` by `npm run smoke:packaged-wam`. See [`docs/packaged-wam-compatibility.md`](docs/packaged-wam-compatibility.md) for the full compatibility gate.
+The trusted catalog bundles immutable **Burns Simple Delay** and **Burns Simple EQ** artifacts from [burns-audio-wam](https://github.com/boourns/burns-audio-wam) (MIT), plus first-party **Orbitronica Filter**, **Orbitronica Overdrive**, and **Orbitronica Compressor**. Orbitronica Overdrive is the catalog's only distortion/overdrive path; **Burns Distortion is not bundled**. Catalog integrity is enforced by `npm run verify:wam-assets` and proven end-to-end in a real `AudioContext` by `npm run smoke:packaged-wam`. See [`docs/packaged-wam-compatibility.md`](docs/packaged-wam-compatibility.md) for the full compatibility gate.
 
 ## Tech Stack
 

@@ -1,0 +1,1 @@
+{"identifier":"com.orbitronica.compressor","name":"Orbitronica Compressor","vendor":"Orbitronica","description":"First-party stateful native dynamics compressor with makeup gain","version":"1.0.0","sdkVersion":"2.0.0-alpha.4","keywords":["effect","compressor"],"isInstrument":false,"hasAudioInput":true,"hasAudioOutput":true,"hasMidiInput":false,"hasMidiOutput":false}

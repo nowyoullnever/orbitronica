@@ -1,12 +1,12 @@
 # Packaged WAM compatibility gate (G009)
 
-**Status: enabled-file — the Phase-1 trusted catalog contains immutable Burns Simple Delay and Burns Simple EQ artifacts plus first-party Orbitronica Filter and Orbitronica Overdrive.**
+**Status: enabled-file — the trusted catalog contains immutable Burns Simple Delay and Burns Simple EQ artifacts plus first-party Orbitronica Filter and Orbitronica Overdrive, plus first-party Orbitronica Compressor.**
 
 ## Decision
 
 Orbitronica may use only the catalog entries committed under `public/wam/`:
 immutable **Burns Simple Delay** and **Burns Simple EQ** payloads, plus
-first-party **Orbitronica Filter** and **Orbitronica Overdrive** payloads.
+first-party **Orbitronica Filter**, **Orbitronica Overdrive**, and **Orbitronica Compressor** payloads.
 It is not an installer and accepts no project-, preference-, IPC-, or
 user-supplied plugin URL. **Orbitronica Overdrive is the sole bundled
 distortion/overdrive path; Burns Distortion is not bundled.** Vite copies the

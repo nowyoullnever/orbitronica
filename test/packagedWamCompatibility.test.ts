@@ -58,21 +58,23 @@ test("packaged smoke uses the real production Electron entry rather than the dev
   assert.equal(path.basename(new URL("public/wam/burns-simple-delay/index.js", root).pathname), "index.js");
 });
 
-test("first-party filter is cataloged with a byte-copied, hash-locked manifest", () => {
+test("first-party filter and compressor are cataloged with byte-copied, hash-locked manifests", () => {
   const catalog = read("src/renderer/audio/wamCatalogData.ts");
-  const sourceManifest = read("plugins/src/orbitronica-filter/manifest.json");
-  const publicManifest = read("public/wam/orbitronica-filter/manifest.json");
-  const manifest = JSON.parse(publicManifest) as { assets: Record<string, string>; origin: string; sourcePath: string; buildTool: string };
-  assert.match(catalog, /id: "orbitronica-filter"/);
-  assert.match(catalog, /entry: "wam\/orbitronica-filter\/index\.js"/);
-  assert.equal(manifest.origin, "first-party");
-  assert.equal(manifest.sourcePath, "plugins/src/orbitronica-filter");
-  assert.equal(manifest.buildTool, "esbuild@0.25.12");
-  assert.equal(publicManifest, sourceManifest, "public manifest is copied byte-for-byte from canonical source");
-  assert.deepEqual(Object.keys(manifest.assets).sort(), ["NOTICE.txt", "descriptor.json", "index.js"]);
-  for (const [file, expectedHash] of Object.entries(manifest.assets)) {
-    const actualHash = createHash("sha256").update(fs.readFileSync(new URL(`public/wam/orbitronica-filter/${file}`, root))).digest("hex");
-    assert.equal(actualHash, expectedHash, `${file} must match the first-party manifest`);
+  for (const id of ["orbitronica-filter", "orbitronica-compressor"]) {
+    const sourceManifest = read(`plugins/src/${id}/manifest.json`);
+    const publicManifest = read(`public/wam/${id}/manifest.json`);
+    const manifest = JSON.parse(publicManifest) as { assets: Record<string, string>; origin: string; sourcePath: string; buildTool: string };
+    assert.match(catalog, new RegExp(`id: "${id}"`));
+    assert.match(catalog, new RegExp(`entry: "wam/${id}/index\\.js"`));
+    assert.equal(manifest.origin, "first-party");
+    assert.equal(manifest.sourcePath, `plugins/src/${id}`);
+    assert.equal(manifest.buildTool, "esbuild@0.25.12");
+    assert.equal(publicManifest, sourceManifest, "public manifest is copied byte-for-byte from canonical source");
+    assert.deepEqual(Object.keys(manifest.assets).sort(), ["NOTICE.txt", "descriptor.json", "index.js"]);
+    for (const [file, expectedHash] of Object.entries(manifest.assets)) {
+      const actualHash = createHash("sha256").update(fs.readFileSync(new URL(`public/wam/${id}/${file}`, root))).digest("hex");
+      assert.equal(actualHash, expectedHash, `${id}/${file} must match the first-party manifest`);
+    }
   }
 });
 
@@ -91,7 +93,7 @@ test("Phase 1 vendored EQ retains pinned provenance and the documented fallback 
 
 test("first-party build ownership cannot rewrite immutable Burns payloads", () => {
   const builder = read("scripts/build-plugins.mjs");
-  assert.match(builder, /firstPartyIds = \["orbitronica-filter", "orbitronica-overdrive"\]/);
+  assert.match(builder, /firstPartyIds = \["orbitronica-filter", "orbitronica-overdrive", "orbitronica-compressor"\]/);
   assert.doesNotMatch(builder, /burns-simple-eq|burns-distortion/);
   const eq = JSON.parse(read("public/wam/burns-simple-eq/manifest.json")) as { origin: string; assets: Record<string, string> };
   assert.equal(eq.origin, "vendored");

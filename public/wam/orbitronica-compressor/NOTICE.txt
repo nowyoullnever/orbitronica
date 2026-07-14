@@ -1,0 +1,3 @@
+Orbitronica Compressor is first-party MIT software.
+Bundled build tool: esbuild@0.25.12 (MIT).
+Web Audio DynamicsCompressorNode is provided by the host browser runtime.

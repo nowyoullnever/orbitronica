@@ -1,0 +1,18 @@
+{
+  "catalogId": "orbitronica-compressor",
+  "origin": "first-party",
+  "package": "orbitronica-compressor",
+  "packageVersion": "0.1.0",
+  "pluginVersion": "1.0.0",
+  "license": "MIT",
+  "source": "Orbitronica first-party source",
+  "sourcePath": "plugins/src/orbitronica-compressor",
+  "buildTool": "esbuild@0.25.12",
+  "entry": "index.js",
+  "descriptor": "descriptor.json",
+  "assets": {
+    "NOTICE.txt": "934342556db80a68457ad63eb93257dea8b2af2908a989d24d01e0d002c82a69",
+    "descriptor.json": "80d6a0f5a8c6df3f4797d4f205ff12d9300764efdb997109048927cca509fea8",
+    "index.js": "a465524b425322624369a2ac5bc9cf6e90abc2aa990633325196d0e64e46d4c0"
+  }
+}

@@ -72,7 +72,7 @@ test("caches modules per catalog within one context and retries only the failed 
 
 test("trusted catalog preserves identity and non-empty presentation metadata", async () => {
   const { WAM_CATALOG } = await import("../src/renderer/audio/wamCatalog.ts");
-  assert.deepEqual(Object.keys(WAM_CATALOG), ["burns-simple-delay", "burns-simple-eq", "orbitronica-overdrive", "orbitronica-filter"]);
+  assert.deepEqual(Object.keys(WAM_CATALOG), ["burns-simple-delay", "burns-simple-eq", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-filter"]);
   for (const [catalogId, entry] of Object.entries(WAM_CATALOG)) {
     assert.equal(entry.id, catalogId, `catalog key ${catalogId} must equal entry.id`);
     assert.equal(typeof entry.displayName, "string");
@@ -85,7 +85,7 @@ test("trusted catalog preserves identity and non-empty presentation metadata", a
 
 test("catalog data is importable without renderer DOM globals", async () => {
   const data = await import("../src/renderer/audio/wamCatalogData.ts");
-  assert.deepEqual(data.WAM_CATALOG_DATA.map((entry) => entry.id), ["burns-simple-delay", "burns-simple-eq", "orbitronica-overdrive", "orbitronica-filter"]);
+  assert.deepEqual(data.WAM_CATALOG_DATA.map((entry) => entry.id), ["burns-simple-delay", "burns-simple-eq", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-filter"]);
   assert.ok(data.WAM_CATALOG_DATA.every((entry) => entry.entry.startsWith("wam/")));
 });
 
@@ -194,4 +194,22 @@ test("filter implementation exposes semantic, strict first-party state and smoot
   assert.match(source, /setTargetAtTime\([^\n]+0\.02/);
   assert.match(source, /min\(20_000, 0\.45 \* context\.sampleRate\)/);
   assert.match(source, /__proto__/);
+});
+
+
+test("compressor implementation freezes the native-control ABI with strict migrated state", () => {
+  const source = fs.readFileSync(new URL("../plugins/src/orbitronica-compressor/index.ts", import.meta.url), "utf8");
+  for (const parameter of ["threshold", "knee", "ratio", "attack", "release", "makeupGain"]) assert.match(source, new RegExp(parameter));
+  assert.match(source, /createDynamicsCompressor/);
+  assert.match(source, /ratio: 1/);
+  assert.match(source, /schemaVersion: 1/);
+  assert.match(source, /schemaVersion !== 0/);
+  assert.match(source, /invalid-compressor-state/);
+  assert.match(source, /unsupported-compressor-state/);
+  assert.match(source, /__proto__/);
+  assert.match(source, /makeup\.gain\.setTargetAtTime/);
+  assert.match(source, /paramMgr/);
+  assert.match(source, /getParamsValues/);
+  assert.match(source, /10 \*\* \(params\.makeupGain \/ 20\)/);
+  assert.match(source, /this\.compressor\.disconnect\(\)/);
 });
