@@ -16,6 +16,7 @@ app.setName("Orbitronica");
 
 function createWindow() {
   const wamSmoke = process.argv.includes("--wam-smoke");
+  const wamDspTest = process.argv.includes("--wam-dsp-test");
   const win = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -33,20 +34,21 @@ function createWindow() {
   });
   mainWindow = win;
 
-  if (wamSmoke) {
+  if (wamSmoke || wamDspTest) {
+    const marker = wamDspTest ? "ORBITRONICA_WAM_DSP" : "ORBITRONICA_WAM_SMOKE";
     const timeout = setTimeout(() => {
-      console.error("ORBITRONICA_WAM_SMOKE {\"status\":\"fail\",\"error\":\"renderer timeout\"}");
+      console.error(`${marker} {\"status\":\"fail\",\"error\":\"renderer timeout\"}`);
       app.exit(1);
-    }, 30_000);
+    }, wamDspTest ? 90_000 : 30_000);
     win.webContents.on("console-message", (_event, _level, message) => {
-      if (!message.startsWith("ORBITRONICA_WAM_SMOKE ")) return;
+      if (!message.startsWith(`${marker} `)) return;
       clearTimeout(timeout);
       console.log(message);
       app.exit(message.includes('"status":"pass"') ? 0 : 1);
     });
     win.webContents.on("did-fail-load", (_event, _errorCode, errorDescription) => {
       clearTimeout(timeout);
-      console.error(`ORBITRONICA_WAM_SMOKE {"status":"fail","error":${JSON.stringify(errorDescription)}}`);
+      console.error(`${marker} {"status":"fail","error":${JSON.stringify(errorDescription)}}`);
       app.exit(1);
     });
   }
@@ -54,7 +56,7 @@ function createWindow() {
   if (process.argv.includes("--dev")) {
     void win.loadURL("http://localhost:5173");
   } else {
-    void win.loadFile(path.join(__dirname, "../dist", wamSmoke ? "wam-smoke.html" : "index.html"));
+    void win.loadFile(path.join(__dirname, "../dist", wamDspTest ? "wam-dsp-test.html" : wamSmoke ? "wam-smoke.html" : "index.html"));
   }
 }
 

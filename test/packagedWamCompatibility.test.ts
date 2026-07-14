@@ -99,3 +99,19 @@ test("first-party build ownership cannot rewrite immutable Burns payloads", () =
   assert.equal(eq.origin, "vendored");
   for (const [file, expected] of Object.entries(eq.assets)) assert.equal(createHash("sha256").update(fs.readFileSync(new URL(`public/wam/burns-simple-eq/${file}`, root))).digest("hex"), expected);
 });
+
+test("compressor DSP acceptance runs in packaged Chromium with native-reference metrics", () => {
+  const packageJson = read("package.json");
+  const harness = read("scripts/wam-dsp-test.mjs");
+  const renderer = read("src/renderer/wamDspTest.ts");
+  const main = read("src/main/electron.ts");
+  assert.match(packageJson, /"test:wam-dsp"/);
+  assert.match(harness, /--wam-dsp-test/);
+  assert.match(harness, /ORBITRONICA_WAM_DSP/);
+  assert.match(renderer, /OfflineAudioContext/);
+  assert.match(renderer, /DynamicsCompressor/);
+  for (const parameter of ["threshold", "knee", "ratio", "attack", "release", "makeupGain"]) assert.match(renderer, new RegExp(`check\\("${parameter}"`));
+  assert.match(renderer, /44_100/); assert.match(renderer, /48_000/);
+  assert.match(renderer, /finite-bounded-stereo-extremes/);
+  assert.match(main, /wam-dsp-test\.html/);
+});

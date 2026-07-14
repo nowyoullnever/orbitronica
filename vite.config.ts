@@ -10,7 +10,8 @@ export default defineConfig({
     rollupOptions: {
       input: {
         app: path.resolve(import.meta.dirname, "index.html"),
-        wamSmoke: path.resolve(import.meta.dirname, "wam-smoke.html")
+        wamSmoke: path.resolve(import.meta.dirname, "wam-smoke.html"),
+        wamDspTest: path.resolve(import.meta.dirname, "wam-dsp-test.html")
       }
     }
   }
