@@ -1,0 +1,3 @@
+Orbitronica Flanger
+Copyright 2026 Orbitronica contributors
+SPDX-License-Identifier: MIT

@@ -1,0 +1,1 @@
+{"identifier":"com.orbitronica.phaser","name":"Orbitronica Phaser","vendor":"Orbitronica","description":"First-party fixed-stage native graph phaser","version":"1.0.0","sdkVersion":"2.0.0-alpha.4","keywords":["effect","phaser"],"isInstrument":false,"hasAudioInput":true,"hasAudioOutput":true,"hasMidiInput":false,"hasMidiOutput":false}

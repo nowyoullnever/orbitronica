@@ -1,0 +1,18 @@
+{
+  "catalogId": "orbitronica-phaser",
+  "origin": "first-party",
+  "package": "orbitronica-phaser",
+  "packageVersion": "0.1.0",
+  "pluginVersion": "1.0.0",
+  "license": "MIT",
+  "source": "Orbitronica first-party source",
+  "sourcePath": "plugins/src/orbitronica-phaser",
+  "buildTool": "esbuild@0.25.12",
+  "entry": "index.js",
+  "descriptor": "descriptor.json",
+  "assets": {
+    "NOTICE.txt": "6c7b032e5c842ddedade480d63a7fb1935124ebfc70bf0857c91e5700582648c",
+    "descriptor.json": "6e159eba71e009b29f3513766376491c0cfc0ef78589c55ae30231e2ae342c25",
+    "index.js": "9c6a1169785ca2b5c133fb78f3430c0c849061e816067211a40b8c01ddb8b166"
+  }
+}

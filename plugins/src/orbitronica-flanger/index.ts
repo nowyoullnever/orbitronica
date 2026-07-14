@@ -1,0 +1,22 @@
+type Params = { rate: number; depth: number; feedback: number; mix: number };
+type State = { schemaVersion: 1; params: Params };
+const defaults: Params = { rate: .25, depth: .003, feedback: .25, mix: 0 };
+const clamp = (n: number, a: number, b: number) => Math.min(b, Math.max(a, n));
+const dangerous = (v: unknown): boolean => !!v && typeof v === "object" && Object.entries(v as Record<string, unknown>).some(([k, x]) => ["__proto__", "constructor", "prototype"].includes(k) || dangerous(x));
+class FlangerNode {
+  readonly input: GainNode; readonly output: GainNode; readonly delay: DelayNode; readonly lfo: OscillatorNode; readonly depth: GainNode; readonly offset: ConstantSourceNode; readonly feedbackNode: GainNode; readonly wet: GainNode; readonly dry: GainNode;
+  #state: State = { schemaVersion: 1, params: { ...defaults } }; #destroyed = false; #disconnectInput: () => void;
+  constructor(context: AudioContext) {
+    this.input = context.createGain(); this.output = context.createGain(); this.delay = context.createDelay(.02); this.lfo = context.createOscillator(); this.depth = context.createGain(); this.offset = context.createConstantSource(); this.feedbackNode = context.createGain(); this.wet = context.createGain(); this.dry = context.createGain();
+    this.lfo.type = "sine"; this.offset.connect(this.delay.delayTime); this.lfo.connect(this.depth); this.depth.connect(this.delay.delayTime);
+    this.input.connect(this.dry); this.dry.connect(this.output); this.input.connect(this.delay); this.delay.connect(this.wet); this.wet.connect(this.output); this.delay.connect(this.feedbackNode); this.feedbackNode.connect(this.delay);
+    this.#disconnectInput = this.input.disconnect.bind(this.input); this.offset.start(); this.lfo.start(); this.apply(this.#state.params);
+    Object.defineProperties(this.input, { connect: { value: this.output.connect.bind(this.output) }, disconnect: { value: this.output.disconnect.bind(this.output) }, destroy: { value: () => this.destroy() }, getState: { value: () => this.getState() }, setState: { value: (v: unknown) => this.setState(v) }, paramMgr: { value: { getState: async () => structuredClone(this.#state.params), getParamsValues: () => structuredClone(this.#state.params), setState: async (p: Record<string, number>) => this.setState({ schemaVersion: 1, params: p as Params }) } } });
+  }
+  apply(p: Params) { const now = this.delay.context.currentTime; this.lfo.frequency.setTargetAtTime(p.rate, now, .02); this.offset.offset.setTargetAtTime(.01, now, .02); this.depth.gain.setTargetAtTime(p.depth, now, .02); this.feedbackNode.gain.setTargetAtTime(p.feedback, now, .02); this.dry.gain.setTargetAtTime(Math.cos(p.mix * Math.PI / 2), now, .02); this.wet.gain.setTargetAtTime(Math.sin(p.mix * Math.PI / 2), now, .02); }
+  async getState(): Promise<State> { return structuredClone(this.#state); }
+  async setState(v: unknown) { if (!v || typeof v !== "object" || Array.isArray(v) || dangerous(v)) throw new Error("invalid-flanger-state"); const src = v as { schemaVersion?: unknown; params?: unknown }; if (src.schemaVersion !== undefined && src.schemaVersion !== 0 && src.schemaVersion !== 1) throw new Error("unsupported-flanger-state"); const incoming = (src.params ?? src) as Record<string, unknown>; const old = this.#state.params; const raw = { rate: incoming.rate ?? old.rate, depth: incoming.depth ?? old.depth, feedback: incoming.feedback ?? old.feedback, mix: incoming.mix ?? old.mix }; if (!Object.values(raw).every((x) => typeof x === "number" && Number.isFinite(x))) throw new Error("invalid-flanger-state"); this.#state = { schemaVersion: 1, params: { rate: clamp(raw.rate as number, .05, 10), depth: clamp(raw.depth as number, 0, .009), feedback: clamp(raw.feedback as number, -.95, .95), mix: clamp(raw.mix as number, 0, 1) } }; this.apply(this.#state.params); }
+  destroy() { if (this.#destroyed) return; this.#destroyed = true; this.lfo.stop(); this.offset.stop(); this.#disconnectInput(); for (const n of [this.delay, this.lfo, this.depth, this.offset, this.feedbackNode, this.wet, this.dry, this.output]) n.disconnect(); }
+}
+class Module { async createInstance(_group: string, context: AudioContext) { const node = new FlangerNode(context); return { audioNode: node.input, createGui: () => { const root = document.createElement("div"); root.textContent = "Orbitronica Flanger"; return root; }, destroyGui: (gui: HTMLElement) => gui.remove() }; } }
+export default new Module();

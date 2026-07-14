@@ -1,0 +1,1 @@
+{"identifier":"com.orbitronica.flanger","name":"Orbitronica Flanger","vendor":"Orbitronica","description":"First-party native graph flanger","version":"1.0.0","sdkVersion":"2.0.0-alpha.4","keywords":["effect","flanger"],"isInstrument":false,"hasAudioInput":true,"hasAudioOutput":true,"hasMidiInput":false,"hasMidiOutput":false}

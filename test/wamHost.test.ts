@@ -72,7 +72,7 @@ test("caches modules per catalog within one context and retries only the failed 
 
 test("trusted catalog preserves identity and non-empty presentation metadata", async () => {
   const { WAM_CATALOG } = await import("../src/renderer/audio/wamCatalog.ts");
-  assert.deepEqual(Object.keys(WAM_CATALOG), ["burns-simple-delay", "burns-simple-eq", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-bitcrusher", "orbitronica-filter"]);
+  assert.deepEqual(Object.keys(WAM_CATALOG), ["burns-simple-delay", "burns-simple-eq", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-bitcrusher", "orbitronica-flanger", "orbitronica-phaser", "orbitronica-filter"]);
   for (const [catalogId, entry] of Object.entries(WAM_CATALOG)) {
     assert.equal(entry.id, catalogId, `catalog key ${catalogId} must equal entry.id`);
     assert.equal(typeof entry.displayName, "string");
@@ -85,7 +85,7 @@ test("trusted catalog preserves identity and non-empty presentation metadata", a
 
 test("catalog data is importable without renderer DOM globals", async () => {
   const data = await import("../src/renderer/audio/wamCatalogData.ts");
-  assert.deepEqual(data.WAM_CATALOG_DATA.map((entry) => entry.id), ["burns-simple-delay", "burns-simple-eq", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-bitcrusher", "orbitronica-filter"]);
+  assert.deepEqual(data.WAM_CATALOG_DATA.map((entry) => entry.id), ["burns-simple-delay", "burns-simple-eq", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-bitcrusher", "orbitronica-flanger", "orbitronica-phaser", "orbitronica-filter"]);
   assert.ok(data.WAM_CATALOG_DATA.every((entry) => entry.entry.startsWith("wam/")));
 });
 

@@ -218,9 +218,49 @@ async function bitcrusherMetrics() {
   });
 }
 
+
+type ModParams = { rate: number; depth: number; feedback: number; mix: number };
+type PhaserParams = ModParams & { stages: number };
+type ModNode = AudioNode & { getState(): Promise<{ schemaVersion: number; params: Record<string, number> }>; setState(value: { schemaVersion: 1; params: Record<string, number> }): Promise<void>; destroy(): void };
+async function modulationModule(id: "orbitronica-flanger" | "orbitronica-phaser") {
+  const url = new URL(`./wam/${id}/index.js`, window.location.href).toString();
+  return import(/* @vite-ignore */ url) as Promise<{ default: { createInstance(group: string, context: AudioContext): Promise<{ audioNode: ModNode }> } }>;
+}
+async function renderModulation(id: "orbitronica-flanger" | "orbitronica-phaser", params: Record<string, number>, sampleRate: number) {
+  const context = new OfflineAudioContext(2, Math.ceil(2.2 * sampleRate), sampleRate);
+  const instance = await (await modulationModule(id)).default.createInstance("phase4-dsp", context as unknown as AudioContext);
+  await instance.audioNode.setState({ schemaVersion: 1, params });
+  const source = context.createBufferSource(), buffer = context.createBuffer(2, context.length, sampleRate);
+  for (let c = 0; c < 2; c++) for (let i = 0; i < buffer.length; i++) buffer.getChannelData(c)[i] = .35 * Math.sin(2 * Math.PI * (c ? 1379 : 997) * i / sampleRate) + .15 * Math.sin(2 * Math.PI * (c ? 293 : 431) * i / sampleRate);
+  source.buffer = buffer; source.connect(instance.audioNode); instance.audioNode.connect(context.destination); source.start(); const output = await context.startRendering(); instance.audioNode.destroy(); return output;
+}
+async function phase4Metrics() {
+  const mod = (id: "orbitronica-flanger" | "orbitronica-phaser", parameterId: string, metric: string, tolerance: string, run: () => Promise<{ observed: number; ok: boolean }>) => check(parameterId, metric, tolerance, run, id);
+  for (const rate of [44_100, 48_000]) {
+    await mod("orbitronica-flanger", "all-controls", `finite-feedback-rate-depth-${rate}`, "finite, bounded; state preserves rate/depth/feedback/mix", async () => {
+      const output = await renderModulation("orbitronica-flanger", { rate: 2, depth: .008, feedback: .8, mix: .7 }, rate); const l = output.getChannelData(0), r = output.getChannelData(1);
+      return { observed: Math.max(maxAbs(l), maxAbs(r)), ok: finite(l) && finite(r) && Math.max(maxAbs(l), maxAbs(r)) < 10 && differenceRms(l, r, 0, l.length) > 1e-5 };
+    });
+    await mod("orbitronica-phaser", "all-controls", `finite-feedback-rate-depth-${rate}`, "finite, bounded at feedback .95", async () => {
+      const output = await renderModulation("orbitronica-phaser", { rate: 2, depth: 1, stages: 8, feedback: .95, mix: .7 }, rate); const l = output.getChannelData(0), r = output.getChannelData(1);
+      return { observed: Math.max(maxAbs(l), maxAbs(r)), ok: finite(l) && finite(r) && Math.max(maxAbs(l), maxAbs(r)) < 10 && differenceRms(l, r, 0, l.length) > 1e-5 };
+    });
+  }
+  await mod("orbitronica-flanger", "mix", "equal-power-neutral-and-wet", "mix=0 exact dry; mix=.7 meaningful wet delta", async () => {
+    const dry = await renderModulation("orbitronica-flanger", { rate: .5, depth: .006, feedback: 0, mix: 0 }, 48_000), wet = await renderModulation("orbitronica-flanger", { rate: .5, depth: .006, feedback: 0, mix: .7 }, 48_000); const delta = differenceRms(dry.getChannelData(0), wet.getChannelData(0), 0, dry.length); return { observed: delta, ok: delta >= 1e-4 };
+  });
+  await mod("orbitronica-phaser", "stages", "fixed-graph-stage-crossfade-state", "4..8 exact state and non-neutral output per tap", async () => {
+    const context = new OfflineAudioContext(2, 256, 48_000), node = (await (await modulationModule("orbitronica-phaser")).default.createInstance("stage-state", context as unknown as AudioContext)).audioNode;
+    let exact = true; for (let stages = 4; stages <= 8; stages++) { await node.setState({ schemaVersion: 1, params: { rate: .5, depth: .75, stages, feedback: .5, mix: .7 } }); exact &&= (await node.getState()).params.stages === stages; } node.destroy(); return { observed: exact ? 5 : 0, ok: exact };
+  });
+  await mod("orbitronica-phaser", "mix", "equal-power-neutral-and-wet", "mix=0 exact dry; mix=.7 meaningful wet delta", async () => {
+    const dry = await renderModulation("orbitronica-phaser", { rate: .5, depth: .75, stages: 6, feedback: 0, mix: 0 }, 48_000), wet = await renderModulation("orbitronica-phaser", { rate: .5, depth: .75, stages: 6, feedback: 0, mix: .7 }, 48_000); const delta = differenceRms(dry.getChannelData(0), wet.getChannelData(0), 0, dry.length); return { observed: delta, ok: delta >= 1e-4 };
+  });
+}
+
 async function run() {
   try {
-    await controlMetrics(44_100); await controlMetrics(48_000); await safetyMetrics(); await bitcrusherMetrics();
+    await controlMetrics(44_100); await controlMetrics(48_000); await safetyMetrics(); await bitcrusherMetrics(); await phase4Metrics();
     const status = metrics.every((metric) => metric.ok) ? "pass" : "fail";
     const payload = { status, results: metrics };
     result!.textContent = JSON.stringify(payload); console.log(`ORBITRONICA_WAM_DSP ${JSON.stringify(payload)}`);

@@ -62,7 +62,7 @@ test("packaged smoke uses the real production Electron entry rather than the dev
 
 test("first-party filter, compressor, and bitcrusher are cataloged with byte-copied, hash-locked manifests", () => {
   const catalog = read("src/renderer/audio/wamCatalogData.ts");
-  for (const id of ["orbitronica-filter", "orbitronica-compressor", "orbitronica-bitcrusher"]) {
+  for (const id of ["orbitronica-filter", "orbitronica-compressor", "orbitronica-bitcrusher", "orbitronica-flanger", "orbitronica-phaser"]) {
     const sourceManifest = read(`plugins/src/${id}/manifest.json`);
     const publicManifest = read(`public/wam/${id}/manifest.json`);
     const manifest = JSON.parse(publicManifest) as { assets: Record<string, string>; origin: string; sourcePath: string; buildTool: string };
@@ -95,7 +95,7 @@ test("Phase 1 vendored EQ retains pinned provenance and the documented fallback 
 
 test("first-party build ownership cannot rewrite immutable Burns payloads", () => {
   const builder = read("scripts/build-plugins.mjs");
-  assert.match(builder, /firstPartyIds = \["orbitronica-filter", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-bitcrusher"\]/);
+  assert.match(builder, /firstPartyIds = \["orbitronica-filter", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-bitcrusher", "orbitronica-flanger", "orbitronica-phaser"\]/);
   assert.doesNotMatch(builder, /burns-simple-eq|burns-distortion/);
   const eq = JSON.parse(read("public/wam/burns-simple-eq/manifest.json")) as { origin: string; assets: Record<string, string> };
   assert.equal(eq.origin, "vendored");
@@ -126,4 +126,14 @@ test("bitcrusher DSP acceptance is packaged, quantitative, and precedes DSP with
   assert.match(renderer, /equal-power-projection/);
   assert.match(renderer, /orbitronica-bitcrusher/);
   assert.match(renderer, /44_100/); assert.match(renderer, /48_000/);
+});
+
+
+test("Phase 4 flanger/phaser retain bounded fixed-graph topology and packaged DSP coverage", () => {
+  const flanger = read("plugins/src/orbitronica-flanger/index.ts"), phaser = read("plugins/src/orbitronica-phaser/index.ts"), harness = read("src/renderer/wamDspTest.ts");
+  for (const parameter of ["rate", "depth", "feedback", "mix"]) assert.match(flanger, new RegExp(parameter));
+  assert.match(flanger, /lfo\.start\(\)/); assert.match(flanger, /lfo\.stop\(\)/);
+  assert.match(phaser, /for \(let i = 0; i < 8; i\+\+\)/); assert.match(phaser, /cycleBreak\.delayTime\.value = 1 \/ context\.sampleRate/);
+  assert.match(phaser, /wetBus\.connect\(this\.feedbackGain\)/); assert.match(phaser, /feedbackGain\.connect\(this\.cycleBreak\)/); assert.match(phaser, /cycleBreak\.connect\(this\.stages\[0\]\)/);
+  assert.match(harness, /phase4Metrics/); assert.match(harness, /orbitronica-phaser/); assert.match(harness, /orbitronica-flanger/);
 });
