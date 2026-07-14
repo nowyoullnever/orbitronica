@@ -245,6 +245,12 @@ async function phase4Metrics() {
       const output = await renderModulation("orbitronica-phaser", { rate: 2, depth: 1, stages: 8, feedback: .95, mix: .7 }, rate); const l = output.getChannelData(0), r = output.getChannelData(1);
       return { observed: Math.max(maxAbs(l), maxAbs(r)), ok: finite(l) && finite(r) && Math.max(maxAbs(l), maxAbs(r)) < 10 && differenceRms(l, r, 0, l.length) > 1e-5 };
     });
+    await mod("orbitronica-phaser", "feedback", `notch-resonance-delta-${rate}`, "absolute feedback .8 changes wet response >= 2 dB versus zero", async () => {
+      const base = await renderModulation("orbitronica-phaser", { rate: .5, depth: .75, stages: 6, feedback: 0, mix: 1 }, rate);
+      const fed = await renderModulation("orbitronica-phaser", { rate: .5, depth: .75, stages: 6, feedback: .8, mix: 1 }, rate);
+      const observed = Math.abs(db(measure(fed, 1.2, 2) / measure(base, 1.2, 2)));
+      return { observed, ok: observed >= 2 && finite(fed.getChannelData(0)) && maxAbs(fed.getChannelData(0)) < 10 };
+    });
   }
   await mod("orbitronica-flanger", "mix", "equal-power-neutral-and-wet", "mix=0 exact dry; mix=.7 meaningful wet delta", async () => {
     const dry = await renderModulation("orbitronica-flanger", { rate: .5, depth: .006, feedback: 0, mix: 0 }, 48_000), wet = await renderModulation("orbitronica-flanger", { rate: .5, depth: .006, feedback: 0, mix: .7 }, 48_000); const delta = differenceRms(dry.getChannelData(0), wet.getChannelData(0), 0, dry.length); return { observed: delta, ok: delta >= 1e-4 };

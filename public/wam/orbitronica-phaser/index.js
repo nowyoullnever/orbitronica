@@ -2,9 +2,10 @@
 var defaults = { rate: 0.3, depth: 0.5, stages: 6, feedback: 0.2, mix: 0 };
 var clamp = (n, a, b) => Math.min(b, Math.max(a, n));
 var dangerous = (v) => !!v && typeof v === "object" && Object.entries(v).some(([k, x]) => ["__proto__", "constructor", "prototype"].includes(k) || dangerous(x));
-var PhaserNode = class {
+var PhaserNode = class _PhaserNode {
   input;
   output;
+  limiter;
   stages = [];
   taps = [];
   wetBus;
@@ -21,6 +22,9 @@ var PhaserNode = class {
   constructor(context) {
     this.input = context.createGain();
     this.output = context.createGain();
+    this.limiter = context.createWaveShaper();
+    this.limiter.curve = _PhaserNode.limiterCurve();
+    this.limiter.oversample = "2x";
     this.wetBus = context.createGain();
     this.feedbackGain = context.createGain();
     this.cycleBreak = context.createDelay(0.1);
@@ -35,7 +39,8 @@ var PhaserNode = class {
     this.wetBus.connect(this.wet);
     this.wet.connect(this.output);
     this.wetBus.connect(this.feedbackGain);
-    this.feedbackGain.connect(this.cycleBreak);
+    this.feedbackGain.connect(this.limiter);
+    this.limiter.connect(this.cycleBreak);
     for (let i = 0; i < 8; i++) {
       const stage = context.createBiquadFilter();
       stage.type = "allpass";
@@ -61,11 +66,19 @@ var PhaserNode = class {
     this.apply(this.#state.params);
     Object.defineProperties(this.input, { connect: { value: this.output.connect.bind(this.output) }, disconnect: { value: this.output.disconnect.bind(this.output) }, destroy: { value: () => this.destroy() }, getState: { value: () => this.getState() }, setState: { value: (v) => this.setState(v) }, paramMgr: { value: { getState: async () => structuredClone(this.#state.params), getParamsValues: () => structuredClone(this.#state.params), setState: async (p) => this.setState({ schemaVersion: 1, params: p }) } } });
   }
+  static limiterCurve() {
+    const curve = new Float32Array(2048);
+    for (let i = 0; i < curve.length; i++) {
+      const x = i * 2 / (curve.length - 1) - 1;
+      curve[i] = 0.55 * Math.tanh(3 * x);
+    }
+    return curve;
+  }
   apply(p) {
     const now = this.output.context.currentTime, maxHz = Math.min(2e4, 0.45 * this.output.context.sampleRate), span = 800 * p.depth, selected = Math.round(p.stages) - 4;
     this.lfo.frequency.setTargetAtTime(p.rate, now, 0.02);
     this.modulation.gain.setTargetAtTime(span, now, 0.02);
-    this.feedbackGain.gain.setTargetAtTime(clamp(p.feedback, -0.12, 0.12), now, 0.02);
+    this.feedbackGain.gain.setTargetAtTime(p.feedback, now, 0.02);
     this.dry.gain.setTargetAtTime(Math.cos(p.mix * Math.PI / 2), now, 0.02);
     this.wet.gain.setTargetAtTime(Math.sin(p.mix * Math.PI / 2), now, 0.02);
     for (let i = 0; i < 8; i++) {
@@ -94,7 +107,7 @@ var PhaserNode = class {
     this.lfo.stop();
     for (const source of this.offsets) source.stop();
     this.#disconnectInput();
-    for (const n of [this.lfo, this.modulation, this.wetBus, this.feedbackGain, this.cycleBreak, this.dry, this.wet, this.output, ...this.stages, ...this.taps, ...this.offsets]) n.disconnect();
+    for (const n of [this.lfo, this.modulation, this.wetBus, this.feedbackGain, this.limiter, this.cycleBreak, this.dry, this.wet, this.output, ...this.stages, ...this.taps, ...this.offsets]) n.disconnect();
   }
 };
 var Module = class {

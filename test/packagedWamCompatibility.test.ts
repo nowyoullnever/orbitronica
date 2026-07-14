@@ -134,6 +134,6 @@ test("Phase 4 flanger/phaser retain bounded fixed-graph topology and packaged DS
   for (const parameter of ["rate", "depth", "feedback", "mix"]) assert.match(flanger, new RegExp(parameter));
   assert.match(flanger, /lfo\.start\(\)/); assert.match(flanger, /lfo\.stop\(\)/);
   assert.match(phaser, /for \(let i = 0; i < 8; i\+\+\)/); assert.match(phaser, /cycleBreak\.delayTime\.value = 1 \/ context\.sampleRate/);
-  assert.match(phaser, /wetBus\.connect\(this\.feedbackGain\)/); assert.match(phaser, /feedbackGain\.connect\(this\.cycleBreak\)/); assert.match(phaser, /cycleBreak\.connect\(this\.stages\[0\]\)/);
+  assert.match(phaser, /wetBus\.connect\(this\.feedbackGain\)/); assert.match(phaser, /feedbackGain\.connect\(this\.limiter\)/); assert.match(phaser, /limiter\.connect\(this\.cycleBreak\)/); assert.match(phaser, /cycleBreak\.connect\(this\.stages\[0\]\)/);
   assert.match(harness, /phase4Metrics/); assert.match(harness, /orbitronica-phaser/); assert.match(harness, /orbitronica-flanger/);
 });
