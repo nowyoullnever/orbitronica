@@ -1,3 +1,5 @@
+
+const stateRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 type Params = { rate: number; depth: number; feedback: number; mix: number };
 type State = { schemaVersion: 1; params: Params };
 const defaults: Params = { rate: .25, depth: .003, feedback: .25, mix: 0 };
@@ -15,7 +17,17 @@ class FlangerNode {
   }
   apply(p: Params) { const now = this.delay.context.currentTime; this.lfo.frequency.setTargetAtTime(p.rate, now, .02); this.offset.offset.setTargetAtTime(.01, now, .02); this.depth.gain.setTargetAtTime(p.depth, now, .02); this.feedbackNode.gain.setTargetAtTime(p.feedback, now, .02); this.dry.gain.setTargetAtTime(Math.cos(p.mix * Math.PI / 2), now, .02); this.wet.gain.setTargetAtTime(Math.sin(p.mix * Math.PI / 2), now, .02); }
   async getState(): Promise<State> { return structuredClone(this.#state); }
-  async setState(v: unknown) { if (!v || typeof v !== "object" || Array.isArray(v) || dangerous(v)) throw new Error("invalid-flanger-state"); const src = v as { schemaVersion?: unknown; params?: unknown }; if (src.schemaVersion !== undefined && src.schemaVersion !== 0 && src.schemaVersion !== 1) throw new Error("unsupported-flanger-state"); const incoming = (src.params ?? src) as Record<string, unknown>; const old = this.#state.params; const raw = { rate: incoming.rate ?? old.rate, depth: incoming.depth ?? old.depth, feedback: incoming.feedback ?? old.feedback, mix: incoming.mix ?? old.mix }; if (!Object.values(raw).every((x) => typeof x === "number" && Number.isFinite(x))) throw new Error("invalid-flanger-state"); this.#state = { schemaVersion: 1, params: { rate: clamp(raw.rate as number, .05, 10), depth: clamp(raw.depth as number, 0, .009), feedback: clamp(raw.feedback as number, -.95, .95), mix: clamp(raw.mix as number, 0, 1) } }; this.apply(this.#state.params); }
+  async setState(v: unknown) {
+    if (!stateRecord(v) || dangerous(v)) throw new Error("invalid-flanger-state");
+    const source = v as { schemaVersion?: unknown; params?: unknown };
+    if (source.schemaVersion !== undefined && source.schemaVersion !== 0 && source.schemaVersion !== 1) throw new Error("unsupported-flanger-state");
+    const incoming = source.params === undefined ? source : source.params;
+    if (!stateRecord(incoming) || dangerous(incoming)) throw new Error("invalid-flanger-state");
+    const old = this.#state.params;
+    const raw = { rate: incoming.rate ?? old.rate, depth: incoming.depth ?? old.depth, feedback: incoming.feedback ?? old.feedback, mix: incoming.mix ?? old.mix };
+    if (!Object.values(raw).every((entry) => typeof entry === "number" && Number.isFinite(entry))) throw new Error("invalid-flanger-state");
+    this.#state = { schemaVersion: 1, params: { rate: clamp(raw.rate as number, .05, 10), depth: clamp(raw.depth as number, 0, .009), feedback: clamp(raw.feedback as number, -.95, .95), mix: clamp(raw.mix as number, 0, 1) } }; this.apply(this.#state.params);
+  }
   destroy() { if (this.#destroyed) return; this.#destroyed = true; this.lfo.stop(); this.offset.stop(); this.#disconnectInput(); for (const n of [this.delay, this.lfo, this.depth, this.offset, this.feedbackNode, this.wet, this.dry, this.output]) n.disconnect(); }
 }
 class Module { async createInstance(_group: string, context: AudioContext) { const node = new FlangerNode(context); return { audioNode: node.input, createGui: () => { const root = document.createElement("div"); root.textContent = "Orbitronica Flanger"; return root; }, destroyGui: (gui: HTMLElement) => gui.remove() }; } }

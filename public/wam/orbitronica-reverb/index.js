@@ -1,4 +1,5 @@
 // plugins/src/orbitronica-reverb/index.ts
+var stateRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 var defaults = { roomSize: 0.5, damping: 0.35, width: 1, mix: 0 };
 var COMB_REFERENCE_FRAMES = {
   left: [1371, 1672, 1927, 2306, 2721, 3171, 3674, 4281],
@@ -124,10 +125,12 @@ var ReverbNode = class {
     return structuredClone(this.#state);
   }
   async setState(value) {
-    if (!value || typeof value !== "object" || Array.isArray(value) || dangerous(value)) throw new Error("invalid-reverb-state");
+    if (!stateRecord(value) || dangerous(value)) throw new Error("invalid-reverb-state");
     const source = value;
     if (source.schemaVersion !== void 0 && source.schemaVersion !== 0 && source.schemaVersion !== 1) throw new Error("unsupported-reverb-state");
-    const incoming = source.params ?? source, old = this.#state.params;
+    const incoming = source.params === void 0 ? source : source.params;
+    if (!stateRecord(incoming) || dangerous(incoming)) throw new Error("invalid-reverb-state");
+    const old = this.#state.params;
     const raw = { roomSize: incoming.roomSize ?? old.roomSize, damping: incoming.damping ?? old.damping, width: incoming.width ?? old.width, mix: incoming.mix ?? old.mix };
     if (!Object.values(raw).every((entry) => typeof entry === "number" && Number.isFinite(entry))) throw new Error("invalid-reverb-state");
     this.#state = { schemaVersion: 1, params: { roomSize: clamp(raw.roomSize, 0, 1), damping: clamp(raw.damping, 0, 1), width: clamp(raw.width, 0, 1), mix: clamp(raw.mix, 0, 1) } };

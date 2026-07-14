@@ -23,7 +23,9 @@ test("frozen trusted WAM payload is hash-locked and packaged file smoke is requi
   assert.match(record, /burns-audio-wam@0\.2\.54/);
   assert.match(record, /03dbe1a9891482e43b16392832eeea675e8468d019d4a212cf5d6dda2300595d/);
   assert.match(record, /file:\/\//);
-  assert.match(record, /sharedArrayBuffer: false/);
+  assert.match(record, /nine hash-locked effects/i);
+  assert.match(record, /isolated temporary builds/i);
+  assert.match(record, /25 repeated rack lifecycle cycles/i);
   assert.match(record, /queue.*circuit-breaker/is);
   assert.match(packageJson, /"@webaudiomodules\/sdk": "0\.0\.12"/);
   assert.match(packageJson, /"smoke:packaged-wam"/);
@@ -31,7 +33,7 @@ test("frozen trusted WAM payload is hash-locked and packaged file smoke is requi
   assert.match(record, /PDC.*getCompensationDelay.*excluded/is);
   assert.match(record, /inter-orbit drift/i);
 
-  assert.deepEqual(Object.keys(manifest.assets).sort(), ["descriptor.json", "index.js", "screenshot.png"]);
+  assert.deepEqual(Object.keys(manifest.assets).sort(), ["NOTICE.txt", "descriptor.json", "index.js", "screenshot.png"]);
   for (const [file, expectedHash] of Object.entries(manifest.assets)) {
     const actualHash = createHash("sha256").update(fs.readFileSync(assetPath(file))).digest("hex");
     assert.equal(actualHash, expectedHash, `${file} must match the frozen manifest`);

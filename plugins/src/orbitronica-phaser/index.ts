@@ -1,3 +1,5 @@
+
+const stateRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 type Params = { rate: number; depth: number; stages: number; feedback: number; mix: number };
 type State = { schemaVersion: 1; params: Params };
 const defaults: Params = { rate: .3, depth: .5, stages: 6, feedback: .2, mix: 0 };
@@ -16,7 +18,17 @@ class PhaserNode {
   static limiterCurve() { const curve = new Float32Array(2048); for (let i = 0; i < curve.length; i++) { const x = i * 2 / (curve.length - 1) - 1; curve[i] = .55 * Math.tanh(3 * x); } return curve; }
   apply(p: Params) { const now = this.output.context.currentTime, maxHz = Math.min(20000, .45 * this.output.context.sampleRate), span = 800 * p.depth, selected = Math.round(p.stages) - 4; this.lfo.frequency.setTargetAtTime(p.rate, now, .02); this.modulation.gain.setTargetAtTime(span, now, .02); this.feedbackGain.gain.setTargetAtTime(p.feedback, now, .02); this.dry.gain.setTargetAtTime(Math.cos(p.mix * Math.PI / 2), now, .02); this.wet.gain.setTargetAtTime(Math.sin(p.mix * Math.PI / 2), now, .02); for (let i = 0; i < 8; i++) { const center = clamp(200 * 1.34 ** i, 20, maxHz); this.offsets[i].offset.setTargetAtTime(center, now, .02); const target = i === selected ? 1 : 0; this.taps[i].gain.setTargetAtTime(target, now, .015); } }
   async getState(): Promise<State> { return structuredClone(this.#state); }
-  async setState(v: unknown) { if (!v || typeof v !== "object" || Array.isArray(v) || dangerous(v)) throw new Error("invalid-phaser-state"); const src = v as { schemaVersion?: unknown; params?: unknown }; if (src.schemaVersion !== undefined && src.schemaVersion !== 0 && src.schemaVersion !== 1) throw new Error("unsupported-phaser-state"); const incoming = (src.params ?? src) as Record<string, unknown>, old = this.#state.params; const raw = { rate: incoming.rate ?? old.rate, depth: incoming.depth ?? old.depth, stages: incoming.stages ?? old.stages, feedback: incoming.feedback ?? old.feedback, mix: incoming.mix ?? old.mix }; if (!Object.values(raw).every((x) => typeof x === "number" && Number.isFinite(x))) throw new Error("invalid-phaser-state"); this.#state = { schemaVersion: 1, params: { rate: clamp(raw.rate as number, .05, 10), depth: clamp(raw.depth as number, 0, 1), stages: Math.round(clamp(raw.stages as number, 4, 8)), feedback: clamp(raw.feedback as number, -.95, .95), mix: clamp(raw.mix as number, 0, 1) } }; this.apply(this.#state.params); }
+  async setState(v: unknown) {
+    if (!stateRecord(v) || dangerous(v)) throw new Error("invalid-phaser-state");
+    const source = v as { schemaVersion?: unknown; params?: unknown };
+    if (source.schemaVersion !== undefined && source.schemaVersion !== 0 && source.schemaVersion !== 1) throw new Error("unsupported-phaser-state");
+    const incoming = source.params === undefined ? source : source.params;
+    if (!stateRecord(incoming) || dangerous(incoming)) throw new Error("invalid-phaser-state");
+    const old = this.#state.params;
+    const raw = { rate: incoming.rate ?? old.rate, depth: incoming.depth ?? old.depth, stages: incoming.stages ?? old.stages, feedback: incoming.feedback ?? old.feedback, mix: incoming.mix ?? old.mix };
+    if (!Object.values(raw).every((entry) => typeof entry === "number" && Number.isFinite(entry))) throw new Error("invalid-phaser-state");
+    this.#state = { schemaVersion: 1, params: { rate: clamp(raw.rate as number, .05, 10), depth: clamp(raw.depth as number, 0, 1), stages: Math.round(clamp(raw.stages as number, 4, 8)), feedback: clamp(raw.feedback as number, -.95, .95), mix: clamp(raw.mix as number, 0, 1) } }; this.apply(this.#state.params);
+  }
   destroy() { if (this.#destroyed) return; this.#destroyed = true; this.lfo.stop(); for (const source of this.offsets) source.stop(); this.#disconnectInput(); for (const n of [this.lfo, this.modulation, this.wetBus, this.feedbackGain, this.limiter, this.cycleBreak, this.dry, this.wet, this.output, ...this.stages, ...this.taps, ...this.offsets]) n.disconnect(); }
 }
 class Module { async createInstance(_group: string, context: AudioContext) { const node = new PhaserNode(context); return { audioNode: node.input, createGui: () => { const root = document.createElement("div"); root.textContent = "Orbitronica Phaser"; return root; }, destroyGui: (gui: HTMLElement) => gui.remove() }; } }

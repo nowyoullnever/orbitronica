@@ -1,0 +1,7 @@
+Burns Simple Delay distribution notice
+
+This catalog entry includes an unmodified executable payload from
+https://github.com/boourns/burns-audio-wam, package burns-audio-wam@0.2.54.
+The upstream package declares the MIT license. This Orbitronica notice sidecar
+is distribution metadata only; it is not part of the upstream executable
+payload and is hash-listed separately in the local provenance manifest.

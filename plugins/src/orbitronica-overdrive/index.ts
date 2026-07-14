@@ -1,3 +1,5 @@
+
+const stateRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 type Params = { drive: number; tone: number; outputGain: number; mix: number };
 type State = { schemaVersion: 1; params: Params };
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -29,13 +31,16 @@ class OrbitronicaOverdriveNode {
     this.dry.gain.setTargetAtTime(Math.cos(params.mix * Math.PI / 2), now, .02); this.wet.gain.setTargetAtTime(Math.sin(params.mix * Math.PI / 2), now, .02);
   }
   async getState(): Promise<State> { return structuredClone(this.#state); }
-  async setState(value: unknown): Promise<void> {
-    if (!value || typeof value !== "object" || isDangerous(value)) throw new Error("invalid-overdrive-state");
-    const state = value as { schemaVersion?: unknown; params?: unknown }; if (state.schemaVersion !== undefined && state.schemaVersion !== 0 && state.schemaVersion !== 1) throw new Error("unsupported-overdrive-state");
-    const incoming = (state.params ?? state) as Record<string, unknown>, current = this.#state.params;
-    const next = { drive: incoming.drive ?? current.drive, tone: incoming.tone ?? current.tone, outputGain: incoming.outputGain ?? current.outputGain, mix: incoming.mix ?? current.mix };
-    if (!Object.values(next).every(Number.isFinite)) throw new Error("invalid-overdrive-state");
-    this.#state = { schemaVersion: 1, params: { drive: clamp(next.drive as number, 0, 1), tone: clamp(next.tone as number, 500, 12000), outputGain: clamp(next.outputGain as number, -24, 12), mix: clamp(next.mix as number, 0, 1) } }; this.apply(this.#state.params);
+  async setState(value: unknown) {
+    if (!stateRecord(value) || isDangerous(value)) throw new Error("invalid-overdrive-state");
+    const source = value as { schemaVersion?: unknown; params?: unknown };
+    if (source.schemaVersion !== undefined && source.schemaVersion !== 0 && source.schemaVersion !== 1) throw new Error("unsupported-overdrive-state");
+    const incoming = source.params === undefined ? source : source.params;
+    if (!stateRecord(incoming) || isDangerous(incoming)) throw new Error("invalid-overdrive-state");
+    const current = this.#state.params;
+    const raw = { drive: incoming.drive ?? current.drive, tone: incoming.tone ?? current.tone, outputGain: incoming.outputGain ?? current.outputGain, mix: incoming.mix ?? current.mix };
+    if (!Object.values(raw).every((entry) => typeof entry === "number" && Number.isFinite(entry))) throw new Error("invalid-overdrive-state");
+    this.#state = { schemaVersion: 1, params: { drive: clamp(raw.drive as number, 0, 1), tone: clamp(raw.tone as number, 500, 12000), outputGain: clamp(raw.outputGain as number, -24, 12), mix: clamp(raw.mix as number, 0, 1) } }; this.apply(this.#state.params);
   }
   destroy() { if (this.#destroyed) return; this.#destroyed = true; for (const node of [this.input, this.shaper, this.tone, this.wet, this.dry, this.output]) node.disconnect(); }
 }

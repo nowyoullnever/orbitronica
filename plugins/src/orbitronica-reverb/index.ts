@@ -4,6 +4,8 @@
  * delay-frame choices below are newly selected Orbitronica constants, not
  * recovered from any implementation or derivative port.
  */
+
+const stateRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 type Params = { roomSize: number; damping: number; width: number; mix: number };
 type State = { schemaVersion: 1; params: Params };
 
@@ -88,16 +90,16 @@ class ReverbNode {
 
   async getState(): Promise<State> { return structuredClone(this.#state); }
   async setState(value: unknown) {
-    if (!value || typeof value !== "object" || Array.isArray(value) || dangerous(value)) throw new Error("invalid-reverb-state");
+    if (!stateRecord(value) || dangerous(value)) throw new Error("invalid-reverb-state");
     const source = value as { schemaVersion?: unknown; params?: unknown };
     if (source.schemaVersion !== undefined && source.schemaVersion !== 0 && source.schemaVersion !== 1) throw new Error("unsupported-reverb-state");
-    const incoming = (source.params ?? source) as Record<string, unknown>, old = this.#state.params;
+    const incoming = source.params === undefined ? source : source.params;
+    if (!stateRecord(incoming) || dangerous(incoming)) throw new Error("invalid-reverb-state");
+    const old = this.#state.params;
     const raw = { roomSize: incoming.roomSize ?? old.roomSize, damping: incoming.damping ?? old.damping, width: incoming.width ?? old.width, mix: incoming.mix ?? old.mix };
     if (!Object.values(raw).every((entry) => typeof entry === "number" && Number.isFinite(entry))) throw new Error("invalid-reverb-state");
-    this.#state = { schemaVersion: 1, params: { roomSize: clamp(raw.roomSize as number, 0, 1), damping: clamp(raw.damping as number, 0, 1), width: clamp(raw.width as number, 0, 1), mix: clamp(raw.mix as number, 0, 1) } };
-    this.apply(this.#state.params);
+    this.#state = { schemaVersion: 1, params: { roomSize: clamp(raw.roomSize as number, 0, 1), damping: clamp(raw.damping as number, 0, 1), width: clamp(raw.width as number, 0, 1), mix: clamp(raw.mix as number, 0, 1) } }; this.apply(this.#state.params);
   }
-
   destroy() {
     if (this.#destroyed) return; this.#destroyed = true; this.#disconnectInput();
     for (const comb of this.combs) for (const node of [comb.delay, comb.damper, comb.feedback, comb.output]) node.disconnect();

@@ -1,4 +1,5 @@
 // plugins/src/orbitronica-flanger/index.ts
+var stateRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 var defaults = { rate: 0.25, depth: 3e-3, feedback: 0.25, mix: 0 };
 var clamp = (n, a, b) => Math.min(b, Math.max(a, n));
 var dangerous = (v) => !!v && typeof v === "object" && Object.entries(v).some(([k, x]) => ["__proto__", "constructor", "prototype"].includes(k) || dangerous(x));
@@ -55,13 +56,14 @@ var FlangerNode = class {
     return structuredClone(this.#state);
   }
   async setState(v) {
-    if (!v || typeof v !== "object" || Array.isArray(v) || dangerous(v)) throw new Error("invalid-flanger-state");
-    const src = v;
-    if (src.schemaVersion !== void 0 && src.schemaVersion !== 0 && src.schemaVersion !== 1) throw new Error("unsupported-flanger-state");
-    const incoming = src.params ?? src;
+    if (!stateRecord(v) || dangerous(v)) throw new Error("invalid-flanger-state");
+    const source = v;
+    if (source.schemaVersion !== void 0 && source.schemaVersion !== 0 && source.schemaVersion !== 1) throw new Error("unsupported-flanger-state");
+    const incoming = source.params === void 0 ? source : source.params;
+    if (!stateRecord(incoming) || dangerous(incoming)) throw new Error("invalid-flanger-state");
     const old = this.#state.params;
     const raw = { rate: incoming.rate ?? old.rate, depth: incoming.depth ?? old.depth, feedback: incoming.feedback ?? old.feedback, mix: incoming.mix ?? old.mix };
-    if (!Object.values(raw).every((x) => typeof x === "number" && Number.isFinite(x))) throw new Error("invalid-flanger-state");
+    if (!Object.values(raw).every((entry) => typeof entry === "number" && Number.isFinite(entry))) throw new Error("invalid-flanger-state");
     this.#state = { schemaVersion: 1, params: { rate: clamp(raw.rate, 0.05, 10), depth: clamp(raw.depth, 0, 9e-3), feedback: clamp(raw.feedback, -0.95, 0.95), mix: clamp(raw.mix, 0, 1) } };
     this.apply(this.#state.params);
   }

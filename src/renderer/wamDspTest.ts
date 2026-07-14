@@ -227,13 +227,16 @@ async function modulationModule(id: "orbitronica-flanger" | "orbitronica-phaser"
   const url = new URL(`./wam/${id}/index.js`, window.location.href).toString();
   return import(/* @vite-ignore */ url) as Promise<{ default: { createInstance(group: string, context: AudioContext): Promise<{ audioNode: ModNode }> } }>;
 }
-async function renderModulation(id: "orbitronica-flanger" | "orbitronica-phaser", params: Record<string, number>, sampleRate: number) {
+async function renderModulation(id: "orbitronica-flanger" | "orbitronica-phaser", params: Record<string, number>, sampleRate: number, stageSwitch?: number) {
   const context = new OfflineAudioContext(2, Math.ceil(2.2 * sampleRate), sampleRate);
   const instance = await (await modulationModule(id)).default.createInstance("phase4-dsp", context as unknown as AudioContext);
   await instance.audioNode.setState({ schemaVersion: 1, params });
   const source = context.createBufferSource(), buffer = context.createBuffer(2, context.length, sampleRate);
   for (let c = 0; c < 2; c++) for (let i = 0; i < buffer.length; i++) buffer.getChannelData(c)[i] = .35 * Math.sin(2 * Math.PI * (c ? 1379 : 997) * i / sampleRate) + .15 * Math.sin(2 * Math.PI * (c ? 293 : 431) * i / sampleRate);
-  source.buffer = buffer; source.connect(instance.audioNode); instance.audioNode.connect(context.destination); source.start(); const output = await context.startRendering(); instance.audioNode.destroy(); return output;
+  source.buffer = buffer; source.connect(instance.audioNode); instance.audioNode.connect(context.destination); source.start();
+  const rendering = context.startRendering();
+  if (stageSwitch !== undefined) { await context.suspend(1); await instance.audioNode.setState({ schemaVersion: 1, params: { ...params, stages: stageSwitch } }); context.resume(); }
+  const output = await rendering; instance.audioNode.destroy(); return output;
 }
 async function phase4Metrics() {
   const mod = (id: "orbitronica-flanger" | "orbitronica-phaser", parameterId: string, metric: string, tolerance: string, run: () => Promise<{ observed: number; ok: boolean }>) => check(parameterId, metric, tolerance, run, id);
@@ -263,6 +266,26 @@ async function phase4Metrics() {
   await mod("orbitronica-phaser", "mix", "equal-power-neutral-and-wet", "mix=0 exact dry; mix=.7 meaningful wet delta", async () => {
     const dry = await renderModulation("orbitronica-phaser", { rate: .5, depth: .75, stages: 6, feedback: 0, mix: 0 }, 48_000), wet = await renderModulation("orbitronica-phaser", { rate: .5, depth: .75, stages: 6, feedback: 0, mix: .7 }, 48_000); const delta = differenceRms(dry.getChannelData(0), wet.getChannelData(0), 0, dry.length); return { observed: delta, ok: delta >= 1e-4 };
   });
+  for (const id of ["orbitronica-flanger", "orbitronica-phaser"] as const) {
+    const base: Record<string, number> = id === "orbitronica-flanger" ? { rate: .5, depth: .004, feedback: .2, mix: 1 } : { rate: .5, depth: .5, stages: 6, feedback: .2, mix: 1 };
+    for (const [parameterId, changed] of [["rate", { rate: 4 }], ["depth", { depth: id === "orbitronica-flanger" ? .008 : 1 }], ["feedback", { feedback: .8 }]] as const) await mod(id, parameterId, `per-control-response-${id}`, "control changes post-preroll response", async () => {
+      const plain = await renderModulation(id, base, 48_000), varied = await renderModulation(id, { ...base, ...changed }, 48_000);
+      const observed = differenceRms(plain.getChannelData(0), varied.getChannelData(0), at(.6, 48_000), plain.length);
+      return { observed, ok: observed > 1e-5 && finite(varied.getChannelData(0)) };
+    });
+    await mod(id, "mix", `equal-power-coefficients-${id}`, "projection coefficients within .02 of cos/sin at mix .5", async () => {
+      const dry = await renderModulation(id, { ...base, mix: 0 }, 48_000), wet = await renderModulation(id, { ...base, mix: 1 }, 48_000), mixed = await renderModulation(id, { ...base, mix: .5 }, 48_000);
+      const a = dry.getChannelData(0), b = wet.getChannelData(0), c = mixed.getChannelData(0), aa = dot(a, a), ab = dot(a, b), bb = dot(b, b), ac = dot(a, c), bc = dot(b, c), determinant = aa * bb - ab * ab;
+      const dryGain = (ac * bb - bc * ab) / determinant, wetGain = (bc * aa - ac * ab) / determinant, observed = Math.max(Math.abs(dryGain - Math.SQRT1_2), Math.abs(wetGain - Math.SQRT1_2));
+      return { observed, ok: Number.isFinite(observed) && observed <= .02 };
+    });
+  }
+  await mod("orbitronica-phaser", "stages", "switch-during-audio-click-and-fixed-node-count", "4→8 switch during rendering remains finite with bounded adjacent-sample click", async () => {
+    const switched = await renderModulation("orbitronica-phaser", { rate: .8, depth: .8, stages: 4, feedback: .5, mix: .7 }, 48_000, 8), samples = switched.getChannelData(0), atSwitch = at(1, 48_000);
+    let click = 0; for (let i = atSwitch - 32; i < atSwitch + 32; i++) click = Math.max(click, Math.abs(samples[i] - samples[i - 1]));
+    return { observed: click, ok: finite(samples) && click < .5 };
+  });
+
 }
 
 async function reverbModule() {
