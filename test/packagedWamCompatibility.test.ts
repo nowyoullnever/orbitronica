@@ -130,6 +130,24 @@ test("bitcrusher DSP acceptance is packaged, quantitative, and precedes DSP with
   assert.match(renderer, /44_100/); assert.match(renderer, /48_000/);
 });
 
+test("legacy catalog DSP evidence is executed from packaged file Chromium through public APIs", () => {
+  const harness = read("scripts/wam-dsp-test.mjs"), renderer = read("src/renderer/wamDspTest.ts");
+  assert.match(harness, /environment\?\.protocol !== "file:"/);
+  assert.match(harness, /offlineAudioContext !== true/);
+  assert.match(harness, /legacyCatalogIds/);
+  for (const id of ["burns-simple-delay", "burns-simple-eq", "orbitronica-overdrive", "orbitronica-filter"]) {
+    assert.match(renderer, new RegExp(`"${id}"`));
+    assert.match(harness, new RegExp(id));
+  }
+  assert.match(renderer, /paramMgr\.setState/);
+  assert.match(renderer, /getParamsValues/);
+  assert.match(renderer, /non-neutral-public-control/);
+  assert.match(renderer, /finite-bounded-stereo-extremes/);
+  assert.match(renderer, /public-parameter-state-round-trip/);
+  assert.match(renderer, /equal-power-projection/);
+  assert.match(renderer, /window\.location\.protocol/);
+});
+
 
 test("Phase 4 flanger/phaser retain bounded fixed-graph topology and packaged DSP coverage", () => {
   const flanger = read("plugins/src/orbitronica-flanger/index.ts"), phaser = read("plugins/src/orbitronica-phaser/index.ts"), harness = read("src/renderer/wamDspTest.ts");

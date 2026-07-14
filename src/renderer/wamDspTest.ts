@@ -223,6 +223,126 @@ type ModParams = { rate: number; depth: number; feedback: number; mix: number };
 type PhaserParams = ModParams & { stages: number };
 type ModNode = AudioNode & { getState(): Promise<{ schemaVersion: number; params: Record<string, number> }>; setState(value: { schemaVersion: 1; params: Record<string, number> }): Promise<void>; destroy(): void };
 type ReverbParams = { roomSize: number; damping: number; width: number; mix: number };
+/*
+ * The first four effects predate the first-party DSP implementations above.
+ * Keep their oracle here, in the packaged page, rather than inferring audio
+ * behavior from their modules.  In particular, Burns exposes ParamMgr as its
+ * public parameter surface; its WAM getState shape is intentionally opaque.
+ */
+type LegacyId = "burns-simple-delay" | "burns-simple-eq" | "orbitronica-overdrive" | "orbitronica-filter";
+type LegacyNode = AudioNode & {
+  destroy?: () => void;
+  getState?: () => Promise<unknown>;
+  setState?: (state: unknown) => Promise<void>;
+  paramMgr?: {
+    setState(state: Record<string, number>): Promise<void>;
+    getState(): Promise<unknown>;
+    getParamsValues(): Record<string, number>;
+  };
+};
+type LegacyInstance = { audioNode: LegacyNode };
+type LegacyModule = { default: { createInstance(group: string, context: AudioContext): Promise<LegacyInstance> } };
+const legacyIds: readonly LegacyId[] = ["burns-simple-delay", "burns-simple-eq", "orbitronica-overdrive", "orbitronica-filter"];
+const legacyParams = {
+  "burns-simple-delay": { time: .14, feedback: .68, stereo: .06, wet: 1, highpass: 120, lowpass: 3600, pingpong: 0 },
+  "burns-simple-eq": { lowGain: 9, lowFrequency: 160, mediumGain: -8, mediumFrequency: 1200, mediumQuality: .8, highGain: 7, highFrequency: 6200 },
+  "orbitronica-overdrive": { drive: .72, tone: 1800, outputGain: 4, mix: .75 },
+  "orbitronica-filter": { type: "peaking", frequency: 1400, Q: 5, gain: 14 },
+} as const;
+const legacyControlIds = {
+  "burns-simple-delay": ["time", "feedback", "stereo", "wet", "highpass", "lowpass", "pingpong"],
+  "burns-simple-eq": ["lowGain", "lowFrequency", "mediumGain", "mediumFrequency", "mediumQuality", "highGain", "highFrequency"],
+  "orbitronica-overdrive": ["drive", "tone", "outputGain", "mix"],
+  "orbitronica-filter": ["type", "frequency", "Q", "gain"],
+} as const;
+async function legacyModule(id: LegacyId): Promise<LegacyModule> {
+  const url = new URL(`./wam/${id}/index.js`, window.location.href).toString();
+  return import(/* @vite-ignore */ url) as Promise<LegacyModule>;
+}
+async function setLegacyParams(id: LegacyId, node: LegacyNode, params: Record<string, unknown>) {
+  if (id.startsWith("burns-simple-")) {
+    if (!node.paramMgr) throw new Error("burns-parammgr-missing");
+    await node.paramMgr.setState(params as Record<string, number>);
+    const values = node.paramMgr.getParamsValues();
+    for (const [key, value] of Object.entries(params)) if (typeof value !== "number" || Math.abs(values[key] - value) > 1e-6) throw new Error(`burns-parammgr-probe-failed:${key}`);
+    return;
+  }
+  await node.setState?.({ schemaVersion: 1, params });
+}
+async function getLegacyState(id: LegacyId, node: LegacyNode) {
+  if (id.startsWith("burns-simple-")) {
+    if (!node.paramMgr) throw new Error("burns-parammgr-missing");
+    return { params: node.paramMgr.getParamsValues(), opaqueState: await node.paramMgr.getState() };
+  }
+  return node.getState?.();
+}
+const legacyFixture: Fixture = (time, channel) => {
+  // The different two-tone channels make a collapsed stereo path visible.
+  const impulse = time < .002 ? (channel ? -.7 : .8) : 0;
+  return impulse + .23 * Math.sin(2 * Math.PI * (channel ? 2813 : 487) * time) + .19 * Math.sin(2 * Math.PI * (channel ? 719 : 5631) * time);
+};
+async function renderLegacy(id: LegacyId, params: Record<string, unknown>, sampleRate = 44_100, fixture: Fixture = legacyFixture) {
+  const context = new OfflineAudioContext(2, Math.ceil(2.4 * sampleRate), sampleRate);
+  const { initializeWamHost } = await import("@webaudiomodules/sdk");
+  const [group] = await initializeWamHost(context as unknown as AudioContext) as [string, string];
+  const instance = await (await legacyModule(id)).default.createInstance(group, context as unknown as AudioContext);
+  await setLegacyParams(id, instance.audioNode, params);
+  const source = context.createBufferSource(), input = context.createBuffer(2, context.length, sampleRate);
+  for (let channel = 0; channel < 2; channel++) for (let frame = 0; frame < input.length; frame++) input.getChannelData(channel)[frame] = fixture(frame / sampleRate, channel);
+  source.buffer = input; source.connect(instance.audioNode); instance.audioNode.connect(context.destination); source.start();
+  const output = await context.startRendering(); instance.audioNode.destroy?.(); return output;
+}
+const legacyDelta = (a: AudioBuffer, b: AudioBuffer) => Math.max(
+  differenceRms(a.getChannelData(0), b.getChannelData(0), at(.15, a.sampleRate), a.length),
+  differenceRms(a.getChannelData(1), b.getChannelData(1), at(.15, a.sampleRate), a.length),
+);
+const sameNumericMap = (actual: Record<string, number>, expected: Record<string, unknown>) => Object.entries(expected).every(([key, value]) => typeof value === "number" && Math.abs(actual[key] - value) <= 1e-6);
+async function legacyStateMetric(id: LegacyId) {
+  const context = new OfflineAudioContext(2, 128, 44_100);
+  const { initializeWamHost } = await import("@webaudiomodules/sdk");
+  const [group] = await initializeWamHost(context as unknown as AudioContext) as [string, string];
+  const instance = await (await legacyModule(id)).default.createInstance(group, context as unknown as AudioContext);
+  const params = legacyParams[id] as Record<string, unknown>; await setLegacyParams(id, instance.audioNode, params);
+  const state = await getLegacyState(id, instance.audioNode); instance.audioNode.destroy?.();
+  if (id.startsWith("burns-simple-")) return sameNumericMap((state as { params: Record<string, number> }).params, params);
+  return JSON.stringify(state) === JSON.stringify({ schemaVersion: 1, params });
+}
+async function legacyMetrics() {
+  const legacy = (id: LegacyId, parameterId: string, metric: string, tolerance: string, run: () => Promise<{ observed: number; ok: boolean }>) => check(parameterId, metric, tolerance, run, id);
+  for (const id of legacyIds) {
+    const base = legacyParams[id] as Record<string, unknown>;
+    await legacy(id, "state", "public-parameter-state-round-trip", "public parameter API restores every audited control", async () => {
+      const ok = await legacyStateMetric(id); return { observed: ok ? legacyControlIds[id].length : 0, ok };
+    });
+    await legacy(id, "all-controls", "finite-bounded-stereo-extremes", "finite <= 10 FS, silence stable, and channels remain distinct", async () => {
+      const output = await renderLegacy(id, base, 48_000);
+      // Silence travels through the same source → plugin → destination route.
+      const zeroOutput = await renderLegacy(id, { ...base, ...(id === "burns-simple-delay" ? { feedback: 1.2, wet: 1 } : {}) }, 44_100, () => 0);
+      const l = output.getChannelData(0), r = output.getChannelData(1);
+      const bound = Math.max(maxAbs(l), maxAbs(r)); const silenceFloor = Math.max(maxAbs(zeroOutput.getChannelData(0)), maxAbs(zeroOutput.getChannelData(1)));
+      return { observed: Math.max(bound, silenceFloor), ok: finite(l) && finite(r) && bound <= 10 && silenceFloor <= 1e-7 && differenceRms(l, r, at(.2, 48_000), l.length) > 1e-5 };
+    });
+    for (const control of legacyControlIds[id]) await legacy(id, control, `non-neutral-public-control-${control}`, "changing only this public control changes the packaged OfflineAudioContext render", async () => {
+      const changed: Record<string, unknown> = { ...base };
+      const variants: Record<string, unknown> = {
+        time: .42, feedback: .08, stereo: .5, wet: 0, highpass: 2200, lowpass: 9000, pingpong: 1,
+        lowGain: -12, lowFrequency: 300, mediumGain: 10, mediumFrequency: 3200, mediumQuality: .15, highGain: -10, highFrequency: 9000,
+        drive: .08, tone: 9000, outputGain: -12, mix: 0, type: "highpass", frequency: 5000, Q: .2, gain: -16,
+      };
+      changed[control] = variants[control];
+      const plain = await renderLegacy(id, base), varied = await renderLegacy(id, changed);
+      const observed = legacyDelta(plain, varied);
+      return { observed, ok: Number.isFinite(observed) && observed > 1e-5 };
+    });
+  }
+  await legacy("orbitronica-overdrive", "mix", "equal-power-projection", "mix=.5 projects dry/wet within .02 of cos/sin", async () => {
+    const base = { ...legacyParams["orbitronica-overdrive"], drive: .55, tone: 3000, outputGain: 0 };
+    const start = at(.15, 48_000), dry = (await renderLegacy("orbitronica-overdrive", { ...base, mix: 0 }, 48_000)).getChannelData(0).subarray(start), wet = (await renderLegacy("orbitronica-overdrive", { ...base, mix: 1 }, 48_000)).getChannelData(0).subarray(start), mixed = (await renderLegacy("orbitronica-overdrive", { ...base, mix: .5 }, 48_000)).getChannelData(0).subarray(start);
+    const dd = dot(dry, dry), dw = dot(dry, wet), ww = dot(wet, wet), dm = dot(dry, mixed), wm = dot(wet, mixed), determinant = dd * ww - dw * dw;
+    const dryGain = (dm * ww - wm * dw) / determinant, wetGain = (wm * dd - dm * dw) / determinant, observed = Math.max(Math.abs(dryGain - Math.SQRT1_2), Math.abs(wetGain - Math.SQRT1_2));
+    return { observed, ok: Number.isFinite(observed) && observed <= .02 };
+  });
+}
 async function modulationModule(id: "orbitronica-flanger" | "orbitronica-phaser") {
   const url = new URL(`./wam/${id}/index.js`, window.location.href).toString();
   return import(/* @vite-ignore */ url) as Promise<{ default: { createInstance(group: string, context: AudioContext): Promise<{ audioNode: ModNode }> } }>;
@@ -351,12 +471,16 @@ async function phase5Metrics() {
 
 async function run() {
   try {
-    await controlMetrics(44_100); await controlMetrics(48_000); await safetyMetrics(); await bitcrusherMetrics(); await phase4Metrics(); await phase5Metrics();
+    await controlMetrics(44_100); await controlMetrics(48_000); await safetyMetrics(); await bitcrusherMetrics(); await phase4Metrics(); await phase5Metrics(); await legacyMetrics();
     const status = metrics.every((metric) => metric.ok) ? "pass" : "fail";
-    const payload = { status, results: metrics };
+    const catalogHarness = Object.fromEntries(legacyIds.map((catalogId) => [catalogId, {
+      publicControls: legacyControlIds[catalogId],
+      metrics: metrics.filter((metric) => metric.catalogId === catalogId).map((metric) => metric.metric),
+    }]));
+    const payload = { status, environment: { protocol: window.location.protocol, offlineAudioContext: typeof OfflineAudioContext === "function" }, catalogHarness, results: metrics };
     result!.textContent = JSON.stringify(payload); console.log(`ORBITRONICA_WAM_DSP ${JSON.stringify(payload)}`);
   } catch (error) {
-    const payload = { status: "fail", results: metrics, error: error instanceof Error ? error.message : String(error) };
+    const payload = { status: "fail", environment: { protocol: window.location.protocol, offlineAudioContext: typeof OfflineAudioContext === "function" }, results: metrics, error: error instanceof Error ? error.message : String(error) };
     result!.textContent = JSON.stringify(payload); console.log(`ORBITRONICA_WAM_DSP ${JSON.stringify(payload)}`);
   }
 }
