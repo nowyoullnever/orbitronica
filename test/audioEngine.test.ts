@@ -471,3 +471,50 @@ test("removeOrbit still prunes only its own processed-buffer cache entries once 
     audioEngine.removeOrbit(orbitB);
   }
 });
+
+/**
+ * Pin test for App.tsx's useSpeedPitchProcessing hook extraction (see hooks/useSpeedPitchProcessing.ts).
+ * That hook only orchestrates React state and calls audioEngine.processPlanetBuffer; the actual
+ * SoundTouch DSP transform lives here and is inseparable from AudioContext (it allocates output via
+ * this.getContext().createBuffer). This test freezes the transform's exact numeric output against a
+ * small fixed synthetic input so a later refactor of the orchestration layer cannot silently change
+ * the DSP result it depends on.
+ */
+test("processPlanetBuffer pins exact output shape and sample values for a fixed synthetic input (speed+pitch)", async () => {
+  await audioEngine.resume();
+  const orbitId = "pin-speed-pitch-orbit";
+  const planetId = "pin-speed-pitch-planet";
+  const engine = audioEngine as any;
+  const source = new FakeAudioBuffer(2, 64, 8000);
+  const left = source.getChannelData(0);
+  const right = source.getChannelData(1);
+  for (let index = 0; index < 64; index++) {
+    left[index] = Math.sin(index / 4) * .5;
+    right[index] = Math.cos(index / 6) * .5;
+  }
+  engine.buffers.set(orbitId, source);
+  try {
+    await audioEngine.processPlanetBuffer(orbitId, planetId, 1.5, 200);
+    const key = engine.processedBufferKey(orbitId, planetId, 1.5, 200);
+    const output = engine.processedBuffers.get(key);
+    assert.ok(output, "setup: the fixed tuple must be cached after processing");
+    assert.equal(output.numberOfChannels, 2);
+    assert.equal(output.length, Math.ceil(64 / 1.5));
+    const outLeft = Array.from(output.getChannelData(0) as Float32Array);
+    const outRight = Array.from(output.getChannelData(1) as Float32Array);
+    const roundedLeft = outLeft.map((value) => Math.round(value * 1e6) / 1e6);
+    const roundedRight = outRight.map((value) => Math.round(value * 1e6) / 1e6);
+    assert.deepEqual(roundedLeft.slice(0, 6), [0, .000158, .002196, .007072, .014021, .021929]);
+    assert.deepEqual(roundedRight.slice(0, 6), [0, .000629, .006289, .011265, .015015, .01707]);
+    assert.deepEqual(
+      roundedLeft.slice(-6),
+      [-.136467, -.180119, -.211683, -.227954, -.226472, -.205245]
+    );
+    assert.deepEqual(
+      roundedRight.slice(-6),
+      [.18727, .170846, .147205, .11685, .080476, .038942]
+    );
+  } finally {
+    clearOrbitProcessedBuffers(engine, orbitId);
+  }
+});

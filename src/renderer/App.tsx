@@ -12,6 +12,8 @@ import { PreferencesModal } from "./components/PreferencesModal";
 import { SceneTabs } from "./components/SceneTabs";
 import { Toolbar } from "./components/Toolbar";
 import { TransportControls } from "./components/TransportControls";
+import { useMenuActionDispatch } from "./hooks/useMenuActionDispatch";
+import { useSpeedPitchProcessing } from "./hooks/useSpeedPitchProcessing";
 import { parseProject, serializeProject } from "./project/projectSerializer";
 import type {
   ContextMenuState, HistorySnapshot, MultiSelection, Orbit, OrbitMode, Planet, Scene, Selection,
@@ -23,7 +25,7 @@ import {
   getRetainedAudioSets, impliedSpliceBarIds, nextDefaultSceneName, planSceneDuplicate, renameScene, reorderScenes,
   replaceOrbitSpliceSettings, reserveSceneProjectIds,
   reconcileSceneOrbitMix, runActiveSceneTransition, runStagedDocumentTransaction, stageSceneDuplicate,
-  updatePlanetForFreshRequest, updateSceneById
+  updateSceneById
 } from "./state/scenes";
 import type { RetainedAudioCache } from "./state/scenes";
 import {
@@ -58,7 +60,6 @@ type AppClipboard = {
 type RecordingPreferencesApi = {
   getPreferences?: () => Promise<{ export: { sampleFormat: WavSampleFormat } }>;
 };
-type MenuAction = "open-project" | "save-project" | "save-project-as" | "preferences";
 
 const cleanPlanet = (planet: Planet): Planet => ({
   ...planet,
@@ -67,22 +68,6 @@ const cleanPlanet = (planet: Planet): Planet => ({
   processingSpeed: undefined,
   speedProcessRequestId: undefined,
   speedProcessingError: undefined,
-  pendingPitchCents: undefined,
-  isPitchProcessing: false,
-  processingPitchCents: undefined,
-  pitchProcessRequestId: undefined
-});
-
-const clearSpeedProcessing = (planet: Planet): Planet => ({
-  ...planet,
-  pendingSpeed: undefined,
-  isSpeedProcessing: false,
-  processingSpeed: undefined,
-  speedProcessRequestId: undefined
-});
-
-const clearPitchProcessing = (planet: Planet): Planet => ({
-  ...planet,
   pendingPitchCents: undefined,
   isPitchProcessing: false,
   processingPitchCents: undefined,
@@ -133,12 +118,6 @@ export default function App() {
   const clipboardRef = useRef<AppClipboard>(null);
   const sceneDuplicationPending = useRef(false);
   const recordingInFlight = useRef(false);
-  const actionsRef = useRef<Record<MenuAction, () => void | Promise<void>>>({
-    "open-project": () => undefined,
-    "save-project": () => undefined,
-    "save-project-as": () => undefined,
-    preferences: () => undefined
-  });
   const stateRef = useRef({
     scenes, activeSceneId, orbits, planets, bars, selection, multiSelection,
     lastLoopBarLengthRadians, masterVolume, masterPan
@@ -720,118 +699,10 @@ export default function App() {
     setMenu(null);
   }
 
-  function previewPlanetSpeed(planetId: string, pendingSpeed: number) {
-    setPlanets((current) => current.map((planet) =>
-      planet.id === planetId ? { ...planet, pendingSpeed, speedProcessingError: undefined } : planet));
-  }
-
-  async function commitPlanetSpeed(planetId: string, requestedSpeed?: number) {
-    const sceneId = stateRef.current.activeSceneId;
-    const planet = stateRef.current.planets.find((item) => item.id === planetId);
-    if (!planet) return;
-    const speed = clamp(requestedSpeed ?? planet.pendingSpeed ?? planet.speed, MIN_DIRECT_RATE, MAX_DIRECT_RATE);
-    const pitchAtRequest = planet.pitchCents;
-    if (planet.isSpeedProcessing && planet.processingSpeed === speed) return;
-    if (Math.abs(speed - planet.speed) < .0001 && !planet.isSpeedProcessing) {
-      setPlanets((current) => current.map((item) =>
-        item.id === planetId ? { ...item, pendingSpeed: undefined, speedProcessingError: undefined } : item));
-      return;
-    }
-    pushHistory();
-    const requestId = randomId();
-    if (audioEngine.hasProcessedBuffer(planet.orbitId, planet.id, speed, planet.pitchCents)) {
-      setPlanets((current) => current.map((item) =>
-        item.id === planetId ? { ...clearSpeedProcessing(item), speed, speedProcessingError: undefined } : item));
-      return;
-    }
-    setPlanets((current) => current.map((item) => item.id === planetId ? {
-      ...item,
-      pendingSpeed: speed,
-      isSpeedProcessing: true,
-      processingSpeed: speed,
-      speedProcessRequestId: requestId,
-      speedProcessingError: undefined
-    } : item));
-    try {
-      await audioEngine.processPlanetBuffer(planet.orbitId, planet.id, speed, pitchAtRequest);
-      let latest = stateRef.current.scenes.find((scene) => scene.id === sceneId)
-        ?.planets.find((item) => item.id === planetId);
-      if (latest?.speedProcessRequestId !== requestId) return;
-      if (latest.pitchCents !== pitchAtRequest) {
-        await audioEngine.processPlanetBuffer(latest.orbitId, latest.id, speed, latest.pitchCents);
-        latest = stateRef.current.scenes.find((scene) => scene.id === sceneId)
-          ?.planets.find((item) => item.id === planetId);
-        if (latest?.speedProcessRequestId !== requestId) return;
-      }
-      setScenes((current) => updatePlanetForFreshRequest(
-        current, sceneId, planetId, "speed", requestId,
-        (item) => ({ ...clearSpeedProcessing(item), speed, speedProcessingError: undefined })
-      ));
-    } catch {
-      const latest = stateRef.current.scenes.find((scene) => scene.id === sceneId)
-        ?.planets.find((item) => item.id === planetId);
-      if (latest?.speedProcessRequestId !== requestId) return;
-      setScenes((current) => updatePlanetForFreshRequest(
-        current, sceneId, planetId, "speed", requestId,
-        (item) => ({ ...clearSpeedProcessing(item), speedProcessingError: "Speed processing failed" })
-      ));
-      flash("Speed processing failed; the previous speed remains active.");
-    }
-  }
-
-  function previewPlanetPitch(planetId: string, pendingPitchCents: number) {
-    setPlanets((current) => current.map((planet) =>
-      planet.id === planetId ? { ...planet, pendingPitchCents } : planet));
-  }
-
-  async function commitPlanetPitch(planetId: string, requestedPitch?: number) {
-    const sceneId = stateRef.current.activeSceneId;
-    const planet = stateRef.current.planets.find((item) => item.id === planetId);
-    if (!planet) return;
-    const pitchCents = clamp(requestedPitch ?? planet.pendingPitchCents ?? planet.pitchCents, -4800, 4800);
-    const speedAtRequest = planet.speed;
-    if (planet.isPitchProcessing && planet.processingPitchCents === pitchCents) return;
-    if (pitchCents === planet.pitchCents && !planet.isPitchProcessing) {
-      setPlanets((current) => current.map((item) =>
-        item.id === planetId ? { ...item, pendingPitchCents: undefined } : item));
-      return;
-    }
-    pushHistory();
-    const requestId = randomId();
-    if (audioEngine.hasProcessedBuffer(planet.orbitId, planet.id, planet.speed, pitchCents)) {
-      setPlanets((current) => current.map((item) =>
-        item.id === planetId ? { ...clearPitchProcessing(item), pitchCents } : item));
-      return;
-    }
-    setPlanets((current) => current.map((item) => item.id === planetId ? {
-      ...item, pendingPitchCents: pitchCents, isPitchProcessing: true,
-      processingPitchCents: pitchCents, pitchProcessRequestId: requestId
-    } : item));
-    try {
-      await audioEngine.processPlanetBuffer(planet.orbitId, planet.id, speedAtRequest, pitchCents);
-      let latest = stateRef.current.scenes.find((scene) => scene.id === sceneId)
-        ?.planets.find((item) => item.id === planetId);
-      if (latest?.pitchProcessRequestId !== requestId) return;
-      if (latest.speed !== speedAtRequest) {
-        await audioEngine.processPlanetBuffer(latest.orbitId, latest.id, latest.speed, pitchCents);
-        latest = stateRef.current.scenes.find((scene) => scene.id === sceneId)
-          ?.planets.find((item) => item.id === planetId);
-        if (latest?.pitchProcessRequestId !== requestId) return;
-      }
-      setScenes((current) => updatePlanetForFreshRequest(
-        current, sceneId, planetId, "pitch", requestId,
-        (item) => ({ ...clearPitchProcessing(item), pitchCents })
-      ));
-    } catch {
-      const latest = stateRef.current.scenes.find((scene) => scene.id === sceneId)
-        ?.planets.find((item) => item.id === planetId);
-      if (latest?.pitchProcessRequestId !== requestId) return;
-      setScenes((current) => updatePlanetForFreshRequest(
-        current, sceneId, planetId, "pitch", requestId, clearPitchProcessing
-      ));
-      flash("Pitch processing failed; the previous pitch remains active.");
-    }
-  }
+  const { previewPlanetSpeed, commitPlanetSpeed, previewPlanetPitch, commitPlanetPitch } = useSpeedPitchProcessing({
+    stateRef, setPlanets, setScenes, pushHistory, flash, audioEngine,
+    randomId, clamp, minDirectRate: MIN_DIRECT_RATE, maxDirectRate: MAX_DIRECT_RATE
+  });
 
   async function createOrbitFromAudio(
     file: File, point: { x: number; y: number }, offset = 0, targetSceneId = stateRef.current.activeSceneId
@@ -1224,21 +1095,12 @@ export default function App() {
     window.addEventListener("pointerdown", resume, { once: true });
   }, []);
 
-  // Keep one IPC subscription while routing every menu action to the latest render's handlers.
-  actionsRef.current = {
+  useMenuActionDispatch({
     "open-project": openProject,
     "save-project": saveProject,
     "save-project-as": saveProjectAs,
     preferences: () => setIsPreferencesOpen(true)
-  };
-
-  useEffect(() => {
-    const api = window.orbitonicAPI;
-    if (!api) return;
-    return api.onMenuAction((action) => {
-      void actionsRef.current[action]();
-    });
-  }, []);
+  });
 
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
