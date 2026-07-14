@@ -1,0 +1,1 @@
+{"identifier":"com.orbitronica.bitcrusher","name":"Orbitronica Bitcrusher","vendor":"Orbitronica","description":"First-party WamProcessor stereo bitcrusher","version":"1.0.0","sdkVersion":"2.0.0-alpha.4","keywords":["effect","bitcrusher"],"isInstrument":false,"hasAudioInput":true,"hasAudioOutput":true,"hasMidiInput":false,"hasMidiOutput":false}

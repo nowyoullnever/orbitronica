@@ -1,0 +1,18 @@
+{
+  "catalogId": "orbitronica-bitcrusher",
+  "origin": "first-party",
+  "package": "orbitronica-bitcrusher",
+  "packageVersion": "0.1.0",
+  "pluginVersion": "1.0.0",
+  "license": "MIT",
+  "source": "Orbitronica first-party source",
+  "sourcePath": "plugins/src/orbitronica-bitcrusher",
+  "buildTool": "esbuild@0.25.12",
+  "entry": "index.js",
+  "descriptor": "descriptor.json",
+  "assets": {
+    "NOTICE.txt": "63f8d2de51595c7056f65be9b8550bc6ee5af59856eeab7253f6f7e67dcd4982",
+    "descriptor.json": "6f657533ae42f819962e84a2dc8ad0ebdc91e18daac0ad3e303d4f6aca355c5d",
+    "index.js": "b1d4618216e84b9c1d46ad11350e6abb048987eade68946ac6ffa7d425500b95"
+  }
+}

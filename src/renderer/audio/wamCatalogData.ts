@@ -52,6 +52,16 @@ export const WAM_CATALOG_DATA = [
     hasGui: true,
   },
   {
+    id: "orbitronica-bitcrusher",
+    displayName: "Orbitronica Bitcrusher",
+    pluginVersion: "1.0.0",
+    packageVersion: "0.1.0",
+    license: "MIT",
+    entry: "wam/orbitronica-bitcrusher/index.js",
+    descriptor: "wam/orbitronica-bitcrusher/descriptor.json",
+    hasGui: true,
+  },
+  {
     id: "orbitronica-filter",
     displayName: "Orbitronica Filter",
     pluginVersion: "1.0.0",

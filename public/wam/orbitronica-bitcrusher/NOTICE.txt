@@ -1,0 +1,5 @@
+Orbitronica Bitcrusher
+Copyright 2026 Orbitronica
+License: MIT
+
+This first-party module bundles @webaudiomodules/sdk 0.0.12 (MIT).

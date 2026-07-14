@@ -52,15 +52,17 @@ test("packaged smoke uses the real production Electron entry rather than the dev
   assert.match(rendererSmoke, /asset-fetch-import/);
   assert.match(rendererSmoke, /rack\.reconcile\(\[\]\)/);
   assert.match(rendererSmoke, /paramMgr\.setState\(probe\)/);
+  assert.match(rendererSmoke, /minimal-wamprocessor-packaged-proof/);
+  assert.match(rendererSmoke, /proveMinimalWamProcessor/);
   assert.match(harness, /rackRemovalCompleted/);
   assert.match(harness, /cleanupDidNotBlockHost/);
   assert.match(main, /wam-smoke\.html/);
   assert.equal(path.basename(new URL("public/wam/burns-simple-delay/index.js", root).pathname), "index.js");
 });
 
-test("first-party filter and compressor are cataloged with byte-copied, hash-locked manifests", () => {
+test("first-party filter, compressor, and bitcrusher are cataloged with byte-copied, hash-locked manifests", () => {
   const catalog = read("src/renderer/audio/wamCatalogData.ts");
-  for (const id of ["orbitronica-filter", "orbitronica-compressor"]) {
+  for (const id of ["orbitronica-filter", "orbitronica-compressor", "orbitronica-bitcrusher"]) {
     const sourceManifest = read(`plugins/src/${id}/manifest.json`);
     const publicManifest = read(`public/wam/${id}/manifest.json`);
     const manifest = JSON.parse(publicManifest) as { assets: Record<string, string>; origin: string; sourcePath: string; buildTool: string };
@@ -93,7 +95,7 @@ test("Phase 1 vendored EQ retains pinned provenance and the documented fallback 
 
 test("first-party build ownership cannot rewrite immutable Burns payloads", () => {
   const builder = read("scripts/build-plugins.mjs");
-  assert.match(builder, /firstPartyIds = \["orbitronica-filter", "orbitronica-overdrive", "orbitronica-compressor"\]/);
+  assert.match(builder, /firstPartyIds = \["orbitronica-filter", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-bitcrusher"\]/);
   assert.doesNotMatch(builder, /burns-simple-eq|burns-distortion/);
   const eq = JSON.parse(read("public/wam/burns-simple-eq/manifest.json")) as { origin: string; assets: Record<string, string> };
   assert.equal(eq.origin, "vendored");
@@ -114,4 +116,14 @@ test("compressor DSP acceptance runs in packaged Chromium with native-reference 
   assert.match(renderer, /44_100/); assert.match(renderer, /48_000/);
   assert.match(renderer, /finite-bounded-stereo-extremes/);
   assert.match(main, /wam-dsp-test\.html/);
+});
+
+test("bitcrusher DSP acceptance is packaged, quantitative, and precedes DSP with a WamProcessor proof", () => {
+  const renderer = read("src/renderer/wamDspTest.ts");
+  assert.match(renderer, /proveMinimalWamProcessor/);
+  assert.match(renderer, /quantized-levels-and-error/);
+  assert.match(renderer, /exact-independent-stereo-holds/);
+  assert.match(renderer, /equal-power-projection/);
+  assert.match(renderer, /orbitronica-bitcrusher/);
+  assert.match(renderer, /44_100/); assert.match(renderer, /48_000/);
 });

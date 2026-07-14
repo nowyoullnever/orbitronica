@@ -72,7 +72,7 @@ test("caches modules per catalog within one context and retries only the failed 
 
 test("trusted catalog preserves identity and non-empty presentation metadata", async () => {
   const { WAM_CATALOG } = await import("../src/renderer/audio/wamCatalog.ts");
-  assert.deepEqual(Object.keys(WAM_CATALOG), ["burns-simple-delay", "burns-simple-eq", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-filter"]);
+  assert.deepEqual(Object.keys(WAM_CATALOG), ["burns-simple-delay", "burns-simple-eq", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-bitcrusher", "orbitronica-filter"]);
   for (const [catalogId, entry] of Object.entries(WAM_CATALOG)) {
     assert.equal(entry.id, catalogId, `catalog key ${catalogId} must equal entry.id`);
     assert.equal(typeof entry.displayName, "string");
@@ -85,7 +85,7 @@ test("trusted catalog preserves identity and non-empty presentation metadata", a
 
 test("catalog data is importable without renderer DOM globals", async () => {
   const data = await import("../src/renderer/audio/wamCatalogData.ts");
-  assert.deepEqual(data.WAM_CATALOG_DATA.map((entry) => entry.id), ["burns-simple-delay", "burns-simple-eq", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-filter"]);
+  assert.deepEqual(data.WAM_CATALOG_DATA.map((entry) => entry.id), ["burns-simple-delay", "burns-simple-eq", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-bitcrusher", "orbitronica-filter"]);
   assert.ok(data.WAM_CATALOG_DATA.every((entry) => entry.entry.startsWith("wam/")));
 });
 
@@ -212,4 +212,14 @@ test("compressor implementation freezes the native-control ABI with strict migra
   assert.match(source, /getParamsValues/);
   assert.match(source, /10 \*\* \(params\.makeupGain \/ 20\)/);
   assert.match(source, /this\.compressor\.disconnect\(\)/);
+});
+
+test("bitcrusher uses the WamNode/WamProcessor ABI with strict state and retry-safe Blob registration", () => {
+  const source = fs.readFileSync(new URL("../plugins/src/orbitronica-bitcrusher/index.ts", import.meta.url), "utf8");
+  for (const parameter of ["bitDepth", "reduction", "mix"]) assert.match(source, new RegExp(parameter));
+  assert.match(source, /WamNode\.addModules/); assert.match(source, /addFunctionModule/); assert.match(source, /registerProcessor/);
+  assert.match(source, /proveMinimalWamProcessor/); assert.match(source, /WeakMap/); assert.match(source, /pending\.catch/);
+  assert.match(source, /schemaVersion !== 0/); assert.match(source, /invalid-bitcrusher-state/); assert.match(source, /unsupported-bitcrusher-state/);
+  assert.match(source, /Math\.round\(clamp\(raw\.bitDepth/); assert.match(source, /Math\.cos/); assert.match(source, /Math\.sin/);
+  assert.match(source, /this\.#held\[channel\]/); assert.match(source, /this\.#count\[channel\]/);
 });

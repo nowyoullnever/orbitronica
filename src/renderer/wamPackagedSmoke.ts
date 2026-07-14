@@ -10,6 +10,7 @@ const PARAMETER_PROBES: Record<string, Record<string, number>> = {
   "burns-simple-eq": { lowGain: -9, lowFrequency: 180, mediumGain: 7, mediumFrequency: 1200, mediumQuality: .3, highGain: 8, highFrequency: 6500 },
   "orbitronica-overdrive": { drive: .8, tone: 2400, outputGain: 5, mix: .65 },
   "orbitronica-compressor": { threshold: -40, knee: 8, ratio: 12, attack: .2, release: .8, makeupGain: 6 },
+  "orbitronica-bitcrusher": { bitDepth: 3, reduction: 8, mix: .65 },
 };
 type WamInstance = { audioNode: WamNode; createGui?(): Promise<HTMLElement>; destroyGui?(gui: HTMLElement): void };
 type WamConstructor = { createInstance(groupId: string, context: AudioContext): Promise<WamInstance> };
@@ -31,6 +32,16 @@ async function smokeEntry(catalogId: string, entry: typeof WAM_CATALOG[keyof typ
   const imported = await phase(catalogId, "asset-fetch-import", () => import(/* @vite-ignore */ entryUrl) as Promise<{ default?: WamConstructor }>);
   if (!imported.default || typeof imported.default.createInstance !== "function") throw new Error("catalog-module-invalid");
   events.push({ catalogId, phase: "module-contract", durationMs: 0, ok: true });
+  if (catalogId === "orbitronica-bitcrusher") await phase(catalogId, "minimal-wamprocessor-packaged-proof", async () => {
+    const proof = imported as typeof imported & { proveMinimalWamProcessor?: (group: string, audio: AudioContext) => Promise<void> };
+    if (!proof.proveMinimalWamProcessor) throw new Error("minimal-wamprocessor-proof-missing");
+    await proof.proveMinimalWamProcessor(groupId, context);
+  });
+  if (catalogId === "orbitronica-bitcrusher") await phase(catalogId, "worklet-multi-instance-registration", async () => {
+    const [first, second] = await Promise.all([imported.default!.createInstance(groupId, context), imported.default!.createInstance(groupId, context)]);
+    if (first.audioNode === second.audioNode) throw new Error("worklet-instances-not-independent");
+    first.audioNode.destroy?.(); second.audioNode.destroy?.();
+  });
   const instance = await phase(catalogId, "create-instance", () => imported.default!.createInstance(groupId, context));
   const hosted = adaptWamInstance(instance);
   const input = context.createGain(); const destination = context.createGain(); destination.connect(recorder);

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-const ids = ["orbitronica-filter", "orbitronica-overdrive", "orbitronica-compressor"];
+const ids = ["orbitronica-filter", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-bitcrusher"];
 const snapshot = () => Object.fromEntries(ids.map((id) => [id, Object.fromEntries(readdirSync(path.resolve("public/wam", id)).sort().map((name) => [name, createHash("sha256").update(readFileSync(path.resolve("public/wam", id, name))).digest("hex")]))]));
 const first = snapshot(); const run = spawnSync(process.execPath, ["scripts/build-plugins.mjs"], { stdio: "inherit" });
 if (run.status !== 0) process.exit(run.status ?? 1); const second = snapshot();
