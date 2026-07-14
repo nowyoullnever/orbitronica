@@ -447,3 +447,43 @@ test("delayed old destroyGui cannot erase a newer GUI mapping or audio runtime",
   // the old delayed teardown did not remove its slot mapping.
   await rack.mountGui("a", container);
 });
+
+// This is intentionally catalog-driven rather than a list of source-text assertions:
+// it exercises the same owned-edge reconciliation used by an orbit with every released effect.
+test("all nine approved effects form, reorder, bypass, and remove one real rack chain", async () => {
+  const { WAM_CATALOG_DATA } = await import("../src/renderer/audio/wamCatalogData.ts");
+  assert.equal(WAM_CATALOG_DATA.length, 9, "release integration must exercise exactly the approved catalog");
+  const input = new Node(), destination = new Node();
+  const nodes = new Map(WAM_CATALOG_DATA.map((entry) => [entry.id, new Node()]));
+  const slots = WAM_CATALOG_DATA.map((entry, index) => ({
+    id: `integration-${index}`,
+    catalogId: entry.id,
+    pluginVersion: entry.pluginVersion,
+    bypassed: false,
+  }));
+  const rack = new OrbitWamRack(
+    input as unknown as AudioNode,
+    destination as unknown as AudioNode,
+    async (item) => ({ audioNode: nodes.get(item.catalogId)! as unknown as AudioNode }),
+    new Map(),
+  );
+  const assertChain = (active: readonly PluginSlot[]) => {
+    const activeNodes = active.filter((item) => !item.bypassed).map((item) => nodes.get(item.catalogId)!);
+    if (!activeNodes.length) assert.equal(input.edges.has(destination), true);
+    else {
+      assert.equal(input.edges.has(activeNodes[0]), true);
+      for (let index = 0; index < activeNodes.length - 1; index++) assert.equal(activeNodes[index].edges.has(activeNodes[index + 1]), true);
+      assert.equal(activeNodes.at(-1)!.edges.has(destination), true);
+    }
+  };
+  await rack.reconcile(slots); assertChain(slots);
+  const reordered = [...slots].reverse(); await rack.reconcile(reordered); assertChain(reordered);
+  for (let index = 0; index < reordered.length; index++) {
+    const bypassed = reordered.map((slot, candidate) => candidate === index ? { ...slot, bypassed: true } : slot);
+    await rack.reconcile(bypassed); assertChain(bypassed);
+    assert.equal(nodes.get(reordered[index].catalogId)!.edges.size, 0, `${reordered[index].catalogId} must be disconnected while bypassed`);
+  }
+  let remaining = reordered;
+  while (remaining.length) { remaining = remaining.slice(0, -1); await rack.reconcile(remaining); assertChain(remaining); }
+  assert.equal(input.edges.has(destination), true, "complete removal restores the dry path");
+});
