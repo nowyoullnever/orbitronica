@@ -56,3 +56,19 @@ test("WAM asset verifier rejects manifest and payload mutations without rewritin
     assert.equal(actual, expected, `${id} canonical manifest must remain byte-identical after negative verification`);
   }
 });
+
+test("WAM asset verifier rejects a first-party sourcePath symlink escape", async () => {
+  const { directory, root } = fixture();
+  try {
+    const canonicalRoot = path.join(directory, "canonical");
+    cpSync(path.join(repository, "plugins"), path.join(canonicalRoot, "plugins"), { recursive: true });
+    const sourcePath = path.join(canonicalRoot, "plugins", "src", "orbitronica-filter");
+    const outside = path.join(directory, "outside");
+    cpSync(sourcePath, outside, { recursive: true });
+    rmSync(sourcePath, { recursive: true });
+    symlinkSync(outside, sourcePath);
+    await assert.rejects(verifyWamAssets(root, { canonicalRoot }), /orbitronica-filter sourcePath must not contain a symlink/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

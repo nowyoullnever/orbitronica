@@ -2,6 +2,7 @@
 var TYPES = ["lowpass", "highpass", "bandpass", "notch", "peaking", "lowshelf", "highshelf"];
 var clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 var maxHz = (context) => Math.min(2e4, 0.45 * context.sampleRate);
+var stateRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 var isDangerous = (value) => {
   if (!value || typeof value !== "object") return false;
   for (const [key, child] of Object.entries(value)) {
@@ -44,10 +45,11 @@ var OrbitronicaFilterNode = class {
     return structuredClone(this.#state);
   }
   async setState(value) {
-    if (!value || typeof value !== "object" || isDangerous(value)) throw new Error("invalid-filter-state");
+    if (!stateRecord(value) || isDangerous(value)) throw new Error("invalid-filter-state");
     const state = value;
     if (state.schemaVersion !== void 0 && state.schemaVersion !== 0 && state.schemaVersion !== 1) throw new Error("unsupported-filter-state");
     const incoming = state.params ?? state;
+    if (!stateRecord(incoming) || isDangerous(incoming)) throw new Error("invalid-filter-state");
     const current = this.#state.params;
     const type = incoming.type === void 0 ? current.type : incoming.type;
     const frequency = incoming.frequency === void 0 ? current.frequency : incoming.frequency;

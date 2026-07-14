@@ -54,7 +54,7 @@ class OrbitronicaCompressorNode {
   async getState(): Promise<State> { return structuredClone(this.#state); }
 
   async setState(value: unknown): Promise<void> {
-    if (!value || typeof value !== "object" || hasDangerousKey(value)) throw new Error("invalid-compressor-state");
+    if (!value || typeof value !== "object" || Array.isArray(value) || hasDangerousKey(value)) throw new Error("invalid-compressor-state");
     const state = value as { schemaVersion?: unknown; params?: unknown };
     if (state.schemaVersion !== undefined && state.schemaVersion !== 0 && state.schemaVersion !== 1) throw new Error("unsupported-compressor-state");
     const incomingValue = state.params ?? state;

@@ -4,6 +4,7 @@ type FilterState = { schemaVersion: 1; params: { type: FilterType; frequency: nu
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const maxHz = (context: BaseAudioContext) => Math.min(20_000, 0.45 * context.sampleRate);
+const stateRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 const isDangerous = (value: unknown): boolean => {
   if (!value || typeof value !== "object") return false;
   for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
@@ -51,10 +52,11 @@ class OrbitronicaFilterNode {
   async getState(): Promise<FilterState> { return structuredClone(this.#state); }
 
   async setState(value: unknown): Promise<void> {
-    if (!value || typeof value !== "object" || isDangerous(value)) throw new Error("invalid-filter-state");
+    if (!stateRecord(value) || isDangerous(value)) throw new Error("invalid-filter-state");
     const state = value as { schemaVersion?: unknown; params?: unknown };
     if (state.schemaVersion !== undefined && state.schemaVersion !== 0 && state.schemaVersion !== 1) throw new Error("unsupported-filter-state");
-    const incoming = (state.params ?? state) as Record<string, unknown>;
+    const incoming = state.params ?? state;
+    if (!stateRecord(incoming) || isDangerous(incoming)) throw new Error("invalid-filter-state");
     const current = this.#state.params;
     const type = incoming.type === undefined ? current.type : incoming.type;
     const frequency = incoming.frequency === undefined ? current.frequency : incoming.frequency;

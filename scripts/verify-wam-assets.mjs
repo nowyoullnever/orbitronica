@@ -29,6 +29,19 @@ function filesBelow(root, current = root, names = []) {
 function equalBytes(left, right, label) {
   if (!readFileSync(left).equals(readFileSync(right))) fail(`${label} differs from canonical manifest`);
 }
+function canonicalSourcePath(canonicalRoot, sourcePath, label) {
+  const candidate = path.resolve(canonicalRoot, sourcePath);
+  if (!existsSync(candidate)) fail(`${label} is missing: ${candidate}`);
+  let current = canonicalRoot;
+  for (const segment of path.relative(canonicalRoot, candidate).split(path.sep)) {
+    if (!segment) continue;
+    current = path.join(current, segment);
+    if (lstatSync(current).isSymbolicLink()) fail(`${label} must not contain a symlink: ${current}`);
+  }
+  const root = realpathSync(canonicalRoot), resolved = realpathSync(candidate);
+  if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) fail(`${label} escapes canonical root: ${candidate}`);
+  return candidate;
+}
 function manifestOrigin(manifest, label) {
   if (!manifest || typeof manifest !== "object") fail(`${label} must be an object`);
   for (const key of ["catalogId", "origin", "package", "packageVersion", "pluginVersion", "license", "source", "entry", "descriptor", "assets"]) {
@@ -82,7 +95,8 @@ export async function verifyWamAssets(root = "public", { mode = "auto", canonica
       if (hash !== expected[name]) fail(`${id} hash mismatch for ${name}: ${hash}`);
     }
     if (effectiveMode === "public" && (manifest.origin === "first-party" || manifest.origin === "wrapped-vendored")) {
-      const canonical = path.join(canonicalRoot, manifest.origin === "first-party" ? manifest.sourcePath : manifest.adapter.sourcePath, "manifest.json");
+      const sourcePath = manifest.origin === "first-party" ? manifest.sourcePath : manifest.adapter.sourcePath;
+      const canonical = path.join(canonicalSourcePath(canonicalRoot, sourcePath, `${id} sourcePath`), "manifest.json");
       if (!existsSync(canonical)) fail(`${id} canonical manifest is missing: ${canonical}`);
       equalBytes(canonical, manifestPath, `${id} public manifest`);
     }
