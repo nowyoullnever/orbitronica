@@ -85,6 +85,13 @@ class AudioEngine {
   private readonly waveformResolution = 1024;
   private processedBuffers = new Map<string, AudioBuffer>();
   private reverseBuffers = new Map<string, AudioBuffer>();
+  // Each entry is a fully decoded AudioBuffer (often several MB for a long sample), and a
+  // new entry is produced per distinct (speed, pitch) tuple as the user sweeps those
+  // controls. Left unbounded this grows without limit; 64 entries per cache keeps steady
+  // memory bounded to a comfortably large recent working set while still amortizing repeat
+  // requests. Eviction is least-recently-used, and a buffer currently backing an active
+  // (including looping) playback is never evicted regardless of recency.
+  private static readonly PROCESSED_BUFFER_CACHE_CAP = 64;
   private rawFiles = new Map<string, { fileName: string; bytes: Uint8Array }>();
   private orbitRuntimes = new Map<string, OrbitAudioRuntime>();
   private orbitPanValues = new Map<string, number>();
@@ -434,6 +441,40 @@ class AudioEngine {
     return `${orbitId}:${planetId}:speed=${this.normalizedSpeed(speed).toFixed(4)}:pitch=${Math.round(pitchCents)}`;
   }
 
+  /** AudioBuffers currently backing any active (including looping) playback source. */
+  private activePlaybackBuffers(): Set<AudioBuffer> {
+    const buffers = new Set<AudioBuffer>();
+    for (const playback of this.active.values()) {
+      if (playback.source.buffer) buffers.add(playback.source.buffer);
+    }
+    return buffers;
+  }
+
+  /** Reads a cache entry and, on hit, refreshes its recency to most-recently-used. */
+  private touchCachedBuffer(cache: Map<string, AudioBuffer>, key: string): AudioBuffer | undefined {
+    const value = cache.get(key);
+    if (value === undefined) return undefined;
+    // Map iteration order is insertion order, so a delete+re-set moves this key to the
+    // most-recently-used end without needing a separate recency structure.
+    cache.delete(key);
+    cache.set(key, value);
+    return value;
+  }
+
+  /** Inserts a cache entry, then evicts least-recently-used entries beyond the cap. */
+  private cacheProcessedBuffer(cache: Map<string, AudioBuffer>, key: string, value: AudioBuffer) {
+    cache.delete(key);
+    cache.set(key, value);
+    if (cache.size <= AudioEngine.PROCESSED_BUFFER_CACHE_CAP) return;
+    const protectedBuffers = this.activePlaybackBuffers();
+    for (const [candidateKey, candidateValue] of cache) {
+      if (cache.size <= AudioEngine.PROCESSED_BUFFER_CACHE_CAP) break;
+      if (candidateKey === key) continue;
+      if (protectedBuffers.has(candidateValue)) continue;
+      cache.delete(candidateKey);
+    }
+  }
+
   private getPlaybackBuffer(orbitId: string, planetId: string, speed: number, pitchCents: number) {
     const original = this.buffers.get(orbitId);
     if (!original) return null;
@@ -447,7 +488,7 @@ class AudioEngine {
       };
     }
     const key = this.processedBufferKey(orbitId, planetId, normalizedSpeed, roundedPitch);
-    const processed = this.processedBuffers.get(key);
+    const processed = this.touchCachedBuffer(this.processedBuffers, key);
     return {
       buffer: processed ?? original,
       key: processed ? key : this.processedBufferKey(orbitId, planetId, 1, 0),
@@ -467,7 +508,7 @@ class AudioEngine {
     let playbackBuffer = resolved.buffer;
     if (reverse) {
       const reverseKey = `${resolved.key}:reverse`;
-      playbackBuffer = this.reverseBuffers.get(reverseKey) ?? this.createReversedBuffer(reverseKey, resolved.buffer);
+      playbackBuffer = this.touchCachedBuffer(this.reverseBuffers, reverseKey) ?? this.createReversedBuffer(reverseKey, resolved.buffer);
     }
     const source = context.createBufferSource();
     const planetGain = context.createGain();
@@ -506,7 +547,7 @@ class AudioEngine {
       const output = reversed.getChannelData(channel);
       for (let index = 0; index < input.length; index++) output[index] = input[input.length - 1 - index];
     }
-    this.reverseBuffers.set(key, reversed);
+    this.cacheProcessedBuffer(this.reverseBuffers, key, reversed);
     return reversed;
   }
 
@@ -742,7 +783,7 @@ class AudioEngine {
         for (let index = 0; index < samples.length; index++) samples[index] *= scale;
       }
     }
-    this.processedBuffers.set(key, output);
+    this.cacheProcessedBuffer(this.processedBuffers, key, output);
   }
 
   private async loadRecordingProcessor(context: AudioContext) {

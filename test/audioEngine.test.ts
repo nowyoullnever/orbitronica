@@ -20,6 +20,24 @@ class FakeAnalyser extends FakeNode {
   getFloatTimeDomainData(buffer: Float32Array) { buffer.fill(0); }
 }
 
+// A minimal in-memory AudioBuffer stand-in: real Float32Array channel storage so the
+// actual SoundTouch pipeline in processPlanetBuffer can run against it deterministically.
+class FakeAudioBuffer {
+  numberOfChannels: number;
+  length: number;
+  sampleRate: number;
+  private channels: Float32Array[];
+  constructor(numberOfChannels: number, length: number, sampleRate: number) {
+    this.numberOfChannels = numberOfChannels;
+    this.length = length;
+    this.sampleRate = sampleRate;
+    this.channels = Array.from({ length: numberOfChannels }, () => new Float32Array(length));
+  }
+  get duration() { return this.sampleRate > 0 ? this.length / this.sampleRate : 0; }
+  getChannelData(channel: number) { return this.channels[channel]; }
+  copyToChannel(source: Float32Array, channel: number) { this.channels[channel].set(source); }
+}
+
 let contextCount = 0;
 let masterGain: FakeGain | undefined;
 let masterPanner: FakePanner | undefined;
@@ -42,6 +60,9 @@ class FakeAudioContext {
   createChannelSplitter() { return new FakeNode(); }
   createChannelMerger() { return new FakeNode(); }
   createAnalyser() { return new FakeAnalyser(); }
+  createBuffer(numberOfChannels: number, length: number, sampleRate: number) {
+    return new FakeAudioBuffer(numberOfChannels, length, sampleRate);
+  }
   async decodeAudioData(raw: ArrayBuffer) {
     if (new Uint8Array(raw)[0] === 255) throw new Error("bad audio");
     return { length: 0, numberOfChannels: 0 };
@@ -49,7 +70,16 @@ class FakeAudioContext {
   async resume() { this.state = "running"; }
 }
 
-Object.assign(globalThis, { AudioContext: FakeAudioContext });
+// processPlanetBuffer yields between chunks via `window.setTimeout`; the LRU cache tests
+// below drive that real pipeline (deterministic recomputation is the behavior under test),
+// so a minimal window polyfill is needed in this Node harness that otherwise has no DOM.
+Object.assign(globalThis, {
+  AudioContext: FakeAudioContext,
+  window: {
+    setTimeout: (handler: () => void, timeout?: number) => setTimeout(handler, timeout),
+    clearTimeout: (id: NodeJS.Timeout) => clearTimeout(id)
+  }
+});
 const { audioEngine } = await import("../src/renderer/audio/audioEngine.ts");
 const { OrbitWamRack } = await import("../src/renderer/audio/wamRack.ts");
 
@@ -298,4 +328,146 @@ test("master PCM export captures the active WAM insert, but bypassed or unavaila
   await unavailableRack.reconcile([{ ...slot, id: "unavailable-slot" }]);
   assert.equal(unavailableRack.getStatus("unavailable-slot"), "unavailable");
   assert.deepEqual(captureMasterPcm(unavailableInput, .25, recorder), [.25], "unavailable runtimes remain native and dry");
+});
+
+/**
+ * Phase 5: the processed/reverse buffer caches are bounded LRUs (see
+ * AudioEngine.PROCESSED_BUFFER_CACHE_CAP). These tests reach into the engine's private
+ * `buffers`/`processedBuffers`/`active` maps directly (as the rest of this file already
+ * does for WAM racks and plugin state) so they can drive the real processPlanetBuffer
+ * pipeline without needing a full decode/playback graph.
+ */
+const PROCESSED_BUFFER_CACHE_CAP = 64; // must match AudioEngine.PROCESSED_BUFFER_CACHE_CAP
+
+function clearOrbitProcessedBuffers(engine: any, ...orbitIds: string[]) {
+  for (const cacheName of ["processedBuffers", "reverseBuffers"]) {
+    for (const key of [...engine[cacheName].keys()]) {
+      if (orbitIds.some((orbitId) => key.startsWith(`${orbitId}:`))) engine[cacheName].delete(key);
+    }
+  }
+  for (const orbitId of orbitIds) engine.buffers.delete(orbitId);
+}
+
+test("processed-buffer cache stays bounded to the LRU cap across many distinct speed/pitch tuples", async () => {
+  await audioEngine.resume();
+  const orbitId = "lru-cap-orbit";
+  const planetId = "lru-cap-planet";
+  const engine = audioEngine as any;
+  engine.buffers.set(orbitId, new FakeAudioBuffer(1, 256, 44100));
+  try {
+    for (let cents = 1; cents <= PROCESSED_BUFFER_CACHE_CAP + 12; cents++) {
+      await audioEngine.processPitchBuffer(orbitId, planetId, cents);
+    }
+    assert.ok(
+      engine.processedBuffers.size <= PROCESSED_BUFFER_CACHE_CAP,
+      `expected cache size <= ${PROCESSED_BUFFER_CACHE_CAP}, got ${engine.processedBuffers.size}`
+    );
+    const newestKey = engine.processedBufferKey(orbitId, planetId, 1, PROCESSED_BUFFER_CACHE_CAP + 12);
+    assert.ok(engine.processedBuffers.has(newestKey), "most recently processed tuple must still be cached");
+    const oldestKey = engine.processedBufferKey(orbitId, planetId, 1, 1);
+    assert.equal(engine.processedBuffers.has(oldestKey), false, "least-recently-used tuple should have been evicted");
+  } finally {
+    clearOrbitProcessedBuffers(engine, orbitId);
+  }
+});
+
+test("a buffer backing a currently active playback is never evicted, even as the LRU cap is exceeded", async () => {
+  await audioEngine.resume();
+  const orbitId = "lru-protect-orbit";
+  const planetId = "lru-protect-planet";
+  const engine = audioEngine as any;
+  engine.buffers.set(orbitId, new FakeAudioBuffer(1, 256, 44100));
+  try {
+    await audioEngine.processPitchBuffer(orbitId, planetId, 100);
+    const protectedKey = engine.processedBufferKey(orbitId, planetId, 1, 100);
+    const protectedBuffer = engine.processedBuffers.get(protectedKey);
+    assert.ok(protectedBuffer, "setup: the protected tuple must be cached before the eviction sweep");
+
+    // Simulate an in-flight (e.g. looping) playback whose source node still references this
+    // buffer. It is the least-recently-used entry, so without the active-playback guard the
+    // eviction sweep below would remove it first.
+    engine.active.set("lru-protect-playback", { source: { buffer: protectedBuffer } });
+    for (let cents = 200; cents < 200 + PROCESSED_BUFFER_CACHE_CAP + 20; cents++) {
+      await audioEngine.processPitchBuffer(orbitId, planetId, cents);
+    }
+    assert.ok(engine.processedBuffers.has(protectedKey), "active playback's buffer must survive LRU eviction");
+    assert.ok(
+      engine.processedBuffers.size <= PROCESSED_BUFFER_CACHE_CAP,
+      "the cap is still respected for every non-protected entry"
+    );
+  } finally {
+    engine.active.delete("lru-protect-playback");
+    clearOrbitProcessedBuffers(engine, orbitId);
+  }
+});
+
+test("re-requesting an evicted (speed,pitch) tuple transparently re-processes to identical output", async () => {
+  await audioEngine.resume();
+  const orbitId = "lru-reprocess-orbit";
+  const planetId = "lru-reprocess-planet";
+  const engine = audioEngine as any;
+  const source = new FakeAudioBuffer(2, 512, 44100);
+  const left = source.getChannelData(0);
+  const right = source.getChannelData(1);
+  for (let index = 0; index < 512; index++) {
+    left[index] = Math.sin(index / 9) * .4;
+    right[index] = Math.cos(index / 13) * .4;
+  }
+  engine.buffers.set(orbitId, source);
+  try {
+    await audioEngine.processPlanetBuffer(orbitId, planetId, 1.25, 150);
+    const key = engine.processedBufferKey(orbitId, planetId, 1.25, 150);
+    const first = engine.processedBuffers.get(key);
+    assert.ok(first, "setup: the target tuple must be cached before eviction");
+    const firstLeft = Float32Array.from(first.getChannelData(0));
+    const firstRight = Float32Array.from(first.getChannelData(1));
+
+    // Evict the target tuple by requesting enough unrelated tuples to exceed the cap; it is
+    // never re-touched in between, so it is the oldest (first-evicted) entry.
+    for (let cents = 1000; cents < 1000 + PROCESSED_BUFFER_CACHE_CAP + 16; cents++) {
+      await audioEngine.processPitchBuffer(orbitId, planetId, cents);
+    }
+    assert.equal(engine.processedBuffers.has(key), false, "setup: the target tuple must actually be evicted");
+    assert.equal(audioEngine.hasProcessedBuffer(orbitId, planetId, 1.25, 150), false);
+
+    await audioEngine.processPlanetBuffer(orbitId, planetId, 1.25, 150);
+    const second = engine.processedBuffers.get(key);
+    assert.ok(second, "recomputation after eviction must repopulate the cache");
+    assert.notEqual(second, first, "recomputation produces a new buffer instance, not a stale reference");
+    assert.deepEqual(Array.from(second.getChannelData(0)), Array.from(firstLeft), "recomputed left channel must match the pre-eviction output");
+    assert.deepEqual(Array.from(second.getChannelData(1)), Array.from(firstRight), "recomputed right channel must match the pre-eviction output");
+  } finally {
+    clearOrbitProcessedBuffers(engine, orbitId);
+  }
+});
+
+test("removeOrbit still prunes only its own processed-buffer cache entries once LRU touches have reordered the map", async () => {
+  await audioEngine.resume();
+  const orbitA = "lru-remove-orbit-a";
+  const orbitB = "lru-remove-orbit-b";
+  const planetId = "lru-remove-planet";
+  const engine = audioEngine as any;
+  engine.buffers.set(orbitA, new FakeAudioBuffer(1, 128, 44100));
+  engine.buffers.set(orbitB, new FakeAudioBuffer(1, 128, 44100));
+  try {
+    await audioEngine.processPitchBuffer(orbitA, planetId, 50);
+    await audioEngine.processPitchBuffer(orbitB, planetId, 50);
+    // Reading orbitA's entry refreshes its recency, moving it past orbitB's entry in the
+    // underlying Map's iteration order. Prefix eviction must still key off the string
+    // prefix, not the entry's position in the map.
+    engine.getPlaybackBuffer(orbitA, planetId, 1, 50);
+
+    const keyA = engine.processedBufferKey(orbitA, planetId, 1, 50);
+    const keyB = engine.processedBufferKey(orbitB, planetId, 1, 50);
+    assert.ok(engine.processedBuffers.has(keyA));
+    assert.ok(engine.processedBuffers.has(keyB));
+
+    audioEngine.removeOrbit(orbitA);
+
+    assert.equal(engine.processedBuffers.has(keyA), false, "removed orbit's cache entry must be pruned");
+    assert.ok(engine.processedBuffers.has(keyB), "an unrelated orbit's cache entry must survive");
+  } finally {
+    audioEngine.removeOrbit(orbitA);
+    audioEngine.removeOrbit(orbitB);
+  }
 });
