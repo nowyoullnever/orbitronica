@@ -97,8 +97,11 @@ test("Phase 1 vendored EQ retains pinned provenance and the documented fallback 
 
 test("first-party build ownership cannot rewrite immutable Burns payloads", () => {
   const builder = read("scripts/build-plugins.mjs");
-  assert.match(builder, /firstPartyIds = \["orbitronica-filter", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-bitcrusher", "orbitronica-flanger", "orbitronica-phaser", "orbitronica-reverb"\]/);
+  const pluginIds = read("scripts/lib/plugin-ids.mjs");
+  assert.match(builder, /import \{ FIRST_PARTY_PLUGIN_IDS \} from "\.\/lib\/plugin-ids\.mjs"/);
+  assert.match(pluginIds, /FIRST_PARTY_PLUGIN_IDS = \[\s*"orbitronica-filter",\s*"orbitronica-overdrive",\s*"orbitronica-compressor",\s*"orbitronica-bitcrusher",\s*"orbitronica-flanger",\s*"orbitronica-phaser",\s*"orbitronica-reverb"\s*\]/);
   assert.doesNotMatch(builder, /burns-simple-eq|burns-distortion/);
+  assert.doesNotMatch(pluginIds, /burns-simple-eq|burns-distortion/);
   const eq = JSON.parse(read("public/wam/burns-simple-eq/manifest.json")) as { origin: string; assets: Record<string, string> };
   assert.equal(eq.origin, "vendored");
   for (const [file, expected] of Object.entries(eq.assets)) assert.equal(createHash("sha256").update(fs.readFileSync(new URL(`public/wam/burns-simple-eq/${file}`, root))).digest("hex"), expected);

@@ -1,17 +1,18 @@
-import { createHash } from "node:crypto";
-import { lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { lstatSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { FIRST_PARTY_PLUGIN_IDS } from "./lib/plugin-ids.mjs";
+import { hashFile } from "./lib/wam-hash.mjs";
 
-const ids = ["orbitronica-filter", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-bitcrusher", "orbitronica-flanger", "orbitronica-phaser", "orbitronica-reverb"];
+const ids = FIRST_PARTY_PLUGIN_IDS;
 function snapshot(root) {
   const walk = (directory, prefix = "") => Object.fromEntries(readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)).flatMap((entry) => {
     const relative = `${prefix}${entry.name}`;
     const absolute = path.join(directory, entry.name);
     if (entry.isDirectory()) return Object.entries(walk(absolute, `${relative}/`));
     if (!entry.isFile() || lstatSync(absolute).isSymbolicLink()) throw new Error(`unexpected generated entry: ${relative}`);
-    return [[relative, { type: "file", sha256: createHash("sha256").update(readFileSync(absolute)).digest("hex") }]];
+    return [[relative, { type: "file", sha256: hashFile(absolute) }]];
   }));
   return Object.fromEntries(ids.map((id) => [id, walk(path.join(root, id))]));
 }

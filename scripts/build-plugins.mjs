@@ -1,8 +1,9 @@
 import { build } from "esbuild";
 import { cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
+import { FIRST_PARTY_PLUGIN_IDS } from "./lib/plugin-ids.mjs";
 
-const firstPartyIds = ["orbitronica-filter", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-bitcrusher", "orbitronica-flanger", "orbitronica-phaser", "orbitronica-reverb"];
+const firstPartyIds = FIRST_PARTY_PLUGIN_IDS;
 // A verifier may direct builds to an empty tree. Normal production builds retain
 // the established public/wam output and never touch vendored Burns artifacts.
 const outputRoot = path.resolve(process.env.ORBITRONICA_PLUGIN_OUTPUT ?? "public/wam");

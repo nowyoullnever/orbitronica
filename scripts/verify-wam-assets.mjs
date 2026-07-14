@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { hashFile } from "./lib/wam-hash.mjs";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -91,7 +91,7 @@ export async function verifyWamAssets(root = "public", { mode = "auto", canonica
       if (typeof expected[name] !== "string" || !SHA256.test(expected[name])) fail(`${id} invalid SHA-256 for ${name}`);
       const asset = path.join(pluginRoot, ...name.split("/"));
       if (lstatSync(asset).isSymbolicLink()) fail(`${id} asset is a symlink: ${name}`);
-      const hash = createHash("sha256").update(readFileSync(asset)).digest("hex");
+      const hash = hashFile(asset);
       if (hash !== expected[name]) fail(`${id} hash mismatch for ${name}: ${hash}`);
     }
     if (effectiveMode === "public" && (manifest.origin === "first-party" || manifest.origin === "wrapped-vendored")) {
