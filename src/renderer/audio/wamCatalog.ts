@@ -3,17 +3,9 @@
  * catalog id; they never provide a URL, module specifier, or import option.
  */
 import type { JsonValue, WamPluginInstance, WamPluginModule } from "./wamHost.ts";
+import { WAM_CATALOG_DATA, type WamCatalogDataEntry } from "./wamCatalogData.ts";
 
-export type WamCatalogEntry = Readonly<{
-  id: string;
-  displayName: string;
-  pluginVersion: string;
-  packageVersion: string;
-  license: string;
-  entry: string;
-  descriptor: string;
-  hasGui: boolean;
-}>;
+export type WamCatalogEntry = WamCatalogDataEntry;
 
 function defineWamCatalog<const Catalog extends Record<string, WamCatalogEntry>>(
   catalog: Catalog & { [Id in keyof Catalog]: Readonly<{ id: Id }> }
@@ -21,20 +13,9 @@ function defineWamCatalog<const Catalog extends Record<string, WamCatalogEntry>>
   return catalog;
 }
 
-const burnsSimpleDelayId = "burns-simple-delay";
-
-export const WAM_CATALOG = defineWamCatalog({
-  [burnsSimpleDelayId]: {
-    id: burnsSimpleDelayId,
-    displayName: "Burns Simple Delay",
-    pluginVersion: "0.2.54",
-    packageVersion: "0.2.54",
-    license: "MIT",
-    entry: "wam/burns-simple-delay/index.js",
-    descriptor: "wam/burns-simple-delay/descriptor.json",
-    hasGui: true
-  }
-});
+export const WAM_CATALOG = defineWamCatalog(Object.fromEntries(
+  WAM_CATALOG_DATA.map((entry) => [entry.id, entry]),
+) as { [Entry in typeof WAM_CATALOG_DATA[number] as Entry["id"]]: Entry });
 
 export type WamCatalogId = keyof typeof WAM_CATALOG;
 
