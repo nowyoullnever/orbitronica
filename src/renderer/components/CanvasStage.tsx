@@ -1,18 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ContextMenuState, MultiSelection, Orbit, Planet, Selection, Tool, TriggerBar, ViewportState } from "../state/types";
 import {
-  TAU, ellipsePoint, findNearestOrbit, getPlanetEffectiveSpeed,
-  getSampleDuration, getSampleEnd, getSampleStart, isAngleInsideBar, isFullLoopBar,
+  TAU, ellipsePoint, findNearestOrbit,
+  getSampleEnd, getSampleStart, isFullLoopBar,
   normalizeAngle, orbitAngleAtPoint, SPLICE_MAX_PIECES
 } from "../utils/geometry";
-import { collisionPairKey, hasSweptCircleContact, isAngularlyApproaching } from "../utils/collision";
-import { getLoopBarTransitions } from "../utils/sampleTrim";
 import { angularDistance } from "../utils/triggerDetection";
 import { collectMarqueeSelection } from "../utils/selection";
 import { parseHexColor } from "../utils/color";
+import {
+  COLLISION_FLASH_SECONDS, PLANET_RADIUS, stepPhysics, type PlaybackCallback
+} from "../state/physics.ts";
+import { hitTestCanvas as hitTestCanvasPure, PLANET_STROKE_WIDTH, type HitTestResult } from "../utils/canvasHitTest.ts";
 
-const PLANET_RADIUS = 6;
-const PLANET_STROKE_WIDTH = 2;
 const LOOP_BAR_WIDTH = 7.65;
 const LOOP_BAR_SELECTED_WIDTH = 9.35;
 const SEQUENCE_BAR_WIDTH = 6.8;
@@ -22,8 +22,6 @@ const SELECTION_COLOR = "#5b93f2";
 // Marquee modifier: Cmd on macOS, Ctrl elsewhere. Using Ctrl on macOS would also fire
 // the context menu, so we key off the platform's primary command modifier instead.
 const IS_MAC = typeof navigator !== "undefined" && navigator.userAgent.includes("Mac");
-const BAR_EDGE_HIT_RADIUS = 8;
-const ORBIT_LINE_TOLERANCE = 8;
 const MIN_BAR = .01;
 const MAX_BAR = TAU;
 const FULL_LOOP_SNAP_THRESHOLD = TAU * .03;
@@ -39,11 +37,6 @@ const SPLICE_HANDLE_HIT = 13;
 // Radial distance of the start-arrow marker from the orbit line, and its grab radius.
 const SPLICE_START_MARKER_OFFSET = 11;
 const SPLICE_START_HIT = 12;
-const SEQUENCE_BASE_CYCLE_DURATION = 4;
-const COLLISION_SLOWDOWN = .4;
-const COLLISION_COOLDOWN_SECONDS = .25;
-const COLLISION_RECOVERY_RATE = 2.5;
-const COLLISION_FLASH_SECONDS = .12;
 const ABSOLUTE_MIN_VIEWPORT_ZOOM = .1;
 const MAX_VIEWPORT_ZOOM = 4;
 const DEFAULT_WORLD_WIDTH = 4000;
@@ -66,14 +59,6 @@ const unwrapLength = (prevAcc: number | undefined, prevRaw: number | undefined, 
   else if (delta < -Math.PI) delta += TAU;
   return Math.min(TAU, Math.max(0, prevAcc + delta));
 };
-
-type HitTestResult =
-  | { type: "planet"; planetId: string; orbitId: string }
-  | { type: "bar-edge"; barId: string; orbitId: string; edge: "start" | "end" }
-  | { type: "bar-body"; barId: string; orbitId: string }
-  | { type: "orbit-line"; orbitId: string }
-  | { type: "orbit-inside"; orbitId: string }
-  | { type: "empty" };
 
 type Drag =
   | { type: "resize-orbit"; orbit: Orbit }
@@ -105,8 +90,6 @@ type WaveformGeometry = {
   segments: WaveformSegment[];
   basePath: Path2D;
 };
-
-type PlaybackCallback = { sceneId: string; epoch: number };
 
 type Props = {
   orbits: Orbit[];
@@ -150,6 +133,11 @@ export function CanvasStage(props: Props) {
   const runtimeAngles = useRef(new Map<string, number>());
   const runtimeUnwrappedAngles = useRef(new Map<string, number>());
   const collisionPairCooldowns = useRef(new Map<string, number>());
+  // Bookkeeping for stepPhysics's throttled angle commits (see physics.ts): the last
+  // angle value pushed into React state per planet, and seconds accumulated since the
+  // last periodic sync while playing.
+  const lastSyncedAngles = useRef(new Map<string, number>());
+  const angleSyncElapsed = useRef({ value: 0 });
   const waveformGeometryCache = useRef(new Map<string, WaveformGeometry>());
   const stateRef = useRef(props);
   const multiSelectionSets = useMemo(() => ({
@@ -162,7 +150,17 @@ export function CanvasStage(props: Props) {
   const marqueeRef = useRef<{ sx: number; sy: number; x: number; y: number } | null>(null);
   // Set when a bar-tool drag begins so the trailing click doesn't also place a new bar.
   const suppressClickRef = useRef(false);
+  // Dirty flag for the rAF draw loop: while paused/idle, redraw only when something
+  // actually changed (props, a physics-tick commit, or a pointer interaction) instead of
+  // clearing+redrawing an unchanged frame every 16ms. While playing with any active
+  // planet, the draw loop ignores this and redraws unconditionally regardless (motion
+  // comes from the runtimeAngles ref, which updates every 10ms independent of React
+  // renders, so a dirty flag driven only by renders/commits could under-redraw mid-motion).
+  const needsRedrawRef = useRef(true);
   stateRef.current = props;
+  // Every render means some prop changed (viewport, selection, waveform peaks, planets/
+  // orbits/bars, tool, ...) -- simplest correct trigger, matching the spec's own note.
+  needsRedrawRef.current = true;
   multiSelectionSetsRef.current = multiSelectionSets;
 
   const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -300,12 +298,6 @@ export function CanvasStage(props: Props) {
     return () => window.removeEventListener("keydown", keydown);
   }, []);
 
-  function pointDistanceToOrbit(orbit: Orbit, x: number, y: number) {
-    const angle = orbitAngleAtPoint(orbit, x, y);
-    const point = ellipsePoint(orbit, angle);
-    return Math.hypot(point.x - x, point.y - y);
-  }
-
   const spliceTrackX = (orbit: Orbit) => orbit.x + orbit.radiusX + SPLICE_HANDLE_MARGIN;
   const spliceHandleY = (orbit: Orbit) =>
     orbit.y - clamp(((orbit.spliceCount ?? 0) / 2) * SPLICE_STEP_PIXELS, -SPLICE_TRACK_HALF, SPLICE_TRACK_HALF);
@@ -350,58 +342,22 @@ export function CanvasStage(props: Props) {
   }
 
   function hitTestCanvas(x: number, y: number): HitTestResult {
-    const zoom = stateRef.current.viewport.zoom || 1;
-    const barEdgeHitRadius = BAR_EDGE_HIT_RADIUS / zoom;
-    const orbitLineTolerance = ORBIT_LINE_TOLERANCE / zoom;
-    const barBodyLineTolerance = 10 / zoom;
-    for (let index = props.planets.length - 1; index >= 0; index--) {
-      const planet = props.planets[index];
-      const orbit = props.orbits.find((item) => item.id === planet.orbitId);
-      if (!orbit) continue;
-      const point = ellipsePoint(orbit, planet.angle);
-      if (Math.hypot(point.x - x, point.y - y) <= PLANET_RADIUS + PLANET_STROKE_WIDTH / 2) {
-        return { type: "planet", planetId: planet.id, orbitId: orbit.id };
-      }
-    }
-    for (let index = props.bars.length - 1; index >= 0; index--) {
-      const bar = props.bars[index];
-      const orbit = props.orbits.find((item) => item.id === bar.orbitId);
-      if (!orbit || orbit.mode !== "loop" || bar.source === "splice") continue;
-      const start = bar.angle - bar.lengthRadians / 2;
-      const end = bar.angle + bar.lengthRadians / 2;
-      if (Math.hypot(ellipsePoint(orbit, start).x - x, ellipsePoint(orbit, start).y - y) <= barEdgeHitRadius) {
-        return { type: "bar-edge", barId: bar.id, orbitId: orbit.id, edge: "start" };
-      }
-      if (Math.hypot(ellipsePoint(orbit, end).x - x, ellipsePoint(orbit, end).y - y) <= barEdgeHitRadius) {
-        return { type: "bar-edge", barId: bar.id, orbitId: orbit.id, edge: "end" };
-      }
-    }
-    for (let index = props.bars.length - 1; index >= 0; index--) {
-      const bar = props.bars[index];
-      const orbit = props.orbits.find((item) => item.id === bar.orbitId);
-      if (!orbit || bar.source === "splice") continue;
-      const angle = orbitAngleAtPoint(orbit, x, y);
-      const onLine = pointDistanceToOrbit(orbit, x, y) <= barBodyLineTolerance;
-      const onBar = orbit.mode === "loop"
-        ? !isFullLoopBar(bar) && isAngleInsideBar(angle, bar.angle, bar.lengthRadians)
-        : angularDistance(angle, bar.angle) <= .07;
-      if (onLine && onBar) return { type: "bar-body", barId: bar.id, orbitId: orbit.id };
-    }
-    for (let index = props.orbits.length - 1; index >= 0; index--) {
-      const orbit = props.orbits[index];
-      if (pointDistanceToOrbit(orbit, x, y) <= orbitLineTolerance) {
-        return { type: "orbit-line", orbitId: orbit.id };
-      }
-    }
-    for (let index = props.orbits.length - 1; index >= 0; index--) {
-      const orbit = props.orbits[index];
-      const normalized = ((x - orbit.x) / orbit.radiusX) ** 2 + ((y - orbit.y) / orbit.radiusY) ** 2;
-      if (normalized < 1) return { type: "orbit-inside", orbitId: orbit.id };
-    }
-    return { type: "empty" };
+    return hitTestCanvasPure({
+      x, y, zoom: stateRef.current.viewport.zoom || 1,
+      orbits: props.orbits, planets: props.planets, bars: props.bars,
+      // Match the draw loop: hit-test against the true runtime angle, not the throttled
+      // React-state angle, so clicking a moving planet doesn't miss where it's drawn.
+      resolveAngle: (planet) => runtimeAngles.current.get(planet.id) ?? planet.angle
+    });
   }
 
   useEffect(() => {
+    // Persistent, frame-to-frame scratch structures for the draw loop below: allocated
+    // once for the lifetime of this effect (a single rAF loop) and cleared+refilled each
+    // frame instead of being reallocated every frame at 60fps.
+    const orbitsById = new Map<string, Orbit>();
+    const planetAnglesByOrbit = new Map<string, number[]>();
+    const waveformOrbitIds = new Set<string>();
     const drawTick = (context: CanvasRenderingContext2D, orbit: Orbit, angle: number, color: string, width = 8) => {
       const point = ellipsePoint(orbit, angle);
       const nx = Math.cos(angle), ny = Math.sin(angle);
@@ -582,10 +538,22 @@ export function CanvasStage(props: Props) {
       context.textBaseline = "alphabetic";
     };
     const draw = (time: number) => {
+      const state = stateRef.current;
+      // While actively playing with at least one active planet, motion is continuous
+      // (driven by the runtimeAngles ref, updated every 10ms tick independent of React
+      // renders) so always redraw. Otherwise, skip the clear+redraw entirely when
+      // nothing has flagged a change since the last frame -- keeps the rAF loop alive
+      // (for responsiveness the instant something does change) without doing real work
+      // on an unchanged scene.
+      const isAnimating = state.isPlaying && state.planets.some((planet) => planet.isActive);
+      if (!isAnimating && !needsRedrawRef.current) {
+        frameRef.current = requestAnimationFrame(draw);
+        return;
+      }
+      needsRedrawRef.current = false;
       const canvas = canvasRef.current!;
       const context = canvas.getContext("2d")!;
       const rect = canvas.getBoundingClientRect();
-      const state = stateRef.current;
       const multiOrbitIds = multiSelectionSetsRef.current.orbitIds;
       const multiPlanetIds = multiSelectionSetsRef.current.planetIds;
       context.clearRect(0, 0, rect.width, rect.height);
@@ -598,7 +566,9 @@ export function CanvasStage(props: Props) {
       context.lineWidth = 1 / state.viewport.zoom;
       context.strokeRect(0, 0, DEFAULT_WORLD_WIDTH, DEFAULT_WORLD_HEIGHT);
 
+      orbitsById.clear();
       for (const orbit of state.orbits) {
+        orbitsById.set(orbit.id, orbit);
         context.beginPath();
         context.ellipse(orbit.x, orbit.y, orbit.radiusX, orbit.radiusY, 0, 0, TAU);
         const orbitSelected = orbit.id === state.selection.orbitId || multiOrbitIds.has(orbit.id);
@@ -611,13 +581,18 @@ export function CanvasStage(props: Props) {
       }
 
       // Waveform overlay sits above the orbit line but below bars, markers, and planets.
-      const planetAnglesByOrbit = new Map<string, number[]>();
+      // Angle is read from the runtime ref (falling back to React state for planets the
+      // physics tick hasn't touched yet) so the waveform highlight tracks true motion
+      // even on ticks where React state's angle hasn't been committed.
+      planetAnglesByOrbit.clear();
       for (const planet of state.planets) {
+        const angle = runtimeAngles.current.get(planet.id) ?? planet.angle;
         const list = planetAnglesByOrbit.get(planet.orbitId);
-        if (list) list.push(planet.angle);
-        else planetAnglesByOrbit.set(planet.orbitId, [planet.angle]);
+        if (list) list.push(angle);
+        else planetAnglesByOrbit.set(planet.orbitId, [angle]);
       }
-      const waveformOrbitIds = new Set(state.orbits.map((orbit) => orbit.id));
+      waveformOrbitIds.clear();
+      for (const orbit of state.orbits) waveformOrbitIds.add(orbit.id);
       for (const orbitId of waveformGeometryCache.current.keys()) {
         if (!waveformOrbitIds.has(orbitId)) waveformGeometryCache.current.delete(orbitId);
       }
@@ -634,7 +609,7 @@ export function CanvasStage(props: Props) {
       }
 
       for (const bar of state.bars) {
-        const orbit = state.orbits.find((item) => item.id === bar.orbitId);
+        const orbit = orbitsById.get(bar.orbitId);
         if (!orbit || (orbit.mode !== "loop" && bar.source === "splice")) continue;
         const selected = bar.id === state.selection.barId;
         if (orbit.mode === "loop") {
@@ -662,7 +637,7 @@ export function CanvasStage(props: Props) {
 
       // Visual markers sit above bars but below moving planets.
       for (const bar of state.bars) {
-        const orbit = state.orbits.find((item) => item.id === bar.orbitId);
+        const orbit = orbitsById.get(bar.orbitId);
         if (!orbit || orbit.mode !== "loop" || bar.source === "splice" || !isFullLoopBar(bar)) continue;
         context.strokeStyle = "#ffffff";
         context.lineWidth = 3;
@@ -672,9 +647,12 @@ export function CanvasStage(props: Props) {
       for (const orbit of state.orbits) drawAudioStartMarker(context, orbit);
 
       for (const planet of state.planets) {
-        const orbit = state.orbits.find((item) => item.id === planet.orbitId);
+        const orbit = orbitsById.get(planet.orbitId);
         if (!orbit) continue;
-        const point = ellipsePoint(orbit, planet.angle);
+        // Read the true runtime angle (updated every 10ms tick) instead of React state's
+        // angle, which is now only committed periodically -- see physics.ts's stepPhysics
+        // for the throttled commit contract this depends on.
+        const point = ellipsePoint(orbit, runtimeAngles.current.get(planet.id) ?? planet.angle);
         context.beginPath();
         context.arc(point.x, point.y, PLANET_RADIUS, 0, TAU);
         context.fillStyle = orbit.color;
@@ -748,149 +726,27 @@ export function CanvasStage(props: Props) {
       const delta = (now - lastTick) / 1000;
       lastTick = now;
       const state = stateRef.current;
-      const updates = new Map<string, Partial<Planet>>();
-      const dynamics = new Map<string, Planet>();
-      const motionSamples = new Map<string, {
-        previousPosition: { x: number; y: number };
-        currentPosition: { x: number; y: number };
-        previousUnwrappedAngle: number;
-        currentUnwrappedAngle: number;
-      }>();
-      const orbitsById = new Map(state.orbits.map((orbit) => [orbit.id, orbit]));
-      if (!state.isPlaying) collisionPairCooldowns.current.clear();
-      else for (const [pair, remaining] of collisionPairCooldowns.current) {
-        const nextRemaining = remaining - delta;
-        if (nextRemaining > 0) collisionPairCooldowns.current.set(pair, nextRemaining);
-        else collisionPairCooldowns.current.delete(pair);
-      }
-      for (const planet of state.planets) {
-        const orbit = orbitsById.get(planet.orbitId);
-        if (!orbit) continue;
-        if (!state.isPlaying) {
-          runtimeAngles.current.set(planet.id, planet.angle);
-          runtimeUnwrappedAngles.current.set(planet.id, planet.angle);
-        }
-        let angle = runtimeAngles.current.get(planet.id) ?? planet.angle;
-        let unwrappedAngle = runtimeUnwrappedAngles.current.get(planet.id) ?? angle;
-        const previousUnwrappedAngle = unwrappedAngle;
-        const previousPosition = ellipsePoint(orbit, previousUnwrappedAngle);
-        let collisionSpeedMultiplier = planet.collisionSpeedMultiplier +
-          (1 - planet.collisionSpeedMultiplier) * Math.min(1, delta * COLLISION_RECOVERY_RATE);
-        collisionSpeedMultiplier = Math.min(1, Math.max(.1, collisionSpeedMultiplier));
-        if (collisionSpeedMultiplier > .9995) collisionSpeedMultiplier = 1;
-        const collisionFlashRemaining = Math.max(0, planet.collisionFlashRemaining - delta);
-        let direction = planet.direction;
-        if (state.isPlaying && !orbit.isPaused && planet.isActive) {
-          const baseDuration = orbit.mode === "loop" ? getSampleDuration(orbit) : SEQUENCE_BASE_CYCLE_DURATION;
-          unwrappedAngle += delta * (TAU / baseDuration) *
-            getPlanetEffectiveSpeed(orbit, { ...planet, collisionSpeedMultiplier }) * direction;
-          angle = normalizeAngle(unwrappedAngle);
-          runtimeAngles.current.set(planet.id, angle);
-          runtimeUnwrappedAngles.current.set(planet.id, unwrappedAngle);
-        }
-        const next = {
-          ...planet, angle, direction,
-          collisionSpeedMultiplier, collisionFlashRemaining
-        };
-        dynamics.set(planet.id, next);
-        motionSamples.set(planet.id, {
-          previousPosition,
-          currentPosition: ellipsePoint(orbit, unwrappedAngle),
-          previousUnwrappedAngle,
-          currentUnwrappedAngle: unwrappedAngle
-        });
-        updates.set(planet.id, {
-          angle, collisionSpeedMultiplier, collisionFlashRemaining
-        });
-        for (const bar of state.bars.filter((item) =>
-          item.orbitId === orbit.id && (orbit.mode === "loop" || item.source !== "splice"))) {
-          const callback = { sceneId: state.sceneId, epoch: state.playbackEpoch };
-          const key = `${planet.id}:${bar.id}`;
-          if (orbit.mode === "loop") {
-            const inside = state.isPlaying && !orbit.isPaused && planet.isActive &&
-              bar.kind === "play" && isAngleInsideBar(angle, bar.angle, bar.lengthRadians);
-            const transitions = state.isPlaying && !orbit.isPaused && planet.isActive && bar.kind === "play"
-              ? getLoopBarTransitions(previousUnwrappedAngle, unwrappedAngle, bar.angle, bar.lengthRadians)
-              : [];
-            for (const transition of transitions) {
-              state.onLoopFrame(orbit, next, bar, transition.type === "enter", normalizeAngle(transition.angle), callback);
-            }
-            state.onLoopFrame(orbit, next, bar, inside, angle, callback);
-            triggerStates.current.set(key, inside);
-          } else {
-            const inside = state.isPlaying && !orbit.isPaused && planet.isActive &&
-              angularDistance(angle, bar.angle) < .04;
-            if (inside && !triggerStates.current.get(key)) {
-              if (bar.kind === "stop") state.onSequenceStop(orbit.id, callback);
-              else state.onSequencePlay(orbit, next, bar, callback);
-            }
-            triggerStates.current.set(key, inside);
-          }
-        }
-      }
-      const collisionPlanets = [...dynamics.values()].filter((planet) => {
-        const orbit = orbitsById.get(planet.orbitId);
-        return state.isPlaying && planet.isActive && Boolean(orbit);
+      const result = stepPhysics({
+        orbits: state.orbits, planets: state.planets, bars: state.bars,
+        isPlaying: state.isPlaying, sceneId: state.sceneId, playbackEpoch: state.playbackEpoch,
+        delta,
+        runtimeAngles: runtimeAngles.current,
+        runtimeUnwrappedAngles: runtimeUnwrappedAngles.current,
+        collisionPairCooldowns: collisionPairCooldowns.current,
+        triggerStates: triggerStates.current,
+        lastSyncedAngles: lastSyncedAngles.current,
+        angleSyncElapsed: angleSyncElapsed.current,
+        onLoopFrame: state.onLoopFrame,
+        onSequencePlay: state.onSequencePlay,
+        onSequenceStop: state.onSequenceStop
       });
-      const contactPairs: Array<{ key: string; a: Planet; b: Planet }> = [];
-      for (let left = 0; left < collisionPlanets.length; left++) {
-        for (let right = left + 1; right < collisionPlanets.length; right++) {
-          const a = collisionPlanets[left], b = collisionPlanets[right];
-          const pair = collisionPairKey(a.id, b.id);
-          if (collisionPairCooldowns.current.has(pair)) continue;
-          const orbitA = orbitsById.get(a.orbitId);
-          const orbitB = orbitsById.get(b.orbitId);
-          const motionA = motionSamples.get(a.id);
-          const motionB = motionSamples.get(b.id);
-          if (!orbitA || !orbitB || !motionA || !motionB) continue;
-          // Only bounce when the two planets are actually moving toward each other this
-          // tick. Without this, planets sitting close together stay overlapped and flip
-          // direction repeatedly, gluing them together in a periodic forward/reverse cycle.
-          //
-          // On the SAME orbit, measure approach by the angular gap, not screen distance:
-          // orbits are ellipses, so two planets holding a fixed angular gap still see their
-          // straight-line distance grow and shrink as they travel. Using screen distance
-          // there produces phantom "approaching" for planets that move in lockstep, so they
-          // never separate on the orbit and oscillate forever. Cross-orbit pairs have no
-          // shared angle, so their swept screen-space motion determines contact.
-          let colliding: boolean;
-          if (a.orbitId === b.orbitId) {
-            colliding = isAngularlyApproaching(
-              motionA.previousUnwrappedAngle, motionA.currentUnwrappedAngle,
-              motionB.previousUnwrappedAngle, motionB.currentUnwrappedAngle
-            ) && hasSweptCircleContact(
-              motionA.previousPosition, motionA.currentPosition,
-              motionB.previousPosition, motionB.currentPosition,
-              PLANET_RADIUS
-            );
-          } else {
-            colliding = hasSweptCircleContact(
-              motionA.previousPosition, motionA.currentPosition,
-              motionB.previousPosition, motionB.currentPosition,
-              PLANET_RADIUS
-            );
-          }
-          if (colliding) contactPairs.push({ key: pair, a, b });
-        }
+      if (result.updates.size) state.onMovePlanets(result.updates);
+      // Flag a redraw for any tick that advanced motion or produced a commit, so the
+      // rAF loop doesn't need to wait on a React re-render round-trip to notice (motion
+      // itself is read from the runtimeAngles ref, not props, by the draw loop above).
+      if (result.updates.size > 0 || (state.isPlaying && state.planets.some((planet) => planet.isActive))) {
+        needsRedrawRef.current = true;
       }
-      const contactedPlanetIds = new Set<string>();
-      for (const { key, a, b } of contactPairs) {
-        collisionPairCooldowns.current.set(key, COLLISION_COOLDOWN_SECONDS);
-        contactedPlanetIds.add(a.id);
-        contactedPlanetIds.add(b.id);
-      }
-      for (const planet of collisionPlanets) {
-        if (!contactedPlanetIds.has(planet.id)) continue;
-        const collided: Planet = {
-          ...planet,
-          direction: (planet.direction * -1) as 1 | -1,
-          collisionSpeedMultiplier: COLLISION_SLOWDOWN,
-          collisionFlashRemaining: COLLISION_FLASH_SECONDS
-        };
-        dynamics.set(planet.id, collided);
-        updates.set(planet.id, { ...updates.get(planet.id), ...collided });
-      }
-      if (updates.size) state.onMovePlanets(updates);
     }, 10);
     return () => {
       window.clearInterval(timer);
@@ -955,6 +811,7 @@ export function CanvasStage(props: Props) {
   }
 
   function handleMouseDown(event: React.MouseEvent<HTMLCanvasElement>) {
+    needsRedrawRef.current = true;
     if (event.button === 1) {
       event.preventDefault();
       const point = localPoint(event);
@@ -1040,6 +897,8 @@ export function CanvasStage(props: Props) {
   }
 
   function handleMouseMove(event: React.MouseEvent<HTMLCanvasElement>) {
+    // Covers plain hover (cursor changes) as well as every drag/marquee update below.
+    needsRedrawRef.current = true;
     const screenPoint = localPoint(event);
     const point = screenToWorld(screenPoint);
     event.currentTarget.style.cursor = cursorFor(hitTestCanvas(point.x, point.y), point.x, point.y);
@@ -1118,6 +977,7 @@ export function CanvasStage(props: Props) {
   }
 
   function finishDrag() {
+    needsRedrawRef.current = true;
     if (drag?.type === "bar-start" || drag?.type === "bar-end") {
       const current = stateRef.current.bars.find((bar) => bar.id === drag.bar.id);
       props.onBarLengthEditEnd(drag.bar.id, current?.lengthRadians ?? drag.bar.lengthRadians);

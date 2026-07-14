@@ -1,4 +1,4 @@
-import { TAU } from "./geometry";
+import { TAU } from "./geometry.ts";
 
 export function angularDistance(a: number, b: number) {
   const diff = Math.abs(a - b) % TAU;
