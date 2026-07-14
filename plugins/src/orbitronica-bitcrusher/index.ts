@@ -1,4 +1,5 @@
 import { WebAudioModule, WamNode, addFunctionModule } from "@webaudiomodules/sdk";
+import { createKnobPanel, fmt } from "../shared/knobPanel";
 
 type Params = { bitDepth: number; reduction: number; mix: number };
 type State = { schemaVersion: 1; params: Params };
@@ -94,6 +95,10 @@ export async function proveMinimalWamProcessor(groupId: string, context: BaseAud
 }
 export async function createBitcrusherInstance(groupId: string, context: BaseAudioContext) {
   const module = new BitcrusherModule(groupId, context); const audioNode = await module.createAudioNode();
-  return { audioNode, createGui: () => { const root = document.createElement("div"); root.textContent = "Orbitronica Bitcrusher"; return root; }, destroyGui: (gui: HTMLElement) => gui.remove() };
+  return { audioNode, createGui: () => createKnobPanel("Orbitronica Bitcrusher", audioNode, [
+    { kind: "knob", key: "bitDepth", label: "Bits", min: 1, max: 16, step: 1, format: fmt.int },
+    { kind: "knob", key: "reduction", label: "Downsample", min: 1, max: 64, step: 1, format: fmt.int },
+    { kind: "knob", key: "mix", label: "Mix", min: 0, max: 1, format: fmt.pct },
+  ]), destroyGui: (gui: HTMLElement) => gui.remove() };
 }
 export default { createInstance: createBitcrusherInstance };

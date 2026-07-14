@@ -1,3 +1,4 @@
+import { createKnobPanel, fmt } from "../shared/knobPanel";
 
 const stateRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 type Params = { drive: number; tone: number; outputGain: number; mix: number };
@@ -44,5 +45,10 @@ class OrbitronicaOverdriveNode {
   }
   destroy() { if (this.#destroyed) return; this.#destroyed = true; for (const node of [this.input, this.shaper, this.tone, this.wet, this.dry, this.output]) node.disconnect(); }
 }
-class OrbitronicaOverdriveModule { async createInstance(_groupId: string, context: AudioContext) { const node = new OrbitronicaOverdriveNode(context); return { audioNode: node.input, createGui: () => { const gui = document.createElement("div"); gui.textContent = "Orbitronica Overdrive"; return gui; }, destroyGui: (gui: HTMLElement) => gui.remove() }; } }
+class OrbitronicaOverdriveModule { async createInstance(_groupId: string, context: AudioContext) { const node = new OrbitronicaOverdriveNode(context); return { audioNode: node.input, createGui: () => createKnobPanel("Orbitronica Overdrive", node, [
+  { kind: "knob", key: "drive", label: "Drive", min: 0, max: 1, format: fmt.pct },
+  { kind: "knob", key: "tone", label: "Tone", min: 500, max: 12000, scale: "log", format: fmt.hz },
+  { kind: "knob", key: "outputGain", label: "Output", min: -24, max: 12, format: fmt.db },
+  { kind: "knob", key: "mix", label: "Mix", min: 0, max: 1, format: fmt.pct },
+]), destroyGui: (gui: HTMLElement) => gui.remove() }; } }
 export default new OrbitronicaOverdriveModule();

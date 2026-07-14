@@ -1,3 +1,4 @@
+import { createKnobPanel, fmt } from "../shared/knobPanel";
 
 const stateRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 type Params = { rate: number; depth: number; feedback: number; mix: number };
@@ -30,5 +31,10 @@ class FlangerNode {
   }
   destroy() { if (this.#destroyed) return; this.#destroyed = true; this.lfo.stop(); this.offset.stop(); this.#disconnectInput(); for (const n of [this.delay, this.lfo, this.depth, this.offset, this.feedbackNode, this.wet, this.dry, this.output]) n.disconnect(); }
 }
-class Module { async createInstance(_group: string, context: AudioContext) { const node = new FlangerNode(context); return { audioNode: node.input, createGui: () => { const root = document.createElement("div"); root.textContent = "Orbitronica Flanger"; return root; }, destroyGui: (gui: HTMLElement) => gui.remove() }; } }
+class Module { async createInstance(_group: string, context: AudioContext) { const node = new FlangerNode(context); return { audioNode: node.input, createGui: () => createKnobPanel("Orbitronica Flanger", node, [
+  { kind: "knob", key: "rate", label: "Rate", min: 0.05, max: 10, scale: "log", format: fmt.hz },
+  { kind: "knob", key: "depth", label: "Depth", min: 0, max: 0.009, format: fmt.ms },
+  { kind: "knob", key: "feedback", label: "Feedback", min: -0.95, max: 0.95, format: fmt.pct },
+  { kind: "knob", key: "mix", label: "Mix", min: 0, max: 1, format: fmt.pct },
+]), destroyGui: (gui: HTMLElement) => gui.remove() }; } }
 export default new Module();

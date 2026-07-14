@@ -1,3 +1,5 @@
+import { createKnobPanel, fmt } from "../shared/knobPanel";
+
 const TYPES = ["lowpass", "highpass", "bandpass", "notch", "peaking", "lowshelf", "highshelf"] as const;
 type FilterType = typeof TYPES[number];
 type FilterState = { schemaVersion: 1; params: { type: FilterType; frequency: number; Q: number; gain: number } };
@@ -85,11 +87,12 @@ class OrbitronicaFilterModule {
     const node = new OrbitronicaFilterNode(context);
     return {
       audioNode: node.input,
-      createGui: () => {
-        const root = document.createElement("div");
-        root.textContent = "Orbitronica Filter";
-        return root;
-      },
+      createGui: () => createKnobPanel("Orbitronica Filter", node, [
+        { kind: "select", key: "type", label: "Type", options: TYPES },
+        { kind: "knob", key: "frequency", label: "Freq", min: 20, max: maxHz(context), scale: "log", format: fmt.hz },
+        { kind: "knob", key: "Q", label: "Q", min: 0.1, max: 20, scale: "log" },
+        { kind: "knob", key: "gain", label: "Gain", min: -24, max: 24, format: fmt.db },
+      ]),
       destroyGui: (gui: HTMLElement) => gui.remove(),
     };
   }

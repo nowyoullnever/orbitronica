@@ -5,6 +5,8 @@
  * recovered from any implementation or derivative port.
  */
 
+import { createKnobPanel, fmt } from "../shared/knobPanel";
+
 const stateRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 type Params = { roomSize: number; damping: number; width: number; mix: number };
 type State = { schemaVersion: 1; params: Params };
@@ -111,7 +113,12 @@ class ReverbNode {
 class Module {
   async createInstance(_group: string, context: AudioContext) {
     const node = new ReverbNode(context);
-    return { audioNode: node.input, createGui: () => { const root = document.createElement("div"); root.textContent = "Orbitronica Reverb"; return root; }, destroyGui: (gui: HTMLElement) => gui.remove() };
+    return { audioNode: node.input, createGui: () => createKnobPanel("Orbitronica Reverb", node, [
+      { kind: "knob", key: "roomSize", label: "Room", min: 0, max: 1, format: fmt.pct },
+      { kind: "knob", key: "damping", label: "Damping", min: 0, max: 1, format: fmt.pct },
+      { kind: "knob", key: "width", label: "Width", min: 0, max: 1, format: fmt.pct },
+      { kind: "knob", key: "mix", label: "Mix", min: 0, max: 1, format: fmt.pct },
+    ]), destroyGui: (gui: HTMLElement) => gui.remove() };
   }
 }
 export default new Module();

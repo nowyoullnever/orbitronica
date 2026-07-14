@@ -1,3 +1,4 @@
+import { createKnobPanel, fmt } from "../shared/knobPanel";
 
 const stateRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 type Params = { rate: number; depth: number; stages: number; feedback: number; mix: number };
@@ -31,5 +32,11 @@ class PhaserNode {
   }
   destroy() { if (this.#destroyed) return; this.#destroyed = true; this.lfo.stop(); for (const source of this.offsets) source.stop(); this.#disconnectInput(); for (const n of [this.lfo, this.modulation, this.wetBus, this.feedbackGain, this.limiter, this.cycleBreak, this.dry, this.wet, this.output, ...this.stages, ...this.taps, ...this.offsets]) n.disconnect(); }
 }
-class Module { async createInstance(_group: string, context: AudioContext) { const node = new PhaserNode(context); return { audioNode: node.input, createGui: () => { const root = document.createElement("div"); root.textContent = "Orbitronica Phaser"; return root; }, destroyGui: (gui: HTMLElement) => gui.remove() }; } }
+class Module { async createInstance(_group: string, context: AudioContext) { const node = new PhaserNode(context); return { audioNode: node.input, createGui: () => createKnobPanel("Orbitronica Phaser", node, [
+  { kind: "knob", key: "rate", label: "Rate", min: 0.05, max: 10, scale: "log", format: fmt.hz },
+  { kind: "knob", key: "depth", label: "Depth", min: 0, max: 1, format: fmt.pct },
+  { kind: "knob", key: "stages", label: "Stages", min: 4, max: 8, step: 1, format: fmt.int },
+  { kind: "knob", key: "feedback", label: "Feedback", min: -0.95, max: 0.95, format: fmt.pct },
+  { kind: "knob", key: "mix", label: "Mix", min: 0, max: 1, format: fmt.pct },
+]), destroyGui: (gui: HTMLElement) => gui.remove() }; } }
 export default new Module();

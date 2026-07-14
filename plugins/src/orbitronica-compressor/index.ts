@@ -1,3 +1,5 @@
+import { createKnobPanel, fmt } from "../shared/knobPanel";
+
 type Params = { threshold: number; knee: number; ratio: number; attack: number; release: number; makeupGain: number };
 type State = { schemaVersion: 1; params: Params };
 
@@ -90,7 +92,14 @@ class OrbitronicaCompressorModule {
     const node = new OrbitronicaCompressorNode(context);
     return {
       audioNode: node.input,
-      createGui: () => { const root = document.createElement("div"); root.textContent = "Orbitronica Compressor"; return root; },
+      createGui: () => createKnobPanel("Orbitronica Compressor", node, [
+        { kind: "knob", key: "threshold", label: "Thresh", min: -100, max: 0, format: fmt.db },
+        { kind: "knob", key: "knee", label: "Knee", min: 0, max: 40, format: fmt.db },
+        { kind: "knob", key: "ratio", label: "Ratio", min: 1, max: 20, format: fmt.ratio },
+        { kind: "knob", key: "attack", label: "Attack", min: 0, max: 1, format: fmt.ms },
+        { kind: "knob", key: "release", label: "Release", min: 0, max: 1, format: fmt.ms },
+        { kind: "knob", key: "makeupGain", label: "Makeup", min: -24, max: 24, format: fmt.db },
+      ]),
       destroyGui: (gui: HTMLElement) => gui.remove(),
     };
   }
