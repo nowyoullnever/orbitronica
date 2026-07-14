@@ -7,7 +7,7 @@
   "main": "dist-electron/electron.js",
   "scripts": {
     "predev": "npm run build:plugins",
-    "build:plugins": "node --experimental-strip-types scripts/verify-wam-assets.mjs public",
+    "build:plugins": "node scripts/build-plugins.mjs && node --experimental-strip-types scripts/verify-wam-assets.mjs public",
     "postinstall": "node scripts/fetch-font.mjs",
     "fetch:font": "node scripts/fetch-font.mjs",
     "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron . --dev\"",
@@ -16,7 +16,9 @@
     "smoke:packaged-wam": "node --experimental-strip-types scripts/verify-wam-assets.mjs dist && node scripts/packaged-wam-smoke.mjs",
     "test": "node --experimental-strip-types --test test/*.test.ts tests/*.test.ts",
     "preview": "vite preview",
-    "start": "electron ."
+    "start": "electron .",
+    "verify:plugins-deterministic": "node scripts/verify-plugins-deterministic.mjs",
+    "update:wam-hashes": "npm run verify:plugins-deterministic && node scripts/build-plugins.mjs && node scripts/update-wam-hashes.mjs && node scripts/build-plugins.mjs && npm run verify:wam-assets"
   },
   "dependencies": {
     "@webaudiomodules/sdk": "0.0.12",
@@ -29,9 +31,11 @@
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
+    "@webaudiomodules/sdk-parammgr": "^0.0.12",
     "concurrently": "^9.1.2",
     "electron": "^33.2.1",
     "electron-builder": "^25.1.8",
+    "esbuild": "^0.25.12",
     "typescript": "~5.7.2",
     "vite": "^6.0.5",
     "wait-on": "^8.0.1"

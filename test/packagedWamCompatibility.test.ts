@@ -53,3 +53,21 @@ test("packaged smoke uses the real production Electron entry rather than the dev
   assert.match(main, /wam-smoke\.html/);
   assert.equal(path.basename(new URL("public/wam/burns-simple-delay/index.js", root).pathname), "index.js");
 });
+
+test("first-party filter is cataloged with a byte-copied, hash-locked manifest", () => {
+  const catalog = read("src/renderer/audio/wamCatalogData.ts");
+  const sourceManifest = read("plugins/src/orbitronica-filter/manifest.json");
+  const publicManifest = read("public/wam/orbitronica-filter/manifest.json");
+  const manifest = JSON.parse(publicManifest) as { assets: Record<string, string>; origin: string; sourcePath: string; buildTool: string };
+  assert.match(catalog, /id: "orbitronica-filter"/);
+  assert.match(catalog, /entry: "wam\/orbitronica-filter\/index\.js"/);
+  assert.equal(manifest.origin, "first-party");
+  assert.equal(manifest.sourcePath, "plugins/src/orbitronica-filter");
+  assert.equal(manifest.buildTool, "esbuild@0.25.12");
+  assert.equal(publicManifest, sourceManifest, "public manifest is copied byte-for-byte from canonical source");
+  assert.deepEqual(Object.keys(manifest.assets).sort(), ["NOTICE.txt", "descriptor.json", "index.js"]);
+  for (const [file, expectedHash] of Object.entries(manifest.assets)) {
+    const actualHash = createHash("sha256").update(fs.readFileSync(new URL(`public/wam/orbitronica-filter/${file}`, root))).digest("hex");
+    assert.equal(actualHash, expectedHash, `${file} must match the first-party manifest`);
+  }
+});

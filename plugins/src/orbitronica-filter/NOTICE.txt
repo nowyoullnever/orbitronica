@@ -1,0 +1,3 @@
+Orbitronica Filter is first-party MIT software.
+Bundled build tool: esbuild@0.25.12 (MIT).
+WAM parameter management compatibility dependency: @webaudiomodules/sdk-parammgr@0.0.12 (MIT).

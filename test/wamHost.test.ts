@@ -72,7 +72,7 @@ test("caches modules per catalog within one context and retries only the failed 
 
 test("trusted catalog preserves identity and non-empty presentation metadata", async () => {
   const { WAM_CATALOG } = await import("../src/renderer/audio/wamCatalog.ts");
-  assert.deepEqual(Object.keys(WAM_CATALOG), ["burns-simple-delay"]);
+  assert.deepEqual(Object.keys(WAM_CATALOG), ["burns-simple-delay", "orbitronica-filter"]);
   for (const [catalogId, entry] of Object.entries(WAM_CATALOG)) {
     assert.equal(entry.id, catalogId, `catalog key ${catalogId} must equal entry.id`);
     assert.equal(typeof entry.displayName, "string");
@@ -85,7 +85,7 @@ test("trusted catalog preserves identity and non-empty presentation metadata", a
 
 test("catalog data is importable without renderer DOM globals", async () => {
   const data = await import("../src/renderer/audio/wamCatalogData.ts");
-  assert.deepEqual(data.WAM_CATALOG_DATA.map((entry) => entry.id), ["burns-simple-delay"]);
+  assert.deepEqual(data.WAM_CATALOG_DATA.map((entry) => entry.id), ["burns-simple-delay", "orbitronica-filter"]);
   assert.ok(data.WAM_CATALOG_DATA.every((entry) => entry.entry.startsWith("wam/")));
 });
 
@@ -175,4 +175,15 @@ test("state boundary rejects non-JSON values without lossy coercion", () => {
   const protoKey = cloneJsonValue(JSON.parse('{"__proto__":{"state":"data"}}')) as Record<string, unknown>;
   assert.equal(Object.getPrototypeOf(protoKey), Object.prototype);
   assert.deepEqual(Object.getOwnPropertyDescriptor(protoKey, "__proto__")?.value, { state: "data" });
+});
+
+test("filter implementation exposes semantic, strict first-party state and smoothed parameter application", () => {
+  const source = fs.readFileSync(new URL("../plugins/src/orbitronica-filter/index.ts", import.meta.url), "utf8");
+  assert.match(source, /type: "lowpass"/);
+  assert.match(source, /schemaVersion: 1/);
+  assert.match(source, /TYPES\.includes/);
+  assert.match(source, /invalid-filter-state/);
+  assert.match(source, /setTargetAtTime\([^\n]+0\.02/);
+  assert.match(source, /min\(20_000, 0\.45 \* context\.sampleRate\)/);
+  assert.match(source, /__proto__/);
 });

@@ -1,0 +1,13 @@
+import { createHash } from "node:crypto";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+const root = path.resolve("public/wam/orbitronica-filter");
+const snapshot = () => Object.fromEntries(readdirSync(root).sort().map((name) => [name, createHash("sha256").update(readFileSync(path.join(root, name))).digest("hex")]));
+const first = snapshot();
+const run = spawnSync(process.execPath, ["scripts/build-plugins.mjs"], { stdio: "inherit" });
+if (run.status !== 0) process.exit(run.status ?? 1);
+const second = snapshot();
+if (JSON.stringify(first) !== JSON.stringify(second)) throw new Error("first-party plugin build is not deterministic");
+console.log("Verified deterministic first-party plugin build.");
