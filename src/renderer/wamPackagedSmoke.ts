@@ -4,7 +4,12 @@ import { OrbitWamRack } from "./audio/wamRack.ts";
 import { cloneJsonValue } from "./audio/wamHost.ts";
 
 type SmokeEvent = { catalogId: string; phase: string; durationMs: number; ok: boolean; error?: string };
-type WamNode = AudioNode & { getState?(): Promise<unknown>; setState?(state: unknown): Promise<void>; destroy?(): Promise<void> | void };
+type WamNode = AudioNode & { getState?(): Promise<unknown>; setState?(state: unknown): Promise<void>; destroy?(): Promise<void> | void; setParameterValues?(values: Record<string, { value: number }>): Promise<void>; getParameterValues?(normalized?: boolean, ...ids: string[]): Promise<Record<string, { value: number }>> };
+type BurnsEqNode = WamNode & { paramMgr?: { getState(): Promise<unknown>; setState(state: Record<string, number>): Promise<void>; getParamsValues(): Record<string, number> } };
+const PARAMETER_PROBES: Record<string, Record<string, number>> = {
+  "burns-simple-eq": { lowGain: -9, lowFrequency: 180, mediumGain: 7, mediumFrequency: 1200, mediumQuality: .3, highGain: 8, highFrequency: 6500 },
+  "orbitronica-overdrive": { drive: .8, tone: 2400, outputGain: 5, mix: .65 },
+};
 type WamInstance = { audioNode: WamNode; createGui?(): Promise<HTMLElement>; destroyGui?(gui: HTMLElement): void };
 type WamConstructor = { createInstance(groupId: string, context: AudioContext): Promise<WamInstance> };
 const result = document.querySelector<HTMLElement>("#result");
@@ -32,6 +37,11 @@ async function smokeEntry(catalogId: string, entry: typeof WAM_CATALOG[keyof typ
   const slot = { id: `packaged-${catalogId}`, catalogId, pluginVersion: entry.pluginVersion, bypassed: false } as const;
   await phase(catalogId, "connect-render", () => rack.reconcile([slot]));
   const before = await phase(catalogId, "get-set-state", async () => { const state = await hosted.getState?.(); if (state !== undefined) await hosted.setState?.(cloneJsonValue(state)); return state; });
+  const probe = PARAMETER_PROBES[catalogId];
+  if (probe) await phase(catalogId, "parameter-state-restore", async () => {
+    if (catalogId === "orbitronica-overdrive") { await hosted.setState?.({ schemaVersion: 1, params: probe }); const restored = await hosted.getState?.(); if (JSON.stringify(restored) !== JSON.stringify({ schemaVersion: 1, params: probe })) throw new Error("state-restore-mismatch"); }
+    else { const paramMgr = (instance.audioNode as BurnsEqNode).paramMgr; if (!paramMgr) throw new Error("parameter-api-missing"); await paramMgr.setState(probe); const values = paramMgr.getParamsValues(); for (const [id, value] of Object.entries(probe)) if (Math.abs(values[id] - value) > 1e-6) throw new Error(`parameter-mismatch:${id}:${values[id]}`); const restored = await paramMgr.getState(); if (!Object.values(probe).every((value) => JSON.stringify(restored).includes(String(value)))) throw new Error("state-restore-mismatch"); await paramMgr.setState(cloneJsonValue(restored) as Record<string, number>); }
+  });
   if (hosted.createGui) await phase(catalogId, "gui-create-destroy", async () => { await rack.mountGui(slot.id, document.body); await rack.unmountGui(slot.id); });
   await phase(catalogId, "node-destroy-removal", () => rack.reconcile([]));
   destination.disconnect(); input.disconnect();

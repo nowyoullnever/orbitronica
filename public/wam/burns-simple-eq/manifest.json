@@ -1,0 +1,21 @@
+{
+  "catalogId": "burns-simple-eq",
+  "origin": "vendored",
+  "package": "burns-audio-wam",
+  "packageVersion": "0.2.54",
+  "packageSha256": "03dbe1a9891482e43b16392832eeea675e8468d019d4a212cf5d6dda2300595d",
+  "tarballUrl": "https://registry.npmjs.org/burns-audio-wam/-/burns-audio-wam-0.2.54.tgz",
+  "npmIntegrity": "sha512-yc/roDF5W6JHJ+FSg5zq4JIbzwiovGHwicl6qrL8E5hpMpu0EzMlICzjEOlGuetKaInX6nwKFXgAMHgPUMIDdw==",
+  "gitHead": "30869512b1efe5743576cb43e124f62c14b43018",
+  "pluginVersion": "0.2.54",
+  "license": "MIT",
+  "source": "https://github.com/boourns/burns-audio-wam",
+  "entry": "index.js",
+  "descriptor": "descriptor.json",
+  "assets": {
+    "NOTICE.txt": "0ea2d9cea33598719d7a8c234769a7a855b494d8e08f94ddc9688b62810649f4",
+    "descriptor.json": "4d2d98fc826b137d6ca8d57bb266642f65d76668fe02d6f7d7b0bf38fc834ff7",
+    "index.js": "4ac286046edb9611cdcc06476f75358b1791694a86c39612afcb553e60d350a8",
+    "screenshot.png": "612439e4acd27ae0bf8d68b07e9d4d174714a4e8ad1aed2e372a56bbf8464024"
+  }
+}

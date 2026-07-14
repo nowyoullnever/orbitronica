@@ -1,0 +1,3 @@
+Orbitronica Overdrive is first-party MIT software.
+Bundled build tool: esbuild@0.25.12 (MIT).
+The fallback is used because the pinned upstream Burns Distortion bundle does not expose a stable, testable structural ownership API for level-output repair and offset-source teardown.

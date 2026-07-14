@@ -1,0 +1,1 @@
+{"identifier":"com.orbitronica.overdrive","name":"Orbitronica Overdrive","vendor":"Orbitronica","description":"First-party stateful overdrive fallback","version":"1.0.0","sdkVersion":"2.0.0-alpha.4","keywords":["effect","overdrive"],"isInstrument":false,"hasAudioInput":true,"hasAudioOutput":true,"hasMidiInput":false,"hasMidiOutput":false}

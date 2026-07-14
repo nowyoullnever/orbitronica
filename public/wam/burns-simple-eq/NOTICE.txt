@@ -1,0 +1,3 @@
+Burns Simple EQ is an immutable vendored artifact from burns-audio-wam@0.2.54.
+Upstream repository: https://github.com/boourns/burns-audio-wam
+License: MIT. npm tarball integrity and SHA-256 are recorded in manifest.json.

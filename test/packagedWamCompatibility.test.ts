@@ -17,6 +17,9 @@ test("frozen trusted WAM payload is hash-locked and packaged file smoke is requi
 
   assert.match(record, /Status: enabled-file/i);
   assert.match(record, /Burns Simple Delay/);
+  assert.match(record, /Burns Simple EQ/);
+  assert.match(record, /Orbitronica Overdrive/);
+  assert.match(record, /Burns Distortion is not bundled/);
   assert.match(record, /burns-audio-wam@0\.2\.54/);
   assert.match(record, /03dbe1a9891482e43b16392832eeea675e8468d019d4a212cf5d6dda2300595d/);
   assert.match(record, /file:\/\//);
@@ -48,6 +51,7 @@ test("packaged smoke uses the real production Electron entry rather than the dev
   assert.match(rendererSmoke, /Object\.entries\(WAM_CATALOG\)/);
   assert.match(rendererSmoke, /asset-fetch-import/);
   assert.match(rendererSmoke, /rack\.reconcile\(\[\]\)/);
+  assert.match(rendererSmoke, /paramMgr\.setState\(probe\)/);
   assert.match(harness, /rackRemovalCompleted/);
   assert.match(harness, /cleanupDidNotBlockHost/);
   assert.match(main, /wam-smoke\.html/);
@@ -70,4 +74,26 @@ test("first-party filter is cataloged with a byte-copied, hash-locked manifest",
     const actualHash = createHash("sha256").update(fs.readFileSync(new URL(`public/wam/orbitronica-filter/${file}`, root))).digest("hex");
     assert.equal(actualHash, expectedHash, `${file} must match the first-party manifest`);
   }
+});
+
+test("Phase 1 vendored EQ retains pinned provenance and the documented fallback is packaged", () => {
+  const eqManifest = JSON.parse(read("public/wam/burns-simple-eq/manifest.json")) as { origin: string; packageSha256: string; npmIntegrity: string; gitHead: string; assets: Record<string, string> };
+  assert.equal(eqManifest.origin, "vendored");
+  assert.equal(eqManifest.packageSha256, "03dbe1a9891482e43b16392832eeea675e8468d019d4a212cf5d6dda2300595d");
+  assert.match(eqManifest.npmIntegrity, /^sha512-/); assert.equal(eqManifest.gitHead, "30869512b1efe5743576cb43e124f62c14b43018");
+  assert.deepEqual(Object.keys(eqManifest.assets).sort(), ["NOTICE.txt", "descriptor.json", "index.js", "screenshot.png"]);
+  for (const [file, expected] of Object.entries(eqManifest.assets)) assert.equal(createHash("sha256").update(fs.readFileSync(new URL(`public/wam/burns-simple-eq/${file}`, root))).digest("hex"), expected);
+  const fallbackSource = read("plugins/src/orbitronica-overdrive/index.ts"), fallbackManifest = JSON.parse(read("public/wam/orbitronica-overdrive/manifest.json")) as { origin: string; assets: Record<string, string> };
+  assert.match(fallbackSource, /documented Burns Distortion fallback|OrbitronicaOverdrive/); assert.equal(fallbackManifest.origin, "first-party");
+  assert.deepEqual(Object.keys(fallbackManifest.assets).sort(), ["NOTICE.txt", "descriptor.json", "index.js"]);
+  assert.match(read("plugins/src/orbitronica-overdrive/NOTICE.txt"), /fallback/i);
+});
+
+test("first-party build ownership cannot rewrite immutable Burns payloads", () => {
+  const builder = read("scripts/build-plugins.mjs");
+  assert.match(builder, /firstPartyIds = \["orbitronica-filter", "orbitronica-overdrive"\]/);
+  assert.doesNotMatch(builder, /burns-simple-eq|burns-distortion/);
+  const eq = JSON.parse(read("public/wam/burns-simple-eq/manifest.json")) as { origin: string; assets: Record<string, string> };
+  assert.equal(eq.origin, "vendored");
+  for (const [file, expected] of Object.entries(eq.assets)) assert.equal(createHash("sha256").update(fs.readFileSync(new URL(`public/wam/burns-simple-eq/${file}`, root))).digest("hex"), expected);
 });

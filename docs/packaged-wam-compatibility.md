@@ -1,15 +1,18 @@
 # Packaged WAM compatibility gate (G009)
 
-**Status: enabled-file — Burns Simple Delay is the sole bundled, trusted catalog candidate.**
+**Status: enabled-file — the Phase-1 trusted catalog contains immutable Burns Simple Delay and Burns Simple EQ artifacts plus first-party Orbitronica Filter and Orbitronica Overdrive.**
 
 ## Decision
 
-Orbitronica may use **Burns Simple Delay** only from the immutable files in
-`public/wam/burns-simple-delay/`. It is not an installer and it accepts no
-project-, preference-, IPC-, or user-supplied plugin URL. Vite copies that
-folder into `dist/wam/burns-simple-delay/`; Electron Builder packages the
-result because `dist/**/*` is its only renderer input. The gate is limited to
-this exact file-origin artifact and does not authorize a general WAM catalog.
+Orbitronica may use only the catalog entries committed under `public/wam/`:
+immutable **Burns Simple Delay** and **Burns Simple EQ** payloads, plus
+first-party **Orbitronica Filter** and **Orbitronica Overdrive** payloads.
+It is not an installer and accepts no project-, preference-, IPC-, or
+user-supplied plugin URL. **Orbitronica Overdrive is the sole bundled
+distortion/overdrive path; Burns Distortion is not bundled.** Vite copies the
+catalog into `dist/wam/`; Electron Builder packages the result because
+`dist/**/*` is its only renderer input. The gate is limited to these audited
+file-origin artifacts and does not authorize arbitrary WAM modules.
 
 | Frozen candidate evidence | SHA-256 |
 | --- | --- |
@@ -25,23 +28,27 @@ this exact file-origin artifact and does not authorize a general WAM catalog.
   effect (`isInstrument: false`, audio input/output enabled).
 - WAM SDK: `@webaudiomodules/sdk@0.0.12`.
 
-`public/wam/burns-simple-delay/manifest.json` is the allowlist and records the
-complete three-file payload. `npm run verify:wam-assets` hashes the source
-payload; `npm run verify:wam-assets -- dist` repeats the same check on build
-output. Any additional, missing, renamed, or changed asset fails verification.
+The `public/wam/*/manifest.json` files are the allowlist. Vendored Burns
+manifests record their complete hash-locked payloads and first-party manifests
+are copied byte-for-byte from their canonical source. `npm run verify:wam-assets`
+hashes the source catalog; `npm run verify:wam-assets -- dist` repeats the same
+check on build output. Any additional, missing, renamed, or changed asset fails
+verification.
 
 ## Packaged file-origin proof
 
 Run `npm run smoke:packaged-wam`. It builds with `electron-builder --dir`,
 verifies copied hashes, then launches the unpacked executable with
-`--wam-smoke` (not `--dev`). The production renderer loads
-`file://…/dist/wam/burns-simple-delay/index.js` and proves all of the following
-on one real `AudioContext`:
+`--wam-smoke` (not `--dev`). The production renderer loads each catalog entry
+from `file://…/dist/wam/` and proves all of the following on one real
+`AudioContext`:
 
 1. recorder `orbitronica-pcm-capture` worklet registration and WAM host
    registration coexist;
-2. Simple Delay imports its descriptor and creates an instance;
-3. `audioNode.getState()` / `setState()` round-trip;
+2. every catalog entry imports its descriptor and creates an instance;
+3. state round-trips; the seven Burns EQ controls use its exposed upstream
+   parameter-manager state API and the four Orbitronica Overdrive controls use
+   its first-party state API;
 4. asynchronous `createGui()` returns an `HTMLElement`, followed by
    `destroyGui(gui)`;
 5. the WAM audio node is destroyed and the context closes.
@@ -59,7 +66,7 @@ gate.
 ## Boundaries that remain closed
 
 This proof does **not** validate `app://`, CSP/COEP, WASM, remote imports, or
-any plugin other than the frozen candidate. It also does not add runtime queue,
+any unlisted plugin. It also does not add runtime queue,
 loader deadline, retry/circuit-breaker, persistence, or user-install policy.
 Those requirements remain mandatory before catalog expansion. If the package,
 manifest hash, Electron, WAM SDK, Vite asset handling, or builder layout
