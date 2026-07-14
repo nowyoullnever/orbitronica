@@ -18,13 +18,14 @@ import type {
   SequenceRetriggerMode, Tool, TriggerBar, ViewportState
 } from "./state/types";
 import {
-  collectHistoryProjectIds, collectRetainedOrbitIds, createEmptyScene,
+  collectHistoryProjectIds, createEmptyScene,
   createHistorySnapshot, createProjectIdAllocatorForScenes, createSpliceBars, deleteScene,
-  impliedSpliceBarIds, nextDefaultSceneName, planSceneDuplicate, renameScene, reorderScenes,
+  getRetainedAudioSets, impliedSpliceBarIds, nextDefaultSceneName, planSceneDuplicate, renameScene, reorderScenes,
   replaceOrbitSpliceSettings, reserveSceneProjectIds,
   reconcileSceneOrbitMix, runActiveSceneTransition, runStagedDocumentTransaction, stageSceneDuplicate,
   updatePlanetForFreshRequest, updateSceneById
 } from "./state/scenes";
+import type { RetainedAudioCache } from "./state/scenes";
 import {
   TAU, getOrbitTapeRate, getSampleDuration, getSampleEnd, getSampleStart,
   getTapeStyleRuntimeRateOnly, isFullLoopBar, normalizeAngle, normalizeSpliceCount,
@@ -117,6 +118,10 @@ export default function App() {
   const fileInput = useRef<HTMLInputElement>(null);
   const undoStack = useRef<HistorySnapshot[]>([]);
   const redoStack = useRef<HistorySnapshot[]>([]);
+  // Bumped whenever undoStack/redoStack contents change (push, cap-overflow shift, undo,
+  // redo, clear) so pruneUnreferencedAudio can cache its retained-set walk per revision.
+  const historyRevision = useRef(0);
+  const retainedAudioCache = useRef<RetainedAudioCache>(null);
   const [initialProjectIds] = useState(() => createProjectIdAllocatorForScenes(scenes, randomId));
   const projectIds = useRef(initialProjectIds);
   const parameterHistoryTimer = useRef<number>();
@@ -228,16 +233,27 @@ export default function App() {
     );
   }
 
+  // undoStack/redoStack are mutated in place (push/pop/shift/clear); call this immediately
+  // after any such mutation so cached retained-audio sets are recomputed on the next prune.
+  function bumpHistoryRevision() {
+    historyRevision.current += 1;
+  }
+
   function pruneUnreferencedAudio(currentScenes = stateRef.current.scenes) {
-    audioEngine.pruneOrbits(collectRetainedOrbitIds(currentScenes, undoStack.current, redoStack.current));
-    const retainedScenes = [currentScenes, ...undoStack.current.map((item) => item.scenes), ...redoStack.current.map((item) => item.scenes)].flat();
-    audioEngine.prunePluginStateSlots(collectRetainedPluginSlotIds(retainedScenes));
+    const { sets, cache } = getRetainedAudioSets(
+      currentScenes, undoStack.current, redoStack.current,
+      historyRevision.current, retainedAudioCache.current, collectRetainedPluginSlotIds
+    );
+    retainedAudioCache.current = cache;
+    audioEngine.pruneOrbits(sets.orbitIds);
+    audioEngine.prunePluginStateSlots(sets.pluginSlotIds);
   }
 
   function pushHistory() {
     undoStack.current.push(snapshot());
     if (undoStack.current.length > MAX_HISTORY) undoStack.current.shift();
     redoStack.current = [];
+    bumpHistoryRevision();
     pruneUnreferencedAudio();
     setIsDirty(true);
   }
@@ -310,6 +326,7 @@ export default function App() {
     undoStack.current.push(snapshot());
     if (undoStack.current.length > MAX_HISTORY) undoStack.current.shift();
     redoStack.current = [];
+    bumpHistoryRevision();
     const previous = stateRef.current.scenes.find((scene) => scene.id === stateRef.current.activeSceneId);
     const target = nextScenes.find((scene) => scene.id === nextActiveSceneId);
     // Scene metadata changes retain the orbit array by reference. Rehydrating an
@@ -446,6 +463,7 @@ export default function App() {
     const previous = undoStack.current.pop();
     if (!previous) return;
     redoStack.current.push(snapshot());
+    bumpHistoryRevision();
     restoreSnapshot(previous);
     pruneUnreferencedAudio(previous.scenes);
     setIsDirty(true);
@@ -457,6 +475,7 @@ export default function App() {
     const next = redoStack.current.pop();
     if (!next) return;
     undoStack.current.push(snapshot());
+    bumpHistoryRevision();
     restoreSnapshot(next);
     pruneUnreferencedAudio(next.scenes);
     setIsDirty(true);
@@ -998,6 +1017,7 @@ export default function App() {
           setIsDirty(false);
           undoStack.current = [];
           redoStack.current = [];
+          bumpHistoryRevision();
           // Only the active scene is hydrated after open; inactive scenes retain
           // validated blobs until their own gate-first activation transaction.
           scheduleScenePluginTransition(previousOrbits, restoredActiveOrbits, project.activeSceneId);

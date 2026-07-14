@@ -285,6 +285,62 @@ export function collectRetainedOrbitIds(
   return retained;
 }
 
+/** True if any orbit in these scenes carries a plugin slot worth walking for retention. */
+export function scenesHavePluginSlots(scenes: readonly Scene[]): boolean {
+  return scenes.some((scene) => scene.orbits.some((orbit) => (orbit.plugins?.length ?? 0) > 0));
+}
+
+export type RetainedAudioSets = { orbitIds: Set<string>; pluginSlotIds: Set<string> };
+
+/**
+ * Composes orbit and plugin-slot retention across the current document plus every
+ * undo/redo snapshot. The plugin-slot walk (the more expensive of the two, since it
+ * descends into each orbit's slot array) is skipped entirely when nothing in the
+ * document, undo, or redo history has ever carried a plugin slot — the walk would
+ * produce an empty set in that case regardless.
+ */
+export function collectRetainedAudioSets(
+  currentScenes: readonly Scene[],
+  undo: readonly HistorySnapshot[],
+  redo: readonly HistorySnapshot[],
+  collectPluginSlotIds: (documentScenes: readonly Scene[]) => Set<string>
+): RetainedAudioSets {
+  const orbitIds = collectRetainedOrbitIds(currentScenes, undo, redo);
+  const documentScenes = [currentScenes, ...undo.map((item) => item.scenes), ...redo.map((item) => item.scenes)];
+  const pluginSlotIds = documentScenes.some(scenesHavePluginSlots)
+    ? collectPluginSlotIds(documentScenes.flat())
+    : new Set<string>();
+  return { orbitIds, pluginSlotIds };
+}
+
+export type RetainedAudioCache = Readonly<{
+  revision: number;
+  currentScenes: readonly Scene[];
+  sets: RetainedAudioSets;
+}> | null;
+
+/**
+ * Revision-gated memoization wrapper around collectRetainedAudioSets. Callers own a
+ * revision counter that they bump whenever the undo/redo stacks change contents
+ * (push, cap-overflow shift, undo, redo, clear); as long as the revision and the
+ * current-scenes reference match the previous call, the cached sets are reused
+ * verbatim instead of re-walking the document.
+ */
+export function getRetainedAudioSets(
+  currentScenes: readonly Scene[],
+  undo: readonly HistorySnapshot[],
+  redo: readonly HistorySnapshot[],
+  revision: number,
+  cache: RetainedAudioCache,
+  collectPluginSlotIds: (documentScenes: readonly Scene[]) => Set<string>
+): { sets: RetainedAudioSets; cache: RetainedAudioCache } {
+  if (cache && cache.revision === revision && cache.currentScenes === currentScenes) {
+    return { sets: cache.sets, cache };
+  }
+  const sets = collectRetainedAudioSets(currentScenes, undo, redo, collectPluginSlotIds);
+  return { sets, cache: { revision, currentScenes, sets } };
+}
+
 export function updatePlanetForFreshRequest(
   scenes: readonly Scene[], sceneId: string, planetId: string,
   requestKind: "speed" | "pitch", requestId: string,

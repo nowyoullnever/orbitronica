@@ -1,7 +1,7 @@
 import { SimpleFilter, SoundTouch, WebAudioBufferSource } from "soundtouchjs";
 import type { Orbit, PluginSlot, SequenceRetriggerMode } from "../state/types";
 import { createFLStylePanNode, type FLStylePanNode } from "./flStylePan.ts";
-import { WamHost } from "./wamHost.ts";
+import { WamHost, cloneJsonValue } from "./wamHost.ts";
 import { loadCatalogModule, resolveCatalogEntryForRestore } from "./wamCatalog.ts";
 import { OrbitWamRack, prunePluginStates, type PluginRuntimeStatus } from "./wamRack.ts";
 
@@ -379,14 +379,14 @@ class AudioEngine {
   /** Replaces only durable, already-validated state during an open transaction. */
   replacePluginStateStore(states: ReadonlyMap<string, import("./wamHost.ts").JsonValue>) {
     this.pluginStateStore.clear();
-    for (const [slotId, value] of states) this.pluginStateStore.set(slotId, JSON.parse(JSON.stringify(value)));
+    for (const [slotId, value] of states) this.pluginStateStore.set(slotId, cloneJsonValue(value));
   }
   prunePluginStateSlots(retainedSlotIds: ReadonlySet<string>) { prunePluginStates(this.pluginStateStore, retainedSlotIds); }
   copyPluginSlotStates(source: readonly PluginSlot[] | undefined, destination: readonly PluginSlot[] | undefined) {
     const from = source ?? [], to = destination ?? [];
     for (let index = 0; index < Math.min(from.length, to.length); index++) {
       const state = this.pluginStateStore.get(from[index].id);
-      if (state !== undefined) this.pluginStateStore.set(to[index].id, JSON.parse(JSON.stringify(state)));
+      if (state !== undefined) this.pluginStateStore.set(to[index].id, cloneJsonValue(state));
     }
   }
   /** Scene duplication supplies an explicit old→new map, never array position. */
@@ -394,7 +394,7 @@ class AudioEngine {
     const staged = new Map<string, import("./wamHost.ts").JsonValue>();
     for (const [sourceId, targetId] of slotIds) {
       const state = this.pluginStateStore.get(sourceId);
-      if (state !== undefined) staged.set(targetId, JSON.parse(JSON.stringify(state)));
+      if (state !== undefined) staged.set(targetId, cloneJsonValue(state));
     }
     for (const [targetId, state] of staged) this.pluginStateStore.set(targetId, state);
     return [...staged.keys()];
@@ -566,11 +566,6 @@ class AudioEngine {
       created.playback.loopWindowEnd = loopEnd;
     }
     created.playback.source.start(created.context.currentTime, safeOffset);
-    console.debug({
-      orbitId, planetId, barId, pitchCents,
-      usingProcessedBuffer: created.usingProcessedBuffer,
-      activePlaybackCount: this.active.size
-    });
   }
 
   triggerSequence(
@@ -594,11 +589,6 @@ class AudioEngine {
       const duration = Math.max(0.001, end - start);
       const offset = reverse ? Math.max(0, bufferDuration - end) : start;
       created.playback.source.start(created.context.currentTime, offset, duration);
-      console.debug({
-        orbitId, planetId, barId, pitchCents,
-        usingProcessedBuffer: created.usingProcessedBuffer,
-        activePlaybackCount: this.active.size
-      });
     }
   }
 

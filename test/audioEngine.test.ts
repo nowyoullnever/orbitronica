@@ -223,6 +223,31 @@ test("scene duplication clones external WAM state by its slot map without aliasi
   engine.pluginStateStore.clear();
 });
 
+test("replacing the plugin state store deep-clones values so later mutation of the source or the store is isolated", () => {
+  const engine = audioEngine as any;
+  engine.pluginStateStore.clear();
+  const source = new Map([["slot-a", { nested: [1] }]]);
+  audioEngine.replacePluginStateStore(source);
+  (source.get("slot-a") as any).nested.push(2);
+  assert.deepEqual(engine.pluginStateStore.get("slot-a"), { nested: [1] }, "mutating the source after replace must not affect the store");
+  (engine.pluginStateStore.get("slot-a") as any).nested.push(3);
+  assert.deepEqual(source.get("slot-a"), { nested: [1, 2] }, "mutating the store must not affect the caller's source map");
+  engine.pluginStateStore.clear();
+});
+
+test("copying plugin slot states between orbit arrays deep-clones so source and destination stay independent", () => {
+  const engine = audioEngine as any;
+  engine.pluginStateStore.clear();
+  const sourceSlot = { id: "copy-source", catalogId: "burns-simple-delay", pluginVersion: "0.2.54", bypassed: false };
+  const destSlot = { id: "copy-dest", catalogId: "burns-simple-delay", pluginVersion: "0.2.54", bypassed: false };
+  engine.pluginStateStore.set(sourceSlot.id, { nested: [1] });
+  audioEngine.copyPluginSlotStates([sourceSlot], [destSlot]);
+  assert.deepEqual(engine.pluginStateStore.get(destSlot.id), { nested: [1] });
+  (engine.pluginStateStore.get(destSlot.id) as any).nested.push(2);
+  assert.deepEqual(engine.pluginStateStore.get(sourceSlot.id), { nested: [1] }, "mutating the copied destination state must not affect the source");
+  engine.pluginStateStore.clear();
+});
+
 /**
  * This is a deterministic signal-level analogue of the live graph:
  * orbit input -> WAM rack -> pan -> orbit gain -> master pan -> PCM recorder.

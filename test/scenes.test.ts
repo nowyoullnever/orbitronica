@@ -2,13 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Orbit, Planet, Scene, TriggerBar } from "../src/renderer/state/types.ts";
 import {
-  collectHistoryProjectIds, collectRetainedOrbitIds, collectSceneIds, createEmptyScene, createHistorySnapshot,
-  createProjectIdAllocator, createProjectIdAllocatorForScenes, createSpliceBars, deleteScene,
-  durableSceneStructureToken, nextDefaultSceneName, nextSceneTabIndex,
+  collectHistoryProjectIds, collectRetainedAudioSets, collectRetainedOrbitIds, collectSceneIds, createEmptyScene,
+  createHistorySnapshot, createProjectIdAllocator, createProjectIdAllocatorForScenes, createSpliceBars, deleteScene,
+  durableSceneStructureToken, getRetainedAudioSets, nextDefaultSceneName, nextSceneTabIndex,
   planSceneDuplicate, reconcileSceneOrbitMix, renameScene, reorderScenes, replaceOrbitSpliceSettings,
-  runActiveSceneTransition, runStagedDocumentTransaction, stageSceneDuplicate, updatePlanetForFreshRequest,
-  updateSceneById, validateScenes
+  runActiveSceneTransition, runStagedDocumentTransaction, scenesHavePluginSlots, stageSceneDuplicate,
+  updatePlanetForFreshRequest, updateSceneById, validateScenes,
+  type RetainedAudioCache
 } from "../src/renderer/state/scenes.ts";
+import type { HistorySnapshot, PluginSlot } from "../src/renderer/state/types.ts";
 
 const orbit = (id: string, extra: Partial<Orbit> = {}): Orbit => ({
   id, name: id, audioName: `${id}.wav`, x: 0, y: 0, radiusX: 100, radiusY: 100,
@@ -136,6 +138,82 @@ test("history retention spans current, undo, and redo scenes", () => {
     [createHistorySnapshot([redoScene], redoScene.id, { volume: 1, pan: 0 })]
   );
   assert.deepEqual([...retained].sort(), ["current", "redo", "undo"]);
+});
+
+test("collectRetainedAudioSets skips the plugin-slot walk when no scene ever carried a plugin slot", () => {
+  const withoutPlugins = [scene({ orbits: [orbit("a")] })];
+  let walkCalls = 0;
+  const spy = (scenes: readonly Scene[]) => {
+    walkCalls++;
+    return new Set(scenes.flatMap((item) => item.orbits.flatMap((o) => (o.plugins ?? []).map((p) => p.id))));
+  };
+  const sets = collectRetainedAudioSets(withoutPlugins, [], [], spy);
+  assert.equal(walkCalls, 0, "the plugin-slot walk must not run when nothing has plugin slots");
+  assert.deepEqual([...sets.pluginSlotIds], []);
+  assert.deepEqual([...sets.orbitIds], ["a"]);
+  assert.equal(scenesHavePluginSlots(withoutPlugins), false);
+
+  const pluginSlot: PluginSlot = { id: "slot-a", catalogId: "cat", pluginVersion: "1", bypassed: false };
+  const withPlugins = [scene({ orbits: [orbit("b", { plugins: [pluginSlot] })] })];
+  const sets2 = collectRetainedAudioSets(withPlugins, [], [], spy);
+  assert.equal(walkCalls, 1, "the plugin-slot walk must run once real plugin slots exist");
+  assert.deepEqual([...sets2.pluginSlotIds], ["slot-a"]);
+  assert.equal(scenesHavePluginSlots(withPlugins), true);
+});
+
+test("getRetainedAudioSets memoizes per revision and always matches a fresh computation across push/undo/redo/delete", () => {
+  const pluginSlot: PluginSlot = { id: "slot-1", catalogId: "cat", pluginVersion: "1", bypassed: false };
+  const sceneWithPlugin = scene({ id: "s1", orbits: [orbit("orbit-1", { plugins: [pluginSlot] })] });
+  const sceneWithoutPlugin = scene({ id: "s1", orbits: [orbit("orbit-2")] });
+  const master = { volume: 1, pan: 0 };
+  const collectPluginSlotIds = (documentScenes: readonly Scene[]) =>
+    new Set(documentScenes.flatMap((item) => item.orbits.flatMap((o) => (o.plugins ?? []).map((p) => p.id))));
+
+  let revision = 0;
+  let cache: RetainedAudioCache = null;
+  const undo: HistorySnapshot[] = [];
+  const redo: HistorySnapshot[] = [];
+
+  function assertMatchesFresh(currentScenes: readonly Scene[]) {
+    const memoized = getRetainedAudioSets(currentScenes, undo, redo, revision, cache, collectPluginSlotIds);
+    cache = memoized.cache;
+    const fresh = collectRetainedAudioSets(currentScenes, undo, redo, collectPluginSlotIds);
+    assert.deepEqual([...memoized.sets.orbitIds].sort(), [...fresh.orbitIds].sort());
+    assert.deepEqual([...memoized.sets.pluginSlotIds].sort(), [...fresh.pluginSlotIds].sort());
+    return memoized;
+  }
+
+  // pushHistory: push a snapshot and bump the revision, mirroring App.tsx's pushHistory/commitSceneDocument.
+  undo.push(createHistorySnapshot([sceneWithPlugin], "s1", master));
+  revision++;
+  let currentScenes: readonly Scene[] = [sceneWithoutPlugin];
+  const first = assertMatchesFresh(currentScenes);
+
+  // Same revision and the same scenes reference must hit the cache: identical Set instances, no recomputation.
+  const repeat = getRetainedAudioSets(currentScenes, undo, redo, revision, cache, collectPluginSlotIds);
+  assert.equal(repeat.sets, first.sets, "unchanged revision and scenes must reuse the cached result object");
+  assert.equal(repeat.sets.orbitIds, first.sets.orbitIds);
+  assert.equal(repeat.sets.pluginSlotIds, first.sets.pluginSlotIds);
+
+  // undo(): pop undo, push redo, bump revision.
+  const popped = undo.pop()!;
+  redo.push(createHistorySnapshot(currentScenes as Scene[], "s1", master));
+  revision++;
+  currentScenes = popped.scenes;
+  assertMatchesFresh(currentScenes);
+
+  // redo(): pop redo, push undo, bump revision.
+  const redone = redo.pop()!;
+  undo.push(createHistorySnapshot(currentScenes as Scene[], "s1", master));
+  revision++;
+  currentScenes = redone.scenes;
+  assertMatchesFresh(currentScenes);
+
+  // delete (pushHistory-equivalent): push a snapshot, drop the plugin-carrying orbit, bump revision.
+  undo.push(createHistorySnapshot(currentScenes as Scene[], "s1", master));
+  revision++;
+  currentScenes = [scene({ id: "s1", orbits: [] })];
+  assertMatchesFresh(currentScenes);
 });
 
 test("project ID allocation excludes history, retries collisions, and never reuses issued tombstones", () => {
