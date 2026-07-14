@@ -53,7 +53,7 @@ test("packaged smoke uses the real production Electron entry rather than the dev
   assert.match(rendererSmoke, /Object\.entries\(WAM_CATALOG\)/);
   assert.match(rendererSmoke, /asset-fetch-import/);
   assert.match(rendererSmoke, /rack\.reconcile\(\[\]\)/);
-  assert.match(rendererSmoke, /paramMgr\.setState\(probe\)/);
+  assert.match(rendererSmoke, /paramMgr\.setState\(probe(?: as Record<string, number>)?\)/, "the packaged smoke must restore the audited EQ parameter map through ParamMgr");
   assert.match(rendererSmoke, /minimal-wamprocessor-packaged-proof/);
   assert.match(rendererSmoke, /proveMinimalWamProcessor/);
   assert.match(harness, /rackRemovalCompleted/);
