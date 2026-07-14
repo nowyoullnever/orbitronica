@@ -1749,12 +1749,20 @@ function createKnobPanel(title, node, controls) {
   return root;
 }
 
+// plugins/src/shared/effectNode.ts
+var clamp2 = (value, min, max) => Math.min(max, Math.max(min, value));
+var hasDangerousKey = (value) => {
+  if (!value || typeof value !== "object") return false;
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype" || hasDangerousKey(child)) return true;
+  }
+  return false;
+};
+
 // plugins/src/orbitronica-bitcrusher/index.ts
 var MODULE_ID = "com.orbitronica.bitcrusher";
 var PROOF_ID = "com.orbitronica.bitcrusher.worklet-proof";
 var defaults = { bitDepth: 8, reduction: 1, mix: 0 };
-var clamp2 = (value, min, max) => Math.min(max, Math.max(min, value));
-var dangerous = (value) => !!value && typeof value === "object" && Object.entries(value).some(([key, child]) => key === "__proto__" || key === "constructor" || key === "prototype" || dangerous(child));
 var installed = /* @__PURE__ */ new WeakMap();
 var installProcessor = (context, moduleId, minimal) => {
   let byModule = installed.get(context);
@@ -1849,11 +1857,11 @@ var BitcrusherNode = class extends WamNode {
     return structuredClone(this.#state);
   }
   async setState(value) {
-    if (!value || typeof value !== "object" || Array.isArray(value) || dangerous(value)) throw new Error("invalid-bitcrusher-state");
+    if (!value || typeof value !== "object" || Array.isArray(value) || hasDangerousKey(value)) throw new Error("invalid-bitcrusher-state");
     const source = value;
     if (source.schemaVersion !== void 0 && source.schemaVersion !== 0 && source.schemaVersion !== 1) throw new Error("unsupported-bitcrusher-state");
     const incoming = source.params ?? source;
-    if (!incoming || typeof incoming !== "object" || Array.isArray(incoming) || dangerous(incoming)) throw new Error("invalid-bitcrusher-state");
+    if (!incoming || typeof incoming !== "object" || Array.isArray(incoming) || hasDangerousKey(incoming)) throw new Error("invalid-bitcrusher-state");
     const record = incoming, previous = this.#state.params;
     const raw = { bitDepth: record.bitDepth ?? previous.bitDepth, reduction: record.reduction ?? previous.reduction, mix: record.mix ?? previous.mix };
     if (!Object.values(raw).every((entry) => typeof entry === "number" && Number.isFinite(entry))) throw new Error("invalid-bitcrusher-state");

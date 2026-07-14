@@ -1,13 +1,12 @@
 import { WebAudioModule, WamNode, addFunctionModule } from "@webaudiomodules/sdk";
 import { createKnobPanel, fmt } from "../shared/knobPanel";
+import { clamp, hasDangerousKey as dangerous } from "../shared/effectNode";
 
 type Params = { bitDepth: number; reduction: number; mix: number };
 type State = { schemaVersion: 1; params: Params };
 const MODULE_ID = "com.orbitronica.bitcrusher";
 const PROOF_ID = "com.orbitronica.bitcrusher.worklet-proof";
 const defaults: Params = { bitDepth: 8, reduction: 1, mix: 0 };
-const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
-const dangerous = (value: unknown): boolean => !!value && typeof value === "object" && Object.entries(value as Record<string, unknown>).some(([key, child]) => key === "__proto__" || key === "constructor" || key === "prototype" || dangerous(child));
 
 // WamNode.addModules installs the SDK base classes. This Blob module is deliberately
 // registered separately so packaged file:// proves the actual WamProcessor path before

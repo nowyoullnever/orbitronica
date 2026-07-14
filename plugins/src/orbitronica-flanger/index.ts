@@ -1,11 +1,15 @@
 import { createKnobPanel, fmt } from "../shared/knobPanel";
+import { createParamMgrShim, installNodeShim, setStateFromRecord, type ParamSpec } from "../shared/effectNode";
 
-const stateRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 type Params = { rate: number; depth: number; feedback: number; mix: number };
 type State = { schemaVersion: 1; params: Params };
 const defaults: Params = { rate: .25, depth: .003, feedback: .25, mix: 0 };
-const clamp = (n: number, a: number, b: number) => Math.min(b, Math.max(a, n));
-const dangerous = (v: unknown): boolean => !!v && typeof v === "object" && Object.entries(v as Record<string, unknown>).some(([k, x]) => ["__proto__", "constructor", "prototype"].includes(k) || dangerous(x));
+const SPECS: readonly ParamSpec<keyof Params & string>[] = [
+  { key: "rate", min: .05, max: 10 },
+  { key: "depth", min: 0, max: .009 },
+  { key: "feedback", min: -.95, max: .95 },
+  { key: "mix", min: 0, max: 1 },
+];
 class FlangerNode {
   readonly input: GainNode; readonly output: GainNode; readonly delay: DelayNode; readonly lfo: OscillatorNode; readonly depth: GainNode; readonly offset: ConstantSourceNode; readonly feedbackNode: GainNode; readonly wet: GainNode; readonly dry: GainNode;
   #state: State = { schemaVersion: 1, params: { ...defaults } }; #destroyed = false; #disconnectInput: () => void;
@@ -14,20 +18,13 @@ class FlangerNode {
     this.lfo.type = "sine"; this.offset.connect(this.delay.delayTime); this.lfo.connect(this.depth); this.depth.connect(this.delay.delayTime);
     this.input.connect(this.dry); this.dry.connect(this.output); this.input.connect(this.delay); this.delay.connect(this.wet); this.wet.connect(this.output); this.delay.connect(this.feedbackNode); this.feedbackNode.connect(this.delay);
     this.#disconnectInput = this.input.disconnect.bind(this.input); this.offset.start(); this.lfo.start(); this.apply(this.#state.params);
-    Object.defineProperties(this.input, { connect: { value: this.output.connect.bind(this.output) }, disconnect: { value: this.output.disconnect.bind(this.output) }, destroy: { value: () => this.destroy() }, getState: { value: () => this.getState() }, setState: { value: (v: unknown) => this.setState(v) }, paramMgr: { value: { getState: async () => structuredClone(this.#state.params), getParamsValues: () => structuredClone(this.#state.params), setState: async (p: Record<string, number>) => this.setState({ schemaVersion: 1, params: p as Params }) } } });
+    installNodeShim(this.input, this.output, this, createParamMgrShim(() => this.#state.params, (state) => this.setState(state)));
   }
   apply(p: Params) { const now = this.delay.context.currentTime; this.lfo.frequency.setTargetAtTime(p.rate, now, .02); this.offset.offset.setTargetAtTime(.01, now, .02); this.depth.gain.setTargetAtTime(p.depth, now, .02); this.feedbackNode.gain.setTargetAtTime(p.feedback, now, .02); this.dry.gain.setTargetAtTime(Math.cos(p.mix * Math.PI / 2), now, .02); this.wet.gain.setTargetAtTime(Math.sin(p.mix * Math.PI / 2), now, .02); }
   async getState(): Promise<State> { return structuredClone(this.#state); }
   async setState(v: unknown) {
-    if (!stateRecord(v) || dangerous(v)) throw new Error("invalid-flanger-state");
-    const source = v as { schemaVersion?: unknown; params?: unknown };
-    if (source.schemaVersion !== undefined && source.schemaVersion !== 0 && source.schemaVersion !== 1) throw new Error("unsupported-flanger-state");
-    const incoming = source.params === undefined ? source : source.params;
-    if (!stateRecord(incoming) || dangerous(incoming)) throw new Error("invalid-flanger-state");
-    const old = this.#state.params;
-    const raw = { rate: incoming.rate ?? old.rate, depth: incoming.depth ?? old.depth, feedback: incoming.feedback ?? old.feedback, mix: incoming.mix ?? old.mix };
-    if (!Object.values(raw).every((entry) => typeof entry === "number" && Number.isFinite(entry))) throw new Error("invalid-flanger-state");
-    this.#state = { schemaVersion: 1, params: { rate: clamp(raw.rate as number, .05, 10), depth: clamp(raw.depth as number, 0, .009), feedback: clamp(raw.feedback as number, -.95, .95), mix: clamp(raw.mix as number, 0, 1) } }; this.apply(this.#state.params);
+    this.#state = setStateFromRecord(v, "flanger", this.#state.params, SPECS);
+    this.apply(this.#state.params);
   }
   destroy() { if (this.#destroyed) return; this.#destroyed = true; this.lfo.stop(); this.offset.stop(); this.#disconnectInput(); for (const n of [this.delay, this.lfo, this.depth, this.offset, this.feedbackNode, this.wet, this.dry, this.output]) n.disconnect(); }
 }

@@ -1,10 +1,10 @@
 import { createKnobPanel, fmt } from "../shared/knobPanel";
+import { clamp } from "../shared/effectNode";
 
 const TYPES = ["lowpass", "highpass", "bandpass", "notch", "peaking", "lowshelf", "highshelf"] as const;
 type FilterType = typeof TYPES[number];
 type FilterState = { schemaVersion: 1; params: { type: FilterType; frequency: number; Q: number; gain: number } };
 
-const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const maxHz = (context: BaseAudioContext) => Math.min(20_000, 0.45 * context.sampleRate);
 const stateRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 const isDangerous = (value: unknown): boolean => {

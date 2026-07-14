@@ -192,20 +192,46 @@ function createKnobPanel(title, node, controls) {
   return root;
 }
 
+// plugins/src/shared/effectNode.ts
+var clamp2 = (value, min, max) => Math.min(max, Math.max(min, value));
+var isStateRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+var hasDangerousKey = (value) => {
+  if (!value || typeof value !== "object") return false;
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype" || hasDangerousKey(child)) return true;
+  }
+  return false;
+};
+function installNodeShim(input, output, node, paramMgr) {
+  const props = {
+    connect: { value: output.connect.bind(output) },
+    disconnect: { value: output.disconnect.bind(output) },
+    destroy: { value: () => node.destroy() },
+    getState: { value: () => node.getState() },
+    setState: { value: (value) => node.setState(value) }
+  };
+  if (paramMgr !== void 0) props.paramMgr = { value: paramMgr };
+  Object.defineProperties(input, props);
+}
+function createParamMgrShim(getParams, setState) {
+  return {
+    getState: async () => structuredClone(getParams()),
+    getParamsValues: () => structuredClone(getParams()),
+    setState: async (params) => setState({ schemaVersion: 1, params })
+  };
+}
+
 // plugins/src/orbitronica-reverb/index.ts
-var stateRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 var defaults = { roomSize: 0.5, damping: 0.35, width: 1, mix: 0 };
 var COMB_REFERENCE_FRAMES = {
   left: [1371, 1672, 1927, 2306, 2721, 3171, 3674, 4281],
   right: [1473, 1755, 2033, 2456, 2881, 3378, 3934, 4582]
 };
 var ALLPASS_REFERENCE_FRAMES = { left: [181, 322, 525, 781], right: [207, 379, 578, 851] };
-var clamp2 = (value, min, max) => Math.min(max, Math.max(min, value));
 var scaledDelay = (referenceFrames, sampleRate) => {
   const scaledFrames = referenceFrames * sampleRate / 44100;
   return clamp2(scaledFrames / sampleRate, 1 / sampleRate, 0.2);
 };
-var dangerous = (value) => !!value && typeof value === "object" && Object.entries(value).some(([key, child]) => ["__proto__", "constructor", "prototype"].includes(key) || dangerous(child));
 var ReverbNode = class {
   input;
   output;
@@ -266,14 +292,7 @@ var ReverbNode = class {
     }
     this.#disconnectInput = this.input.disconnect.bind(this.input);
     this.apply(this.#state.params);
-    Object.defineProperties(this.input, {
-      connect: { value: this.output.connect.bind(this.output) },
-      disconnect: { value: this.output.disconnect.bind(this.output) },
-      destroy: { value: () => this.destroy() },
-      getState: { value: () => this.getState() },
-      setState: { value: (value) => this.setState(value) },
-      paramMgr: { value: { getState: async () => structuredClone(this.#state.params), getParamsValues: () => structuredClone(this.#state.params), setState: async (params) => this.setState({ schemaVersion: 1, params }) } }
-    });
+    installNodeShim(this.input, this.output, this, createParamMgrShim(() => this.#state.params, (state) => this.setState(state)));
   }
   createComb(context, delayTime) {
     const delay = context.createDelay(0.2), damper = context.createBiquadFilter(), feedback = context.createGain(), output = context.createGain();
@@ -319,11 +338,11 @@ var ReverbNode = class {
     return structuredClone(this.#state);
   }
   async setState(value) {
-    if (!stateRecord(value) || dangerous(value)) throw new Error("invalid-reverb-state");
+    if (!isStateRecord(value) || hasDangerousKey(value)) throw new Error("invalid-reverb-state");
     const source = value;
     if (source.schemaVersion !== void 0 && source.schemaVersion !== 0 && source.schemaVersion !== 1) throw new Error("unsupported-reverb-state");
     const incoming = source.params === void 0 ? source : source.params;
-    if (!stateRecord(incoming) || dangerous(incoming)) throw new Error("invalid-reverb-state");
+    if (!isStateRecord(incoming) || hasDangerousKey(incoming)) throw new Error("invalid-reverb-state");
     const old = this.#state.params;
     const raw = { roomSize: incoming.roomSize ?? old.roomSize, damping: incoming.damping ?? old.damping, width: incoming.width ?? old.width, mix: incoming.mix ?? old.mix };
     if (!Object.values(raw).every((entry) => typeof entry === "number" && Number.isFinite(entry))) throw new Error("invalid-reverb-state");

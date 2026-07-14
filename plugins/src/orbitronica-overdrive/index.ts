@@ -1,9 +1,9 @@
 import { createKnobPanel, fmt } from "../shared/knobPanel";
+import { clamp, installNodeShim } from "../shared/effectNode";
 
 const stateRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 type Params = { drive: number; tone: number; outputGain: number; mix: number };
 type State = { schemaVersion: 1; params: Params };
-const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const isDangerous = (value: unknown): boolean => {
   if (!value || typeof value !== "object") return false;
   return Object.entries(value as Record<string, unknown>).some(([key, child]) => key === "__proto__" || key === "constructor" || key === "prototype" || isDangerous(child));
@@ -18,10 +18,7 @@ class OrbitronicaOverdriveNode {
     this.tone.type = "lowpass";
     this.input.connect(this.dry); this.dry.connect(this.output); this.input.connect(this.shaper); this.shaper.connect(this.tone); this.tone.connect(this.wet); this.wet.connect(this.output);
     this.apply(this.#state.params);
-    Object.defineProperties(this.input, {
-      connect: { value: this.output.connect.bind(this.output) }, disconnect: { value: this.output.disconnect.bind(this.output) },
-      destroy: { value: () => this.destroy() }, getState: { value: () => this.getState() }, setState: { value: (value: unknown) => this.setState(value) },
-    });
+    installNodeShim(this.input, this.output, this);
   }
   private apply(params: Params) {
     const now = this.tone.context.currentTime, drive = params.drive;

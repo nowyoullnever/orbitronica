@@ -1,9 +1,9 @@
 import { createKnobPanel, fmt } from "../shared/knobPanel";
+import { clamp, installNodeShim } from "../shared/effectNode";
 
 type Params = { threshold: number; knee: number; ratio: number; attack: number; release: number; makeupGain: number };
 type State = { schemaVersion: 1; params: Params };
 
-const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const dangerousKey = new Set(["__proto__", "constructor", "prototype"]);
 const hasDangerousKey = (value: unknown): boolean => {
   if (!value || typeof value !== "object") return false;
@@ -33,14 +33,7 @@ class OrbitronicaCompressorNode {
       setState: async (params) => this.setState({ schemaVersion: 1, params }),
       getParamsValues: () => structuredClone(this.#state.params),
     };
-    Object.defineProperties(this.input, {
-      connect: { value: this.output.connect.bind(this.output) },
-      disconnect: { value: this.output.disconnect.bind(this.output) },
-      destroy: { value: () => this.destroy() },
-      getState: { value: () => this.getState() },
-      setState: { value: (value: unknown) => this.setState(value) },
-      paramMgr: { value: this.paramMgr },
-    });
+    installNodeShim(this.input, this.output, this, this.paramMgr);
   }
 
   private apply(params: Params) {

@@ -192,9 +192,22 @@ function createKnobPanel(title, node, controls) {
   return root;
 }
 
+// plugins/src/shared/effectNode.ts
+var clamp2 = (value, min, max) => Math.min(max, Math.max(min, value));
+function installNodeShim(input, output, node, paramMgr) {
+  const props = {
+    connect: { value: output.connect.bind(output) },
+    disconnect: { value: output.disconnect.bind(output) },
+    destroy: { value: () => node.destroy() },
+    getState: { value: () => node.getState() },
+    setState: { value: (value) => node.setState(value) }
+  };
+  if (paramMgr !== void 0) props.paramMgr = { value: paramMgr };
+  Object.defineProperties(input, props);
+}
+
 // plugins/src/orbitronica-overdrive/index.ts
 var stateRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
-var clamp2 = (value, min, max) => Math.min(max, Math.max(min, value));
 var isDangerous = (value) => {
   if (!value || typeof value !== "object") return false;
   return Object.entries(value).some(([key, child]) => key === "__proto__" || key === "constructor" || key === "prototype" || isDangerous(child));
@@ -223,13 +236,7 @@ var OrbitronicaOverdriveNode = class {
     this.tone.connect(this.wet);
     this.wet.connect(this.output);
     this.apply(this.#state.params);
-    Object.defineProperties(this.input, {
-      connect: { value: this.output.connect.bind(this.output) },
-      disconnect: { value: this.output.disconnect.bind(this.output) },
-      destroy: { value: () => this.destroy() },
-      getState: { value: () => this.getState() },
-      setState: { value: (value) => this.setState(value) }
-    });
+    installNodeShim(this.input, this.output, this);
   }
   apply(params) {
     const now = this.tone.context.currentTime, drive = params.drive;

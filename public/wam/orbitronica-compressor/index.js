@@ -192,8 +192,21 @@ function createKnobPanel(title, node, controls) {
   return root;
 }
 
-// plugins/src/orbitronica-compressor/index.ts
+// plugins/src/shared/effectNode.ts
 var clamp2 = (value, min, max) => Math.min(max, Math.max(min, value));
+function installNodeShim(input, output, node, paramMgr) {
+  const props = {
+    connect: { value: output.connect.bind(output) },
+    disconnect: { value: output.disconnect.bind(output) },
+    destroy: { value: () => node.destroy() },
+    getState: { value: () => node.getState() },
+    setState: { value: (value) => node.setState(value) }
+  };
+  if (paramMgr !== void 0) props.paramMgr = { value: paramMgr };
+  Object.defineProperties(input, props);
+}
+
+// plugins/src/orbitronica-compressor/index.ts
 var dangerousKey = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
 var hasDangerousKey = (value) => {
   if (!value || typeof value !== "object") return false;
@@ -223,14 +236,7 @@ var OrbitronicaCompressorNode = class {
       setState: async (params) => this.setState({ schemaVersion: 1, params }),
       getParamsValues: () => structuredClone(this.#state.params)
     };
-    Object.defineProperties(this.input, {
-      connect: { value: this.output.connect.bind(this.output) },
-      disconnect: { value: this.output.disconnect.bind(this.output) },
-      destroy: { value: () => this.destroy() },
-      getState: { value: () => this.getState() },
-      setState: { value: (value) => this.setState(value) },
-      paramMgr: { value: this.paramMgr }
-    });
+    installNodeShim(this.input, this.output, this, this.paramMgr);
   }
   apply(params) {
     const now = this.compressor.context.currentTime;

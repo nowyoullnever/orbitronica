@@ -6,8 +6,8 @@
  */
 
 import { createKnobPanel, fmt } from "../shared/knobPanel";
+import { clamp, createParamMgrShim, hasDangerousKey as dangerous, installNodeShim, isStateRecord as stateRecord } from "../shared/effectNode";
 
-const stateRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 type Params = { roomSize: number; damping: number; width: number; mix: number };
 type State = { schemaVersion: 1; params: Params };
 
@@ -17,13 +17,11 @@ const COMB_REFERENCE_FRAMES = {
   right: [1473, 1755, 2033, 2456, 2881, 3378, 3934, 4582],
 };
 const ALLPASS_REFERENCE_FRAMES = { left: [181, 322, 525, 781], right: [207, 379, 578, 851] };
-const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const scaledDelay = (referenceFrames: number, sampleRate: number) => {
   // Scale the 44.1 kHz tuning in frames, then clamp to a valid native delay.
   const scaledFrames = referenceFrames * sampleRate / 44_100;
   return clamp(scaledFrames / sampleRate, 1 / sampleRate, .2);
 };
-const dangerous = (value: unknown): boolean => !!value && typeof value === "object" && Object.entries(value as Record<string, unknown>).some(([key, child]) => ["__proto__", "constructor", "prototype"].includes(key) || dangerous(child));
 
 type Comb = { delay: DelayNode; damper: BiquadFilterNode; feedback: GainNode; output: GainNode };
 type Allpass = { input: GainNode; delay: DelayNode; feedback: GainNode; direct: GainNode; output: GainNode };
@@ -57,11 +55,7 @@ class ReverbNode {
       else { own.connect(this.wetRight); cross.connect(this.wetLeft); }
     }
     this.#disconnectInput = this.input.disconnect.bind(this.input); this.apply(this.#state.params);
-    Object.defineProperties(this.input, {
-      connect: { value: this.output.connect.bind(this.output) }, disconnect: { value: this.output.disconnect.bind(this.output) }, destroy: { value: () => this.destroy() },
-      getState: { value: () => this.getState() }, setState: { value: (value: unknown) => this.setState(value) },
-      paramMgr: { value: { getState: async () => structuredClone(this.#state.params), getParamsValues: () => structuredClone(this.#state.params), setState: async (params: Record<string, number>) => this.setState({ schemaVersion: 1, params: params as Params }) } },
-    });
+    installNodeShim(this.input, this.output, this, createParamMgrShim(() => this.#state.params, (state) => this.setState(state)));
   }
 
   createComb(context: AudioContext, delayTime: number): Comb {

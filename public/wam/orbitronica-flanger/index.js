@@ -192,11 +192,59 @@ function createKnobPanel(title, node, controls) {
   return root;
 }
 
+// plugins/src/shared/effectNode.ts
+var clamp2 = (value, min, max) => Math.min(max, Math.max(min, value));
+var isStateRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+var hasDangerousKey = (value) => {
+  if (!value || typeof value !== "object") return false;
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype" || hasDangerousKey(child)) return true;
+  }
+  return false;
+};
+function installNodeShim(input, output, node, paramMgr) {
+  const props = {
+    connect: { value: output.connect.bind(output) },
+    disconnect: { value: output.disconnect.bind(output) },
+    destroy: { value: () => node.destroy() },
+    getState: { value: () => node.getState() },
+    setState: { value: (value) => node.setState(value) }
+  };
+  if (paramMgr !== void 0) props.paramMgr = { value: paramMgr };
+  Object.defineProperties(input, props);
+}
+function createParamMgrShim(getParams, setState) {
+  return {
+    getState: async () => structuredClone(getParams()),
+    getParamsValues: () => structuredClone(getParams()),
+    setState: async (params) => setState({ schemaVersion: 1, params })
+  };
+}
+function setStateFromRecord(value, name, current, specs) {
+  if (!isStateRecord(value) || hasDangerousKey(value)) throw new Error(`invalid-${name}-state`);
+  const source = value;
+  if (source.schemaVersion !== void 0 && source.schemaVersion !== 0 && source.schemaVersion !== 1) throw new Error(`unsupported-${name}-state`);
+  const incoming = source.params === void 0 ? source : source.params;
+  if (!isStateRecord(incoming) || hasDangerousKey(incoming)) throw new Error(`invalid-${name}-state`);
+  const raw = {};
+  for (const spec of specs) raw[spec.key] = incoming[spec.key] ?? current[spec.key];
+  if (!Object.values(raw).every((entry) => typeof entry === "number" && Number.isFinite(entry))) throw new Error(`invalid-${name}-state`);
+  const params = {};
+  for (const spec of specs) {
+    const clamped = clamp2(raw[spec.key], spec.min, spec.max);
+    params[spec.key] = spec.round ? Math.round(clamped) : clamped;
+  }
+  return { schemaVersion: 1, params };
+}
+
 // plugins/src/orbitronica-flanger/index.ts
-var stateRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 var defaults = { rate: 0.25, depth: 3e-3, feedback: 0.25, mix: 0 };
-var clamp2 = (n, a, b) => Math.min(b, Math.max(a, n));
-var dangerous = (v) => !!v && typeof v === "object" && Object.entries(v).some(([k, x]) => ["__proto__", "constructor", "prototype"].includes(k) || dangerous(x));
+var SPECS = [
+  { key: "rate", min: 0.05, max: 10 },
+  { key: "depth", min: 0, max: 9e-3 },
+  { key: "feedback", min: -0.95, max: 0.95 },
+  { key: "mix", min: 0, max: 1 }
+];
 var FlangerNode = class {
   input;
   output;
@@ -235,7 +283,7 @@ var FlangerNode = class {
     this.offset.start();
     this.lfo.start();
     this.apply(this.#state.params);
-    Object.defineProperties(this.input, { connect: { value: this.output.connect.bind(this.output) }, disconnect: { value: this.output.disconnect.bind(this.output) }, destroy: { value: () => this.destroy() }, getState: { value: () => this.getState() }, setState: { value: (v) => this.setState(v) }, paramMgr: { value: { getState: async () => structuredClone(this.#state.params), getParamsValues: () => structuredClone(this.#state.params), setState: async (p) => this.setState({ schemaVersion: 1, params: p }) } } });
+    installNodeShim(this.input, this.output, this, createParamMgrShim(() => this.#state.params, (state) => this.setState(state)));
   }
   apply(p) {
     const now = this.delay.context.currentTime;
@@ -250,15 +298,7 @@ var FlangerNode = class {
     return structuredClone(this.#state);
   }
   async setState(v) {
-    if (!stateRecord(v) || dangerous(v)) throw new Error("invalid-flanger-state");
-    const source = v;
-    if (source.schemaVersion !== void 0 && source.schemaVersion !== 0 && source.schemaVersion !== 1) throw new Error("unsupported-flanger-state");
-    const incoming = source.params === void 0 ? source : source.params;
-    if (!stateRecord(incoming) || dangerous(incoming)) throw new Error("invalid-flanger-state");
-    const old = this.#state.params;
-    const raw = { rate: incoming.rate ?? old.rate, depth: incoming.depth ?? old.depth, feedback: incoming.feedback ?? old.feedback, mix: incoming.mix ?? old.mix };
-    if (!Object.values(raw).every((entry) => typeof entry === "number" && Number.isFinite(entry))) throw new Error("invalid-flanger-state");
-    this.#state = { schemaVersion: 1, params: { rate: clamp2(raw.rate, 0.05, 10), depth: clamp2(raw.depth, 0, 9e-3), feedback: clamp2(raw.feedback, -0.95, 0.95), mix: clamp2(raw.mix, 0, 1) } };
+    this.#state = setStateFromRecord(v, "flanger", this.#state.params, SPECS);
     this.apply(this.#state.params);
   }
   destroy() {

@@ -192,9 +192,11 @@ function createKnobPanel(title, node, controls) {
   return root;
 }
 
+// plugins/src/shared/effectNode.ts
+var clamp2 = (value, min, max) => Math.min(max, Math.max(min, value));
+
 // plugins/src/orbitronica-filter/index.ts
 var TYPES = ["lowpass", "highpass", "bandpass", "notch", "peaking", "lowshelf", "highshelf"];
-var clamp2 = (value, min, max) => Math.min(max, Math.max(min, value));
 var maxHz = (context) => Math.min(2e4, 0.45 * context.sampleRate);
 var stateRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 var isDangerous = (value) => {
