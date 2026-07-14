@@ -8,6 +8,10 @@ import {
 import { SampleTrimEditor } from "./SampleTrimEditor";
 import { normalizeSampleWindow } from "../utils/sampleTrim";
 import { PopupMenu, PopupMenuItem, type PopupPosition } from "./PopupMenu";
+import { NameEditor } from "./controls/NameEditor";
+import { EditableMetric } from "./controls/EditableMetric";
+import { ReadonlyMetric } from "./controls/ReadonlyMetric";
+import { AudioPanControl } from "./controls/AudioPanControl";
 
 type Props = {
   orbit: Orbit | null;
@@ -144,128 +148,6 @@ function PluginRack({ orbit, props }: { orbit: Orbit; props: Props }) {
       </div>;
     })}
   </section>;
-}
-
-function NameEditor({ value, onCommit }: { value: string; onCommit: (value: string) => void }) {
-  const [draft, setDraft] = useState(value);
-  useEffect(() => setDraft(value), [value]);
-  const commit = () => {
-    const next = draft.trim();
-    if (next && next !== value) onCommit(next);
-    else setDraft(value);
-  };
-  return <input value={draft} onChange={(event) => setDraft(event.target.value)}
-    onBlur={commit} onKeyDown={(event) => event.key === "Enter" && event.currentTarget.blur()} />;
-}
-
-function formatMetric(value: number, decimals: number) {
-  return decimals === 0 ? String(Math.round(value)) : value.toFixed(decimals);
-}
-
-function EditableMetric({
-  label, value, decimals, suffix, step, min, max, disabled, onApply
-}: {
-  label: string;
-  value: number;
-  decimals: number;
-  suffix: string;
-  step: number;
-  min?: number;
-  max?: number;
-  disabled?: boolean;
-  onApply: (value: number) => void;
-}) {
-  const [draft, setDraft] = useState(formatMetric(value, decimals));
-  const [isEditing, setIsEditing] = useState(false);
-  useEffect(() => {
-    if (!isEditing) setDraft(formatMetric(value, decimals));
-  }, [value, decimals, isEditing]);
-
-  const apply = () => {
-    const parsed = Number(draft);
-    if (!Number.isFinite(parsed)) {
-      setDraft(formatMetric(value, decimals));
-      return;
-    }
-    const rounded = decimals === 0 ? Math.round(parsed) : Number(parsed.toFixed(decimals));
-    onApply(rounded);
-  };
-
-  return <div className="editable-metric">
-    <span>{label}</span>
-    <input type="number" value={draft} step={step} min={min} max={max} disabled={disabled}
-      onFocus={() => setIsEditing(true)}
-      onBlur={() => { setIsEditing(false); apply(); }}
-      onChange={(event) => setDraft(event.target.value)}
-      onKeyDown={(event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          apply();
-          event.currentTarget.blur();
-        }
-      }} />
-    <em>{suffix}</em>
-    <button type="button" disabled={disabled} onClick={apply}>Apply</button>
-  </div>;
-}
-
-function ReadonlyMetric({ label, value, suffix, decimals = 2 }: {
-  label: string;
-  value: number;
-  suffix: string;
-  decimals?: number;
-}) {
-  return <div className="readonly-metric">
-    <span>{label}</span>
-    <output>{decimals === 0 ? Math.round(value) : value.toFixed(decimals)} {suffix}</output>
-  </div>;
-}
-
-function AudioPanControl({ label, value, onChange }: { label: string; value: number; onChange: (audioPan: number) => void }) {
-  const [draft, setDraft] = useState(String(value));
-  const [isEditing, setIsEditing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    if (!isEditing) setDraft(String(value));
-  }, [value, isEditing]);
-
-  const applyDraft = (nextDraft: string) => {
-    setDraft(nextDraft);
-    if (!/^-?(?:\d+\.?\d*|\.\d+)$/.test(nextDraft)) {
-      setError("Please enter a valid number.");
-      return;
-    }
-    const parsed = Number(nextDraft);
-    if (parsed > 100) {
-      setError("Please enter a value less than or equal to 100.");
-      return;
-    }
-    if (parsed < -100) {
-      setError("Please enter a value greater than or equal to -100.");
-      return;
-    }
-    setError(null);
-    onChange(parsed);
-  };
-  const reset = () => {
-    setDraft("0");
-    setError(null);
-    onChange(0);
-  };
-
-  return <div className="audio-pan-control">
-    <label><span>{label} <output>{value > 0 ? "+" : ""}{value}</output></span>
-      <input type="range" min="-100" max="100" step="1" value={value}
-        onChange={(event) => { setDraft(event.target.value); setError(null); onChange(Number(event.target.value)); }}
-        onDoubleClick={reset} />
-    </label>
-    <input className="audio-pan-number" type="text" inputMode="decimal" value={draft} aria-label={`${label} value`}
-      onFocus={() => setIsEditing(true)}
-      onChange={(event) => applyDraft(event.target.value)}
-      onBlur={() => setIsEditing(false)}
-      onDoubleClick={reset} />
-    {error && <small className="audio-pan-error">{error}</small>}
-  </div>;
 }
 
 export function OrbitSettingsPanel(props: Props) {
