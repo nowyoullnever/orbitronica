@@ -77,7 +77,9 @@ class ReverbNode {
   apply(params: Params) {
     const now = this.output.context.currentTime;
     const feedback = .3 + params.roomSize * .6;
-    const dampingHz = 18_000 * (1 - params.damping) + 1_200 * params.damping;
+    // Exponential cutoff mapping gives the damping control a reliable,
+    // perceptually meaningful high-frequency-tail reduction across rates.
+    const dampingHz = clamp(20_000 * .015 ** params.damping, 300, 20_000);
     const own = .5 + .5 * params.width, cross = .5 - .5 * params.width;
     for (const comb of this.combs) { comb.feedback.gain.setTargetAtTime(feedback, now, .03); comb.damper.frequency.setTargetAtTime(dampingHz, now, .03); }
     for (let index = 0; index < this.widthGains.length; index += 2) { this.widthGains[index].gain.setTargetAtTime(own, now, .03); this.widthGains[index + 1].gain.setTargetAtTime(cross, now, .03); }

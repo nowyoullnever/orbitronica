@@ -295,10 +295,10 @@ async function phase5Metrics() {
       const smallTail = measure(small, 1, 2), largeTail = measure(large, 1, 2), finalTail = measure(large, 3.8, 4.7);
       return { observed: largeTail / Math.max(smallTail, 1e-12), ok: largeTail > smallTail * 1.5 && finalTail < .01 && finite(large.getChannelData(0)) };
     });
-    await reverb("damping", `high-frequency-tail-reduction-${rate}`, "damping .9 reduces differentiated tail energy", async () => {
+    await reverb("damping", `high-frequency-tail-reduction-${rate}`, "damping .9 reduces differentiated tail energy by at least 3 dB", async () => {
       const bright = await renderReverb({ roomSize: .8, damping: 0, width: 1, mix: 1 }, rate), dark = await renderReverb({ roomSize: .8, damping: .9, width: 1, mix: 1 }, rate);
       const observed = hfEnergy(dark.getChannelData(0), at(.7, rate), at(2.5, rate)) / Math.max(hfEnergy(bright.getChannelData(0), at(.7, rate), at(2.5, rate)), 1e-12);
-      return { observed, ok: observed < .85 };
+      return { observed, ok: observed <= .5 };
     });
     await reverb("width", `stereo-decorrelation-${rate}`, "width 1 lowers identical-input L/R correlation versus width 0", async () => {
       const narrow = await renderReverb({ roomSize: .7, damping: .3, width: 0, mix: 1 }, rate), wide = await renderReverb({ roomSize: .7, damping: .3, width: 1, mix: 1 }, rate);

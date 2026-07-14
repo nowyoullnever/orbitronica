@@ -107,7 +107,7 @@ var ReverbNode = class {
   apply(params) {
     const now = this.output.context.currentTime;
     const feedback = 0.3 + params.roomSize * 0.6;
-    const dampingHz = 18e3 * (1 - params.damping) + 1200 * params.damping;
+    const dampingHz = clamp(2e4 * 0.015 ** params.damping, 300, 2e4);
     const own = 0.5 + 0.5 * params.width, cross = 0.5 - 0.5 * params.width;
     for (const comb of this.combs) {
       comb.feedback.gain.setTargetAtTime(feedback, now, 0.03);
