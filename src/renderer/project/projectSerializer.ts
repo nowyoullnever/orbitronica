@@ -129,7 +129,7 @@ export function validateJsonValue(value: unknown, label = "plugin state"): JsonV
   return normalized;
 }
 
-export function serializePluginStates(
+function serializePluginStates(
   scenes: readonly Pick<Scene, "orbits">[], stateStore: ReadonlyMap<string, JsonValue> = new Map()
 ): Record<string, JsonValue> {
   const retained = slotIds(scenes);
@@ -190,7 +190,7 @@ function normalizeBar(bar: Partial<TriggerBar>): TriggerBar {
   };
 }
 
-export function normalizeMasterMix(master?: Partial<MasterMix> | null): MasterMix {
+function normalizeMasterMix(master?: Partial<MasterMix> | null): MasterMix {
   const volume = typeof master?.volume === "number" && Number.isFinite(master.volume) ? master.volume : 1;
   const pan = typeof master?.pan === "number" && Number.isFinite(master.pan) ? master.pan : 0;
   return {
@@ -199,7 +199,7 @@ export function normalizeMasterMix(master?: Partial<MasterMix> | null): MasterMi
   };
 }
 
-export function normalizeViewport(viewport?: Partial<ViewportState> | null): ViewportState {
+function normalizeViewport(viewport?: Partial<ViewportState> | null): ViewportState {
   const zoom = typeof viewport?.zoom === "number" && Number.isFinite(viewport.zoom) ? viewport.zoom : 1;
   const offsetX = typeof viewport?.offsetX === "number" && Number.isFinite(viewport.offsetX) ? viewport.offsetX : 0;
   const offsetY = typeof viewport?.offsetY === "number" && Number.isFinite(viewport.offsetY) ? viewport.offsetY : 0;

@@ -1,8 +1,8 @@
 import type { MultiSelection, Orbit, Planet, Selection } from "../state/types";
 import { ellipsePoint } from "./geometry.ts";
 
-export const emptySelection: Selection = { orbitId: null, planetId: null, barId: null };
-export const emptyMultiSelection: MultiSelection = { orbitIds: [], planetIds: [] };
+const emptySelection: Selection = { orbitId: null, planetId: null, barId: null };
+const emptyMultiSelection: MultiSelection = { orbitIds: [], planetIds: [] };
 
 export const selectSingleState = (selection: Selection) => ({
   selection,

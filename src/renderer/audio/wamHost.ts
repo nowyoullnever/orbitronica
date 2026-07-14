@@ -2,9 +2,8 @@
  * Bounded, renderer-local WAM boundary. It is deliberately not a sandbox:
  * third-party code is restricted to the compiled catalog before reaching here.
  */
-export type JsonPrimitive = null | boolean | number | string;
-export type JsonValue = JsonPrimitive | readonly JsonValue[] | { readonly [key: string]: JsonValue };
-export type WamState = JsonValue;
+export type { JsonPrimitive, JsonValue } from "../state/types";
+import type { JsonValue } from "../state/types";
 
 export type WamPluginInstance = {
   audioNode: AudioNode;

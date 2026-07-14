@@ -5,7 +5,7 @@ export type FLStylePanMatrix = {
   rightToRight: number;
 };
 
-export function normalizeAudioPan(audioPan: number) {
+function normalizeAudioPan(audioPan: number) {
   if (!Number.isFinite(audioPan)) return 0;
   return Math.max(-1, Math.min(1, audioPan / 100));
 }

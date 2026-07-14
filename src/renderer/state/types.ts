@@ -176,8 +176,6 @@ export type SerializableProjectV6 = {
   pluginStates: Record<string, JsonValue>;
 };
 
-export type SerializableProject = SerializableProjectV6;
-
 export type ContextMenuState = {
   x: number;
   y: number;

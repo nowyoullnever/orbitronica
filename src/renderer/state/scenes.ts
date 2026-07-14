@@ -258,9 +258,9 @@ export function stabilizePlanetRuntime(planet: Planet): Planet {
   };
 }
 
-export const projectPlanetForHistory = stabilizePlanetRuntime;
+const projectPlanetForHistory = stabilizePlanetRuntime;
 
-export function projectSceneForHistory(scene: Scene): Scene {
+function projectSceneForHistory(scene: Scene): Scene {
   const planets = scene.planets.map(stabilizePlanetRuntime);
   return planets.some((planet, index) => planet !== scene.planets[index]) ? { ...scene, planets } : scene;
 }
@@ -300,7 +300,7 @@ export function updatePlanetForFreshRequest(
   });
 }
 
-export function spliceBarId(orbitId: string, index: number): string {
+function spliceBarId(orbitId: string, index: number): string {
   return `${orbitId}:splice:${index}`;
 }
 
