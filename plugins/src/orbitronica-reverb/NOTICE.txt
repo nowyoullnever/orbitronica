@@ -1,0 +1,11 @@
+Orbitronica Reverb
+Copyright 2026 Orbitronica contributors
+SPDX-License-Identifier: MIT
+
+The clean-room algorithm family is attributed to Jezar at Dreampoint.
+It is newly implemented from the original public-domain algorithm description
+recorded in clean-room-evidence.md. No Freeverb3 or GPL/LGPL-derived port code
+is included.
+
+This bundle also includes @webaudiomodules/sdk and @webaudiomodules/sdk-parammgr
+under their respective MIT licenses.

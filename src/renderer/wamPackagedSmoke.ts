@@ -11,6 +11,7 @@ const PARAMETER_PROBES: Record<string, Record<string, number>> = {
   "orbitronica-overdrive": { drive: .8, tone: 2400, outputGain: 5, mix: .65 },
   "orbitronica-compressor": { threshold: -40, knee: 8, ratio: 12, attack: .2, release: .8, makeupGain: 6 },
   "orbitronica-bitcrusher": { bitDepth: 3, reduction: 8, mix: .65 },
+  "orbitronica-reverb": { roomSize: .8, damping: .55, width: .7, mix: .65 },
 };
 type WamInstance = { audioNode: WamNode; createGui?(): Promise<HTMLElement>; destroyGui?(gui: HTMLElement): void };
 type WamConstructor = { createInstance(groupId: string, context: AudioContext): Promise<WamInstance> };

@@ -60,9 +60,9 @@ test("packaged smoke uses the real production Electron entry rather than the dev
   assert.equal(path.basename(new URL("public/wam/burns-simple-delay/index.js", root).pathname), "index.js");
 });
 
-test("first-party filter, compressor, and bitcrusher are cataloged with byte-copied, hash-locked manifests", () => {
+test("first-party effects are cataloged with byte-copied, hash-locked manifests", () => {
   const catalog = read("src/renderer/audio/wamCatalogData.ts");
-  for (const id of ["orbitronica-filter", "orbitronica-compressor", "orbitronica-bitcrusher", "orbitronica-flanger", "orbitronica-phaser"]) {
+  for (const id of ["orbitronica-filter", "orbitronica-compressor", "orbitronica-bitcrusher", "orbitronica-flanger", "orbitronica-phaser", "orbitronica-reverb"]) {
     const sourceManifest = read(`plugins/src/${id}/manifest.json`);
     const publicManifest = read(`public/wam/${id}/manifest.json`);
     const manifest = JSON.parse(publicManifest) as { assets: Record<string, string>; origin: string; sourcePath: string; buildTool: string };
@@ -95,7 +95,7 @@ test("Phase 1 vendored EQ retains pinned provenance and the documented fallback 
 
 test("first-party build ownership cannot rewrite immutable Burns payloads", () => {
   const builder = read("scripts/build-plugins.mjs");
-  assert.match(builder, /firstPartyIds = \["orbitronica-filter", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-bitcrusher", "orbitronica-flanger", "orbitronica-phaser"\]/);
+  assert.match(builder, /firstPartyIds = \["orbitronica-filter", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-bitcrusher", "orbitronica-flanger", "orbitronica-phaser", "orbitronica-reverb"\]/);
   assert.doesNotMatch(builder, /burns-simple-eq|burns-distortion/);
   const eq = JSON.parse(read("public/wam/burns-simple-eq/manifest.json")) as { origin: string; assets: Record<string, string> };
   assert.equal(eq.origin, "vendored");
@@ -136,4 +136,16 @@ test("Phase 4 flanger/phaser retain bounded fixed-graph topology and packaged DS
   assert.match(phaser, /for \(let i = 0; i < 8; i\+\+\)/); assert.match(phaser, /cycleBreak\.delayTime\.value = 1 \/ context\.sampleRate/);
   assert.match(phaser, /wetBus\.connect\(this\.feedbackGain\)/); assert.match(phaser, /feedbackGain\.connect\(this\.limiter\)/); assert.match(phaser, /limiter\.connect\(this\.cycleBreak\)/); assert.match(phaser, /cycleBreak\.connect\(this\.stages\[0\]\)/);
   assert.match(harness, /phase4Metrics/); assert.match(harness, /orbitronica-phaser/); assert.match(harness, /orbitronica-flanger/);
+});
+
+test("Phase 5 reverb is a clean-room, rate-scaled stereo comb/allpass graph with packaged acceptance", () => {
+  const reverb = read("plugins/src/orbitronica-reverb/index.ts"), evidence = read("plugins/src/orbitronica-reverb/clean-room-evidence.md"), notice = read("plugins/src/orbitronica-reverb/NOTICE.txt"), harness = read("src/renderer/wamDspTest.ts");
+  assert.match(evidence, /85fd86a014b40219a63ae1016955f87c37a27b5d/); assert.match(evidence, /a7c89f728a4e7a1fa6403c178d8d04f5616e12ef93ffea9ecdc432ca91641851/); assert.match(evidence, /reviewer sign-off/i);
+  assert.match(reverb, /COMB_REFERENCE_FRAMES/); assert.match(reverb, /ALLPASS_REFERENCE_FRAMES/); assert.match(reverb, /scaledDelay/); assert.match(reverb, /for \(const frames of COMB_REFERENCE_FRAMES\[side\]\)/); assert.match(reverb, /for \(const frames of ALLPASS_REFERENCE_FRAMES\[side\]\)/);
+  for (const parameter of ["roomSize", "damping", "width", "mix"]) assert.match(reverb, new RegExp(parameter));
+  assert.match(reverb, /schemaVersion !== 0/); assert.match(reverb, /invalid-reverb-state/); assert.match(reverb, /unsupported-reverb-state/);
+  assert.match(notice, /Jezar at Dreampoint/); assert.match(notice, /GPL\/LGPL-derived port code/);
+  assert.match(read("scripts/verify-reverb-clean-room.mjs"), /prohibited derivative material/); assert.match(read("package.json"), /verify:reverb-clean-room/);
+  for (const metric of ["impulse-tail-length", "high-frequency-tail-reduction", "stereo-decorrelation", "scaled-tuning", "strict-round-trip-and-v0-migration"]) assert.match(harness, new RegExp(metric));
+  assert.match(harness, /phase5Metrics/); assert.match(harness, /orbitronica-reverb/);
 });

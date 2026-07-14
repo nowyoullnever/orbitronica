@@ -2,7 +2,7 @@ import { build } from "esbuild";
 import { cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 
-const firstPartyIds = ["orbitronica-filter", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-bitcrusher", "orbitronica-flanger", "orbitronica-phaser"];
+const firstPartyIds = ["orbitronica-filter", "orbitronica-overdrive", "orbitronica-compressor", "orbitronica-bitcrusher", "orbitronica-flanger", "orbitronica-phaser", "orbitronica-reverb"];
 for (const id of firstPartyIds) {
   const source = path.resolve("plugins/src", id);
   const output = path.resolve("public/wam", id);

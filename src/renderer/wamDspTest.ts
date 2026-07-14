@@ -222,6 +222,7 @@ async function bitcrusherMetrics() {
 type ModParams = { rate: number; depth: number; feedback: number; mix: number };
 type PhaserParams = ModParams & { stages: number };
 type ModNode = AudioNode & { getState(): Promise<{ schemaVersion: number; params: Record<string, number> }>; setState(value: { schemaVersion: 1; params: Record<string, number> }): Promise<void>; destroy(): void };
+type ReverbParams = { roomSize: number; damping: number; width: number; mix: number };
 async function modulationModule(id: "orbitronica-flanger" | "orbitronica-phaser") {
   const url = new URL(`./wam/${id}/index.js`, window.location.href).toString();
   return import(/* @vite-ignore */ url) as Promise<{ default: { createInstance(group: string, context: AudioContext): Promise<{ audioNode: ModNode }> } }>;
@@ -264,9 +265,70 @@ async function phase4Metrics() {
   });
 }
 
+async function reverbModule() {
+  const url = new URL("./wam/orbitronica-reverb/index.js", window.location.href).toString();
+  return import(/* @vite-ignore */ url) as Promise<{ default: { createInstance(group: string, context: AudioContext): Promise<{ audioNode: ModNode }> } }>;
+}
+async function renderReverb(params: ReverbParams, sampleRate: number, stereoIdentical = true) {
+  const context = new OfflineAudioContext(2, Math.ceil(4.8 * sampleRate), sampleRate);
+  const instance = await (await reverbModule()).default.createInstance("phase5-dsp", context as unknown as AudioContext);
+  await instance.audioNode.setState({ schemaVersion: 1, params });
+  const source = context.createBufferSource(), buffer = context.createBuffer(2, context.length, sampleRate), impulse = at(.2, sampleRate);
+  buffer.getChannelData(0)[impulse] = .7; buffer.getChannelData(1)[impulse] = stereoIdentical ? .7 : -.35;
+  source.buffer = buffer; source.connect(instance.audioNode); instance.audioNode.connect(context.destination); source.start();
+  const output = await context.startRendering(); instance.audioNode.destroy(); return output;
+}
+const correlation = (a: Float32Array, b: Float32Array, from: number, to: number) => {
+  let aa = 0, bb = 0, ab = 0; for (let index = from; index < to; index++) { aa += a[index] ** 2; bb += b[index] ** 2; ab += a[index] * b[index]; }
+  return ab / Math.sqrt(Math.max(aa * bb, 1e-24));
+};
+const hfEnergy = (values: Float32Array, from: number, to: number) => {
+  let total = 0; for (let index = Math.max(from + 1, 1); index < to; index++) total += (values[index] - values[index - 1]) ** 2;
+  return total / Math.max(1, to - from - 1);
+};
+const onset = (values: Float32Array, from: number, to: number) => { for (let index = from; index < to; index++) if (Math.abs(values[index]) > .01) return index; return -1; };
+async function phase5Metrics() {
+  const reverb = (parameterId: string, metric: string, tolerance: string, run: () => Promise<{ observed: number; ok: boolean }>) => check(parameterId, metric, tolerance, run, "orbitronica-reverb");
+  for (const rate of [44_100, 48_000]) {
+    await reverb("roomSize", `impulse-tail-length-${rate}`, "large room tail energy exceeds small room and converges", async () => {
+      const small = await renderReverb({ roomSize: .1, damping: .2, width: 1, mix: 1 }, rate), large = await renderReverb({ roomSize: .8, damping: .2, width: 1, mix: 1 }, rate);
+      const smallTail = measure(small, 1, 2), largeTail = measure(large, 1, 2), finalTail = measure(large, 3.8, 4.7);
+      return { observed: largeTail / Math.max(smallTail, 1e-12), ok: largeTail > smallTail * 1.5 && finalTail < .01 && finite(large.getChannelData(0)) };
+    });
+    await reverb("damping", `high-frequency-tail-reduction-${rate}`, "damping .9 reduces differentiated tail energy", async () => {
+      const bright = await renderReverb({ roomSize: .8, damping: 0, width: 1, mix: 1 }, rate), dark = await renderReverb({ roomSize: .8, damping: .9, width: 1, mix: 1 }, rate);
+      const observed = hfEnergy(dark.getChannelData(0), at(.7, rate), at(2.5, rate)) / Math.max(hfEnergy(bright.getChannelData(0), at(.7, rate), at(2.5, rate)), 1e-12);
+      return { observed, ok: observed < .85 };
+    });
+    await reverb("width", `stereo-decorrelation-${rate}`, "width 1 lowers identical-input L/R correlation versus width 0", async () => {
+      const narrow = await renderReverb({ roomSize: .7, damping: .3, width: 0, mix: 1 }, rate), wide = await renderReverb({ roomSize: .7, damping: .3, width: 1, mix: 1 }, rate);
+      const narrowCorrelation = correlation(narrow.getChannelData(0), narrow.getChannelData(1), at(.3, rate), at(3, rate));
+      const wideCorrelation = correlation(wide.getChannelData(0), wide.getChannelData(1), at(.3, rate), at(3, rate));
+      return { observed: narrowCorrelation - wideCorrelation, ok: narrowCorrelation > .99 && wideCorrelation < .95 };
+    });
+    await reverb("sampleRate", `scaled-tuning-${rate}`, "first wet onset remains within 2 ms of the selected 44.1 kHz tuning", async () => {
+      const output = await renderReverb({ roomSize: .5, damping: .3, width: 1, mix: 1 }, rate), first = onset(output.getChannelData(0), at(.2, rate), at(.8, rate));
+      const seconds = first < 0 ? Number.NaN : first / rate - .2;
+      return { observed: seconds, ok: Number.isFinite(seconds) && Math.abs(seconds - 1371 / 44_100) < .002 };
+    });
+  }
+  await reverb("mix", "equal-power-neutral-and-wet", "mix=0 exact dry and mix=.7 changes signal", async () => {
+    const dry = await renderReverb({ roomSize: .8, damping: .3, width: 1, mix: 0 }, 48_000), wet = await renderReverb({ roomSize: .8, damping: .3, width: 1, mix: .7 }, 48_000);
+    const expected = new Float32Array(dry.length); expected[at(.2, 48_000)] = .7;
+    const dryError = differenceRms(dry.getChannelData(0), expected, 0, dry.length), delta = differenceRms(dry.getChannelData(0), wet.getChannelData(0), 0, dry.length);
+    return { observed: Math.max(dryError, 1 / Math.max(delta, 1e-12)), ok: dryError < 1e-6 && delta > 1e-4 };
+  });
+  await reverb("state", "strict-round-trip-and-v0-migration", "four-param ABI round trips exactly and clamps v0", async () => {
+    const context = new OfflineAudioContext(2, 128, 44_100), node = (await (await reverbModule()).default.createInstance("reverb-state", context as unknown as AudioContext)).audioNode;
+    const params = { roomSize: .8, damping: .5, width: .6, mix: .7 }; await node.setState({ schemaVersion: 1, params }); const exact = await node.getState();
+    await node.setState({ roomSize: 2, damping: -1, width: 3, mix: -1 } as unknown as { schemaVersion: 1; params: Record<string, number> }); const migrated = await node.getState(); node.destroy();
+    return { observed: Object.keys(exact.params).length, ok: JSON.stringify(exact) === JSON.stringify({ schemaVersion: 1, params }) && JSON.stringify(migrated) === JSON.stringify({ schemaVersion: 1, params: { roomSize: 1, damping: 0, width: 1, mix: 0 } }) };
+  });
+}
+
 async function run() {
   try {
-    await controlMetrics(44_100); await controlMetrics(48_000); await safetyMetrics(); await bitcrusherMetrics(); await phase4Metrics();
+    await controlMetrics(44_100); await controlMetrics(48_000); await safetyMetrics(); await bitcrusherMetrics(); await phase4Metrics(); await phase5Metrics();
     const status = metrics.every((metric) => metric.ok) ? "pass" : "fail";
     const payload = { status, results: metrics };
     result!.textContent = JSON.stringify(payload); console.log(`ORBITRONICA_WAM_DSP ${JSON.stringify(payload)}`);

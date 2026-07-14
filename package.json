@@ -19,6 +19,7 @@
     "preview": "vite preview",
     "start": "electron .",
     "verify:plugins-deterministic": "node scripts/verify-plugins-deterministic.mjs",
+    "verify:reverb-clean-room": "node scripts/verify-reverb-clean-room.mjs",
     "update:wam-hashes": "npm run verify:plugins-deterministic && node scripts/build-plugins.mjs && node scripts/update-wam-hashes.mjs && node scripts/build-plugins.mjs && npm run verify:wam-assets"
   },
   "dependencies": {
