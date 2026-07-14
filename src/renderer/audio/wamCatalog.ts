@@ -5,7 +5,16 @@
 import type { JsonValue, WamPluginInstance, WamPluginModule } from "./wamHost.ts";
 import { WAM_CATALOG_DATA, type WamCatalogDataEntry } from "./wamCatalogData.ts";
 
-export type WamCatalogEntry = WamCatalogDataEntry;
+export type WamCatalogEntry = Readonly<{
+  id: string;
+  displayName: string;
+  pluginVersion: string;
+  packageVersion: string;
+  license: string;
+  entry: string;
+  descriptor: string;
+  hasGui: boolean;
+}>;
 
 function defineWamCatalog<const Catalog extends Record<string, WamCatalogEntry>>(
   catalog: Catalog & { [Id in keyof Catalog]: Readonly<{ id: Id }> }

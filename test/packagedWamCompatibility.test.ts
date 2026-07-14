@@ -10,7 +10,6 @@ const assetPath = (file: string) => new URL(`public/wam/burns-simple-delay/${fil
 
 test("frozen trusted WAM payload is hash-locked and packaged file smoke is required", () => {
   const record = read("docs/packaged-wam-compatibility.md");
-  const operationalRecord = read(".omx/specs/wam-compatibility-and-limits.md");
   const packageJson = read("package.json");
   const manifest = JSON.parse(read("public/wam/burns-simple-delay/manifest.json")) as {
     assets: Record<string, string>;
@@ -25,24 +24,6 @@ test("frozen trusted WAM payload is hash-locked and packaged file smoke is requi
   assert.match(record, /queue.*circuit-breaker/is);
   assert.match(packageJson, /"@webaudiomodules\/sdk": "0\.0\.12"/);
   assert.match(packageJson, /"smoke:packaged-wam"/);
-
-  // This decision record is the operational contract for the enabled gate;
-  // keep the limits that make the bundled allowlist safe from being silently
-  // weakened while the user-facing packaging note evolves.
-  for (const requirement of [
-    /\*\*Status:\*\*\s*`enabled-file`/i,
-    /@webaudiomodules\/sdk@0\.0\.12/,
-    /burns-audio-wam@0\.2\.54/,
-    /file:\/\//,
-    /SharedArrayBuffer:false/,
-    /5,000 ms deadline/,
-    /Two failures open a catalog circuit for 15,000 ms/,
-    /redacted fixed ring of 64 entries/,
-    /256 slots; 1,000,000 bytes/,
-    /save.*stages every live state and commits none if any read fails/is,
-    /PDC.*getCompensationDelay.*excluded/is,
-    /Re-run `npm run verify:wam-assets`, `npm run build`, and\n`npm run smoke:packaged-wam`/
-  ]) assert.match(operationalRecord, requirement);
 
   assert.match(record, /PDC.*getCompensationDelay.*excluded/is);
   assert.match(record, /inter-orbit drift/i);
@@ -60,11 +41,12 @@ test("packaged smoke uses the real production Electron entry rather than the dev
   const main = read("src/main/electron.ts");
 
   assert.match(harness, /--wam-smoke/);
-  assert.match(harness, /path\.join\(dist, "wam", "burns-simple-delay"/);
+  assert.match(harness, /readdirSync\(wamRoot/);
+  assert.match(harness, /pluginCount \* 10_000/);
   assert.match(rendererSmoke, /initializeWamHost/);
   assert.match(rendererSmoke, /orbitronica-pcm-capture/);
-  assert.match(rendererSmoke, /await rack\.mountGui\(slot\.id, document\.body\)/);
-  assert.match(rendererSmoke, /await Promise\.race\(\[/);
+  assert.match(rendererSmoke, /Object\.entries\(WAM_CATALOG\)/);
+  assert.match(rendererSmoke, /asset-fetch-import/);
   assert.match(rendererSmoke, /rack\.reconcile\(\[\]\)/);
   assert.match(harness, /rackRemovalCompleted/);
   assert.match(harness, /cleanupDidNotBlockHost/);

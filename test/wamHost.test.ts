@@ -83,6 +83,12 @@ test("trusted catalog preserves identity and non-empty presentation metadata", a
   }
 });
 
+test("catalog data is importable without renderer DOM globals", async () => {
+  const data = await import("../src/renderer/audio/wamCatalogData.ts");
+  assert.deepEqual(data.WAM_CATALOG_DATA.map((entry) => entry.id), ["burns-simple-delay"]);
+  assert.ok(data.WAM_CATALOG_DATA.every((entry) => entry.entry.startsWith("wam/")));
+});
+
 test("catalog typing is generic without widening the literal ID union", () => {
   const catalog = fs.readFileSync(new URL("../src/renderer/audio/wamCatalog.ts", import.meta.url), "utf8");
   assert.match(catalog, /displayName:\s*string/);
