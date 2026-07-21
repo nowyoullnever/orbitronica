@@ -18,6 +18,7 @@ type Props = {
   planets: Planet[];
   waveformPeaks?: Float32Array;
   onSampleTrim: (orbitId: string, start: number, end: number) => void;
+  onSampleTrimPreview?: (orbitId: string, start: number, end: number) => void;
   projectName: string;
   isDirty: boolean;
   hasPlanetClipboard: boolean;
@@ -178,7 +179,8 @@ export function OrbitSettingsPanel(props: Props) {
               start={getSampleStart(orbit)}
               end={getSampleEnd(orbit)}
               color={orbit.color}
-              onChange={(start, end) => props.onSampleTrim(orbit.id, start, end)}
+              onPreview={(start, end) => props.onSampleTrimPreview?.(orbit.id, start, end)}
+              onCommit={(start, end) => props.onSampleTrim(orbit.id, start, end)}
             />
             <div className="effective-values">
               <EditableMetric label="START" value={getSampleStart(orbit)} decimals={2} suffix="sec"

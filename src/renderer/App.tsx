@@ -1307,15 +1307,22 @@ export default function App() {
       orbit={selectedOrbit} planets={planets} projectName={projectName} isDirty={isDirty}
       waveformPeaks={selectedOrbit ? waveformPeaksByOrbit.get(selectedOrbit.id) : undefined}
       onSampleTrim={(orbitId, start, end) => {
-        pushParameterHistory();
-        setOrbits((current) => current.map((orbit) => {
-          if (orbit.id !== orbitId) return orbit;
-          const window = normalizeSampleWindow(orbit.audioDuration, start, end);
-          return { ...orbit, sampleStart: window.start, sampleEnd: window.end };
-        }));
-        // Restart the loop so it reseeks into the new window and playback follows the
-        // sample as the handle drags (syncLoop also restarts on the window change).
-        audioEngine.stopActiveLoopPlaybacksForOrbit(orbitId);
+        const orbit = stateRef.current.orbits.find((item) => item.id === orbitId);
+        if (!orbit) return;
+        const window = normalizeSampleWindow(orbit.audioDuration, start, end);
+        const required = stateRef.current.planets.filter((planet) => planet.orbitId === orbitId && (planet.speed !== 1 || planet.pitchCents));
+        // Two-phase trim commit: keep the document and active sources on their
+        // old window until every requested artifact is render-ready.
+        void Promise.all(required.map((planet) => audioEngine.processPlanetBuffer(
+          orbitId, planet.id, planet.speed, planet.pitchCents, window.start, window.end
+        ))).then(() => {
+          if (stateRef.current.orbits.find((item) => item.id === orbitId) !== orbit) return;
+          pushParameterHistory();
+          setOrbits((current) => current.map((item) => item.id === orbitId
+            ? { ...item, sampleStart: window.start, sampleEnd: window.end }
+            : item));
+          audioEngine.stopActiveLoopPlaybacksForOrbit(orbitId);
+        }).catch(() => flash("Trim processing failed; the previous sample window remains active."));
       }}
       hasPlanetClipboard={clipboard?.type === "planet"}
       onProjectName={(name) => { setProjectName(name); setIsDirty(true); }}

@@ -8,7 +8,8 @@ type Props = {
   start: number;
   end: number;
   color: string;
-  onChange: (start: number, end: number) => void;
+  onPreview: (start: number, end: number) => void;
+  onCommit: (start: number, end: number) => void;
 };
 
 // Dragging a handle sets start/end; dragging elsewhere pans the zoomed view.
@@ -25,15 +26,15 @@ const EDGE_PAN_MAX_PX_PER_FRAME = 10;
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
-export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onChange }: Props) {
+export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onPreview, onCommit }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawRef = useRef<() => void>(() => {});
   const [drag, setDrag] = useState<Drag>(null);
   const [draft, setDraft] = useState(() => normalizeSampleWindow(audioDuration, start, end));
   // Visible time window [start, end] in seconds — the wheel zooms/pans this.
   const [view, setView] = useState(() => ({ start: 0, end: audioDuration || 1 }));
-  const liveRef = useRef({ view, audioDuration, draft, onChange });
-  liveRef.current = { view, audioDuration, draft, onChange };
+  const liveRef = useRef({ view, audioDuration, draft, onPreview });
+  liveRef.current = { view, audioDuration, draft, onPreview };
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const dragRef = useRef<Drag>(null);
@@ -194,8 +195,7 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
       which === "end" ? time : current.end
     );
     setDraft(window);
-    // Commit live so playback (loop volume/length) follows the drag in real time.
-    onChange(window.start, window.end);
+    onPreview(window.start, window.end);
   };
 
   // While a handle is dragged to a viewport edge, scroll the view that way and keep the
@@ -210,7 +210,7 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
     }
     const rect = canvas.getBoundingClientRect();
     const x = pointerX - rect.left;
-    const { view, audioDuration, draft, onChange } = liveRef.current;
+    const { view, audioDuration, draft, onPreview } = liveRef.current;
     const width = view.end - view.start;
     let direction = 0;
     if (x < EDGE_PAN_MARGIN_PX && view.start > 0) direction = -1;
@@ -231,7 +231,7 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
           activeDrag.type === "end" ? time : draft.end
         );
         setDraft(window);
-        onChange(window.start, window.end);
+        onPreview(window.start, window.end);
       }
     }
     autoPanRef.current = requestAnimationFrame(autoPanTick);
@@ -290,7 +290,7 @@ export function SampleTrimEditor({ audioDuration, peaks, start, end, color, onCh
     dragRef.current = null;
     const committed = draftRef.current;
     setDrag(null);
-    if (committed.start !== start || committed.end !== end) onChange(committed.start, committed.end);
+    if (committed.start !== start || committed.end !== end) onCommit(committed.start, committed.end);
   };
 
   return (
