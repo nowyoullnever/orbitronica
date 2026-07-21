@@ -39,6 +39,7 @@ export type ProjectAudioInput = {
 export type StagedProjectAudio = ProjectAudioInput & { buffer: AudioBuffer };
 
 export type RecordedPcm = { channels: Float32Array[]; sampleRate: number };
+type DecodedContent = { hash: string; bytes: Uint8Array; buffer: AudioBuffer };
 
 /** Logical AudioBuffer/encoded-byte residency, deduplicated by object identity where noted. */
 export type AudioMemoryStats = {
@@ -130,6 +131,10 @@ class AudioEngine {
   private static readonly MAX_CONCURRENT_DSP_RENDERS = 1;
   private static readonly PROCESSING_GUARD_FRAMES = 128;
   private rawFiles = new Map<string, { fileName: string; bytes: Uint8Array }>();
+  /** Content-addressed weak registries never retain audio after its orbit owners release it. */
+  private decodedByHash = new Map<string, WeakRef<AudioBuffer>>();
+  private bytesByHash = new Map<string, WeakRef<Uint8Array>>();
+  private pendingDecodeByHash = new Map<string, Promise<DecodedContent>>();
   private orbitRuntimes = new Map<string, OrbitAudioRuntime>();
   private orbitPanValues = new Map<string, number>();
   private readonly wamHost = new WamHost();
@@ -221,32 +226,56 @@ class AudioEngine {
   }
 
   async decodeFile(orbitId: string, file: File, volume = 1) {
-    const context = this.getContext();
     const raw = await file.arrayBuffer();
-    const buffer = await context.decodeAudioData(raw.slice(0));
-    this.rawFiles.set(orbitId, { fileName: file.name, bytes: new Uint8Array(raw) });
-    this.registerBuffer(orbitId, buffer, volume);
-    return buffer;
+    const content = await this.decodeContent(new Uint8Array(raw));
+    this.rawFiles.set(orbitId, { fileName: file.name, bytes: content.bytes });
+    this.registerBuffer(orbitId, content.buffer, volume);
+    return content.buffer;
   }
 
   async decodeBytes(orbitId: string, fileName: string, bytes: Uint8Array, volume = 1) {
-    const copy = new Uint8Array(bytes);
-    const buffer = await this.getContext().decodeAudioData(copy.buffer.slice(0));
-    this.rawFiles.set(orbitId, { fileName, bytes: copy });
-    this.registerBuffer(orbitId, buffer, volume);
-    return buffer;
+    const content = await this.decodeContent(bytes);
+    this.rawFiles.set(orbitId, { fileName, bytes: content.bytes });
+    this.registerBuffer(orbitId, content.buffer, volume);
+    return content.buffer;
   }
 
   /** Decodes a complete candidate project without mutating the live audio graph. */
   async stageProjectAudio(inputs: readonly ProjectAudioInput[]): Promise<StagedProjectAudio[]> {
-    const context = this.getContext();
     const staged: StagedProjectAudio[] = [];
     for (const input of inputs) {
-      const bytes = new Uint8Array(input.bytes);
-      const buffer = await context.decodeAudioData(bytes.buffer.slice(0));
-      staged.push({ ...input, bytes, buffer });
+      const content = await this.decodeContent(input.bytes);
+      staged.push({ ...input, bytes: content.bytes, buffer: content.buffer });
     }
     return staged;
+  }
+
+  private async contentHash(bytes: Uint8Array) {
+    const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer);
+    return `${bytes.byteLength}:${Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("")}`;
+  }
+
+  private async decodeContent(input: Uint8Array): Promise<DecodedContent> {
+    const hash = await this.contentHash(input);
+    const pending = this.pendingDecodeByHash.get(hash);
+    if (pending) return pending;
+    const load = (async () => {
+      let bytes = this.bytesByHash.get(hash)?.deref();
+      if (!bytes) {
+        bytes = new Uint8Array(input);
+        this.bytesByHash.set(hash, new WeakRef(bytes));
+      }
+      let buffer = this.decodedByHash.get(hash)?.deref();
+      if (!buffer) {
+        // decodeAudioData is allowed to detach/mutate its input, never the canonical bytes.
+        buffer = await this.getContext().decodeAudioData(bytes.slice().buffer);
+        this.decodedByHash.set(hash, new WeakRef(buffer));
+      }
+      return { hash, bytes, buffer };
+    })();
+    this.pendingDecodeByHash.set(hash, load);
+    try { return await load; }
+    finally { if (this.pendingDecodeByHash.get(hash) === load) this.pendingDecodeByHash.delete(hash); }
   }
 
   /** Staged bytes are transaction-owned and immutable after staging; install keeps that single owned copy. */

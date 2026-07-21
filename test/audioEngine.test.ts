@@ -137,6 +137,23 @@ test("prunes only audio assets not retained by project history", async () => {
   assert.equal(audioEngine.getProjectAsset("drop"), undefined);
 });
 
+test("identical encoded content shares canonical bytes and decoded buffers across ingestion paths", async () => {
+  const engine = audioEngine as any;
+  const bytes = new Uint8Array([7, 8, 9]);
+  await audioEngine.decodeBytes("dedup-a", "first.wav", bytes);
+  const staged = await audioEngine.stageProjectAudio([{ orbitId: "dedup-b", fileName: "second.wav", bytes: new Uint8Array(bytes), volume: 1, pan: 0 }]);
+  audioEngine.installStagedOrbitAudio(staged[0]);
+  try {
+    assert.equal(engine.buffers.get("dedup-a"), engine.buffers.get("dedup-b"));
+    assert.equal(audioEngine.getProjectAsset("dedup-a")?.bytes, audioEngine.getProjectAsset("dedup-b")?.bytes);
+    assert.equal(audioEngine.getProjectAsset("dedup-a")?.fileName, "first.wav");
+    assert.equal(audioEngine.getProjectAsset("dedup-b")?.fileName, "second.wav");
+  } finally {
+    audioEngine.removeOrbit("dedup-a");
+    audioEngine.removeOrbit("dedup-b");
+  }
+});
+
 test("project audio staging is non-mutating, supports same IDs, and rejects a partial batch atomically", async () => {
   await audioEngine.decodeBytes("same", "old.wav", new Uint8Array([1]));
   await assert.rejects(audioEngine.stageProjectAudio([
