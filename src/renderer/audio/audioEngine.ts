@@ -752,8 +752,12 @@ class AudioEngine {
     }
     if (current) {
       const bufferDuration = current.source.buffer?.duration ?? 0;
-      const windowStart = Math.min(Math.max(sampleStart / speedDivisor, 0), bufferDuration);
-      const windowEnd = Math.min(Math.max(sampleEnd / speedDivisor, windowStart), bufferDuration);
+      const renderWindow = current.processedWindow;
+      const rate = current.source.buffer?.sampleRate ?? 1;
+      const contentStart = renderWindow ? (renderWindow.contentStartFrame - renderWindow.bufferStartFrame) / rate : sampleStart / speedDivisor;
+      const contentEnd = renderWindow ? (renderWindow.contentEndFrame - renderWindow.bufferStartFrame) / rate : sampleEnd / speedDivisor;
+      const windowStart = Math.min(Math.max(contentStart, 0), bufferDuration);
+      const windowEnd = Math.min(Math.max(contentEnd, windowStart), bufferDuration);
       const loopStart = reverse ? bufferDuration - windowEnd : windowStart;
       const loopEnd = reverse ? bufferDuration - windowStart : windowEnd;
       // Restart when the window (or direction) changes so playback reseeks to the sample

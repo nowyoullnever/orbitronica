@@ -498,6 +498,31 @@ test("current playback coordinate parameters are pinned for forward and reverse 
   }
 });
 
+test("guarded trim playback maps absolute audio time into the physical buffer once", async () => {
+  await audioEngine.resume();
+  const engine = audioEngine as any;
+  const orbitId = "guarded-coordinate-orbit";
+  const planetId = "guarded-coordinate-planet";
+  engine.buffers.set(orbitId, new FakeAudioBuffer(1, 10_000, 1000));
+  engine.orbitRuntimes.set(orbitId, { input: new FakeNode(), panNode: { input: new FakeNode(), output: new FakeNode(), disconnect() {} }, gainNode: new FakeGain() });
+  const key = engine.processedBufferKey(orbitId, planetId, 1.25, 100, 2, 5);
+  engine.processedBuffers.set(key, new FakeAudioBuffer(1, 2656, 1000));
+  engine.processedWindows.set(key, { sourceStartFrame: 2000, sourceEndFrame: 5000, contentStartFrame: 1600, contentEndFrame: 4000, bufferStartFrame: 1472, bufferEndFrame: 4128, fullOutputLength: 8000 });
+  createdSources.length = 0;
+  try {
+    audioEngine.syncLoop(orbitId, planetId, "guarded", true, 3, 1, 0, 1, 1.25, 100, false, 2, 5);
+    const source = createdSources.at(-1)!;
+    assert.equal(source.starts.length, 1);
+    assert.equal(source.starts[0].when, 0);
+    assert.equal(source.starts[0].duration, undefined);
+    assert.ok(Math.abs(source.starts[0].offset - .928) < 1e-12);
+    assert.equal(source.loopStart, .128);
+    assert.equal(source.loopEnd, 2.528);
+    audioEngine.syncLoop(orbitId, planetId, "guarded", true, 3.1, 1, 0, 1, 1.25, 100, false, 2, 5);
+    assert.equal(createdSources.length, 1, "unchanged guarded loop bounds must not restart every transport tick");
+  } finally { audioEngine.removeOrbit(orbitId); createdSources.length = 0; }
+});
+
 test("nearby speeds no longer share a rounded cache key or silently play the original on a miss", async () => {
   await audioEngine.resume();
   const engine = audioEngine as any;
