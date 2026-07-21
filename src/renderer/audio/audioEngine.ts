@@ -15,6 +15,7 @@ type ActivePlayback = {
   planetPanNode: FLStylePanNode;
   mode: "loop" | "sequence";
   isReverse: boolean;
+  processedWindow?: ProcessingWindow;
   loopWindowStart?: number;
   loopWindowEnd?: number;
 };
@@ -56,6 +57,16 @@ type PlaybackBufferResolution =
   | { status: "ready"; buffer: AudioBuffer; key: string; usingProcessedBuffer: boolean }
   | { status: "pending"; cacheKey: string }
   | { status: "missing-original" };
+
+export type ProcessingWindow = {
+  sourceStartFrame: number;
+  sourceEndFrame: number;
+  contentStartFrame: number;
+  contentEndFrame: number;
+  bufferStartFrame: number;
+  bufferEndFrame: number;
+  fullOutputLength: number;
+};
 
 type RecordingSession = {
   id: number;
@@ -102,6 +113,8 @@ class AudioEngine {
   private waveformListeners = new Set<WaveformListener>();
   private readonly waveformResolution = 1024;
   private processedBuffers = new Map<string, AudioBuffer>();
+  /** Physical cache buffers are guarded; this preserves their logical output coordinates. */
+  private processedWindows = new Map<string, ProcessingWindow>();
   private reverseBuffers = new Map<string, AudioBuffer>();
   /** One render per exact cache key; all callers share its completion. */
   private processingPromises = new Map<string, Promise<void>>();
@@ -115,6 +128,7 @@ class AudioEngine {
   // (including looping) playback is never evicted regardless of recency.
   private static readonly PROCESSED_BUFFER_CACHE_CAP = 64;
   private static readonly MAX_CONCURRENT_DSP_RENDERS = 1;
+  private static readonly PROCESSING_GUARD_FRAMES = 128;
   private rawFiles = new Map<string, { fileName: string; bytes: Uint8Array }>();
   private orbitRuntimes = new Map<string, OrbitAudioRuntime>();
   private orbitPanValues = new Map<string, number>();
@@ -506,15 +520,34 @@ class AudioEngine {
     return Math.abs(this.normalizedSpeed(speed) - 1) > .0001;
   }
 
-  private processedBufferKey(orbitId: string, planetId: string, speed: number, pitchCents: number) {
+  private processingWindow(orbitId: string, speed: number, sampleStart = 0, sampleEnd = Infinity): ProcessingWindow {
+    const original = this.buffers.get(orbitId);
+    if (!original) throw new Error("Audio buffer is unavailable.");
+    const rate = original.sampleRate;
+    const sourceStartFrame = Math.min(original.length, Math.max(0, Math.floor((Number.isFinite(sampleStart) ? sampleStart : 0) * rate)));
+    const requestedEnd = Number.isFinite(sampleEnd) ? sampleEnd : original.duration;
+    const sourceEndFrame = Math.min(original.length, Math.max(sourceStartFrame, Math.ceil(requestedEnd * rate)));
+    const normalizedSpeed = this.normalizedSpeed(speed);
+    const fullOutputLength = Math.max(1, Math.ceil(original.length / normalizedSpeed));
+    const contentStartFrame = Math.min(fullOutputLength, Math.max(0, Math.floor(sourceStartFrame / normalizedSpeed)));
+    const contentEndFrame = Math.min(fullOutputLength, Math.max(contentStartFrame, Math.ceil(sourceEndFrame / normalizedSpeed)));
+    return {
+      sourceStartFrame, sourceEndFrame, contentStartFrame, contentEndFrame, fullOutputLength,
+      bufferStartFrame: Math.max(0, contentStartFrame - AudioEngine.PROCESSING_GUARD_FRAMES),
+      bufferEndFrame: Math.min(fullOutputLength, contentEndFrame + AudioEngine.PROCESSING_GUARD_FRAMES)
+    };
+  }
+
+  private processedBufferKey(orbitId: string, planetId: string, speed: number, pitchCents: number, sampleStart = 0, sampleEnd = Infinity) {
     // The cache identity must describe exactly the speed given to SoundTouch.
     // Number#toString round-trips IEEE-754 values while avoiding a UI-formatting
     // change in the DSP path.
-    return `${orbitId}:${planetId}:speed=${this.normalizedSpeed(speed).toString()}:pitch=${Math.round(pitchCents)}`;
+    const window = this.processingWindow(orbitId, speed, sampleStart, sampleEnd);
+    return `${orbitId}:${planetId}:speed=${this.normalizedSpeed(speed).toString()}:pitch=${Math.round(pitchCents)}:${window.sourceStartFrame}~${window.sourceEndFrame}`;
   }
 
   private clearOrbitProcessedCaches(orbitId: string) {
-    for (const key of [...this.processedBuffers.keys()]) if (key.startsWith(`${orbitId}:`)) this.processedBuffers.delete(key);
+    for (const key of [...this.processedBuffers.keys()]) if (key.startsWith(`${orbitId}:`)) { this.processedBuffers.delete(key); this.processedWindows.delete(key); }
     for (const key of [...this.reverseBuffers.keys()]) if (key.startsWith(`${orbitId}:`)) this.reverseBuffers.delete(key);
   }
 
@@ -563,10 +596,11 @@ class AudioEngine {
       if (candidateKey === key) continue;
       if (protectedBuffers.has(candidateValue)) continue;
       cache.delete(candidateKey);
+      if (cache === this.processedBuffers) this.processedWindows.delete(candidateKey);
     }
   }
 
-  private getPlaybackBuffer(orbitId: string, planetId: string, speed: number, pitchCents: number): PlaybackBufferResolution {
+  private getPlaybackBuffer(orbitId: string, planetId: string, speed: number, pitchCents: number, sampleStart = 0, sampleEnd = Infinity): PlaybackBufferResolution {
     const original = this.buffers.get(orbitId);
     if (!original) return { status: "missing-original" };
     const normalizedSpeed = this.normalizedSpeed(speed);
@@ -579,7 +613,7 @@ class AudioEngine {
         usingProcessedBuffer: false
       };
     }
-    const key = this.processedBufferKey(orbitId, planetId, normalizedSpeed, roundedPitch);
+    const key = this.processedBufferKey(orbitId, planetId, normalizedSpeed, roundedPitch, sampleStart, sampleEnd);
     const processed = this.touchCachedBuffer(this.processedBuffers, key);
     if (processed) return { status: "ready", buffer: processed, key, usingProcessedBuffer: true };
     // Playing the original here silently discards requested speed/pitch. The
@@ -590,10 +624,10 @@ class AudioEngine {
   private createPlayback(
     id: string, orbitId: string, planetId: string, barId: string,
     mode: "loop" | "sequence", planetVolume: number, planetAudioPan: number, tapeRate = 1,
-    userSpeed = 1, pitchCents = 0, reverse = false
+    userSpeed = 1, pitchCents = 0, reverse = false, sampleStart = 0, sampleEnd = Infinity
   ) {
     const context = this.getContext();
-    const resolved = this.getPlaybackBuffer(orbitId, planetId, userSpeed, pitchCents);
+    const resolved = this.getPlaybackBuffer(orbitId, planetId, userSpeed, pitchCents, sampleStart, sampleEnd);
     const orbitRuntime = this.orbitRuntimes.get(orbitId);
     if (resolved.status !== "ready" || !orbitRuntime) return null;
     let playbackBuffer = resolved.buffer;
@@ -613,7 +647,8 @@ class AudioEngine {
     planetPanNode.output.connect(planetGain);
     planetGain.connect(orbitRuntime.input);
     const playback: ActivePlayback = {
-      id, orbitId, planetId, barId, source, planetGainNode: planetGain, planetPanNode, mode, isReverse: reverse
+      id, orbitId, planetId, barId, source, planetGainNode: planetGain, planetPanNode, mode, isReverse: reverse,
+      processedWindow: resolved.usingProcessedBuffer ? this.processedWindows.get(resolved.key) : undefined
     };
     this.active.set(id, playback);
     source.onended = () => {
@@ -674,20 +709,24 @@ class AudioEngine {
     }
     const created = this.createPlayback(
       key, orbitId, planetId, barId, "loop", planetVolume, planetAudioPan,
-      tapeRate, userSpeed, pitchCents, reverse
+      tapeRate, userSpeed, pitchCents, reverse, sampleStart, sampleEnd
     );
     if (!created) return;
     // Match commit 3e8ee22 exactly when the user speed is unchanged:
     // the loop bar maps directly to the original audio timeline.
-    const processedOffset = audioTime / speedDivisor;
-    const mappedTime = reverse ? created.buffer.duration - processedOffset : processedOffset;
-    const safeOffset = Math.min(Math.max(mappedTime, 0), Math.max(0, created.buffer.duration - .001));
     // Bound playback to the trimmed window so only that slice repeats instead of the
     // audio running past sampleEnd into the rest of the sample. As the planet wraps
     // past angle 0, the native loop wraps sampleEnd -> sampleStart in step.
     const bufferDuration = created.buffer.duration;
-    const windowStart = Math.min(Math.max(sampleStart / speedDivisor, 0), bufferDuration);
-    const windowEnd = Math.min(Math.max(sampleEnd / speedDivisor, windowStart), bufferDuration);
+    const renderWindow = created.playback.processedWindow;
+    const localBase = renderWindow ? renderWindow.bufferStartFrame / created.buffer.sampleRate : 0;
+    const contentStart = renderWindow ? (renderWindow.contentStartFrame - renderWindow.bufferStartFrame) / created.buffer.sampleRate : sampleStart / speedDivisor;
+    const contentEnd = renderWindow ? (renderWindow.contentEndFrame - renderWindow.bufferStartFrame) / created.buffer.sampleRate : sampleEnd / speedDivisor;
+    const windowStart = Math.min(Math.max(contentStart, 0), bufferDuration);
+    const windowEnd = Math.min(Math.max(contentEnd, windowStart), bufferDuration);
+    const localAbsolute = audioTime / speedDivisor - localBase;
+    const mappedTime = reverse ? bufferDuration - localAbsolute : localAbsolute;
+    const safeOffset = Math.min(Math.max(mappedTime, 0), Math.max(0, created.buffer.duration - .001));
     const loopStart = reverse ? bufferDuration - windowEnd : windowStart;
     const loopEnd = reverse ? bufferDuration - windowStart : windowEnd;
     if (loopEnd - loopStart > .001) {
@@ -710,14 +749,16 @@ class AudioEngine {
     const id = `sequence:${planetId}:${barId}:${crypto.randomUUID()}`;
     const created = this.createPlayback(
       id, orbitId, planetId, barId, "sequence", planetVolume, planetAudioPan,
-      tapeRate, 1, pitchCents, reverse
+      tapeRate, 1, pitchCents, reverse, sampleStart, sampleEnd
     );
     if (created) {
       // Play only the trimmed window. Pitch shifting preserves length, so the
       // sample-time bounds map straight onto the (possibly reversed) buffer.
       const bufferDuration = created.buffer.duration;
-      const start = Math.min(Math.max(sampleStart, 0), bufferDuration);
-      const end = Math.min(Math.max(sampleEnd, start), bufferDuration);
+      const renderWindow = created.playback.processedWindow;
+      const localBase = renderWindow ? renderWindow.bufferStartFrame / created.buffer.sampleRate : 0;
+      const start = Math.min(Math.max(sampleStart - localBase, 0), bufferDuration);
+      const end = Math.min(Math.max(sampleEnd - localBase, start), bufferDuration);
       const duration = Math.max(0.001, end - start);
       const offset = reverse ? Math.max(0, bufferDuration - end) : start;
       created.playback.source.start(created.context.currentTime, offset, duration);
@@ -800,29 +841,30 @@ class AudioEngine {
     }
   }
 
-  hasProcessedBuffer(orbitId: string, planetId: string, speed: number, pitchCents: number) {
+  hasProcessedBuffer(orbitId: string, planetId: string, speed: number, pitchCents: number, sampleStart = 0, sampleEnd = Infinity) {
     const normalizedSpeed = this.normalizedSpeed(speed);
     const roundedPitch = Math.round(pitchCents);
     return (Math.abs(normalizedSpeed - 1) < .0001 && roundedPitch === 0) ||
-      this.processedBuffers.has(this.processedBufferKey(orbitId, planetId, normalizedSpeed, roundedPitch));
+      this.processedBuffers.has(this.processedBufferKey(orbitId, planetId, normalizedSpeed, roundedPitch, sampleStart, sampleEnd));
   }
 
   hasPitchBuffer(orbitId: string, planetId: string, pitchCents: number) {
     return this.hasProcessedBuffer(orbitId, planetId, 1, pitchCents);
   }
 
-  async processPitchBuffer(orbitId: string, planetId: string, pitchCents: number) {
-    return this.processPlanetBuffer(orbitId, planetId, 1, pitchCents);
+  async processPitchBuffer(orbitId: string, planetId: string, pitchCents: number, sampleStart = 0, sampleEnd = Infinity) {
+    return this.processPlanetBuffer(orbitId, planetId, 1, pitchCents, sampleStart, sampleEnd);
   }
 
-  async processPlanetBuffer(orbitId: string, planetId: string, speed: number, pitchCents: number) {
+  async processPlanetBuffer(orbitId: string, planetId: string, speed: number, pitchCents: number, sampleStart = 0, sampleEnd = Infinity) {
     const normalizedSpeed = this.normalizedSpeed(speed);
     const roundedPitch = Math.round(pitchCents);
-    if (this.hasProcessedBuffer(orbitId, planetId, normalizedSpeed, roundedPitch)) return;
-    const key = this.processedBufferKey(orbitId, planetId, normalizedSpeed, roundedPitch);
+    if (this.hasProcessedBuffer(orbitId, planetId, normalizedSpeed, roundedPitch, sampleStart, sampleEnd)) return;
+    const window = this.processingWindow(orbitId, normalizedSpeed, sampleStart, sampleEnd);
+    const key = this.processedBufferKey(orbitId, planetId, normalizedSpeed, roundedPitch, sampleStart, sampleEnd);
     const inFlight = this.processingPromises.get(key);
     if (inFlight) return inFlight;
-    const scheduled = this.scheduleDspRender(() => this.renderPlanetBuffer(key, orbitId, normalizedSpeed, roundedPitch));
+    const scheduled = this.scheduleDspRender(() => this.renderPlanetBuffer(key, orbitId, normalizedSpeed, roundedPitch, window));
     this.processingPromises.set(key, scheduled);
     try {
       await scheduled;
@@ -831,7 +873,7 @@ class AudioEngine {
     }
   }
 
-  private async renderPlanetBuffer(key: string, orbitId: string, normalizedSpeed: number, roundedPitch: number) {
+  private async renderPlanetBuffer(key: string, orbitId: string, normalizedSpeed: number, roundedPitch: number, renderWindow: ProcessingWindow) {
     const original = this.buffers.get(orbitId);
     if (!original) throw new Error("Audio buffer is unavailable.");
 
@@ -886,7 +928,16 @@ class AudioEngine {
         for (let index = 0; index < samples.length; index++) samples[index] *= scale;
       }
     }
-    this.cacheProcessedBuffer(this.processedBuffers, key, output);
+    // Keep only the guarded physical window. Full rendering remains necessary
+    // for SoundTouch state and global peak normalization, but it is transient.
+    const physical = this.getContext().createBuffer(
+      output.numberOfChannels, renderWindow.bufferEndFrame - renderWindow.bufferStartFrame, output.sampleRate
+    );
+    for (let channel = 0; channel < output.numberOfChannels; channel++) {
+      physical.copyToChannel(output.getChannelData(channel).subarray(renderWindow.bufferStartFrame, renderWindow.bufferEndFrame), channel);
+    }
+    this.cacheProcessedBuffer(this.processedBuffers, key, physical);
+    this.processedWindows.set(key, renderWindow);
   }
 
   private async loadRecordingProcessor(context: AudioContext) {
@@ -1025,7 +1076,7 @@ class AudioEngine {
     this.waveformPeaks.delete(orbitId);
     this.publishWaveformPeaks(orbitId, null);
     for (const key of [...this.processedBuffers.keys()]) {
-      if (key.startsWith(`${orbitId}:`)) this.processedBuffers.delete(key);
+      if (key.startsWith(`${orbitId}:`)) { this.processedBuffers.delete(key); this.processedWindows.delete(key); }
     }
     for (const key of [...this.reverseBuffers.keys()]) {
       if (key.startsWith(`${orbitId}:`)) this.reverseBuffers.delete(key);

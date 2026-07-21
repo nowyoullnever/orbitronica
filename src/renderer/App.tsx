@@ -406,7 +406,9 @@ export default function App() {
       }
       for (const planet of duplicate.planets) {
         if (planet.speed !== 1 || planet.pitchCents) {
-          void audioEngine.processPlanetBuffer(planet.orbitId, planet.id, planet.speed, planet.pitchCents);
+          const orbit = duplicate.orbits.find((item) => item.id === planet.orbitId);
+          void audioEngine.processPlanetBuffer(planet.orbitId, planet.id, planet.speed, planet.pitchCents,
+            orbit ? getSampleStart(orbit) : 0, orbit ? getSampleEnd(orbit) : Infinity);
         }
       }
     } catch (error) {
@@ -620,7 +622,8 @@ export default function App() {
     reconcileOrbitPlugins(duplicate);
     for (const planet of copiedPlanets) {
       if (planet.speed !== 1 || planet.pitchCents) {
-        void audioEngine.processPlanetBuffer(newOrbitId, planet.id, planet.speed, planet.pitchCents);
+        void audioEngine.processPlanetBuffer(newOrbitId, planet.id, planet.speed, planet.pitchCents,
+          getSampleStart(duplicate), getSampleEnd(duplicate));
       }
     }
   }
@@ -680,8 +683,10 @@ export default function App() {
     setPlanets((current) => [...current, newPlanet]);
     selectSingle({ orbitId: targetId, planetId, barId: null });
     if (newPlanet.speed !== 1 || newPlanet.pitchCents) {
+      const targetOrbit = stateRef.current.orbits.find((orbit) => orbit.id === newPlanet.orbitId);
       void audioEngine.processPlanetBuffer(
-        newPlanet.orbitId, newPlanet.id, newPlanet.speed, newPlanet.pitchCents
+        newPlanet.orbitId, newPlanet.id, newPlanet.speed, newPlanet.pitchCents,
+        targetOrbit ? getSampleStart(targetOrbit) : 0, targetOrbit ? getSampleEnd(targetOrbit) : Infinity
       ).catch(() => flash("Pasted planet audio processing failed."));
     }
     flash("Planet pasted.");
@@ -896,7 +901,9 @@ export default function App() {
           else flash("Project loaded.");
           for (const scene of restoredScenes) for (const planet of scene.planets) {
             if (planet.speed !== 1 || planet.pitchCents) {
-              void audioEngine.processPlanetBuffer(planet.orbitId, planet.id, planet.speed, planet.pitchCents);
+              const orbit = scene.orbits.find((item) => item.id === planet.orbitId);
+              void audioEngine.processPlanetBuffer(planet.orbitId, planet.id, planet.speed, planet.pitchCents,
+                orbit ? getSampleStart(orbit) : 0, orbit ? getSampleEnd(orbit) : Infinity);
             }
           }
         }

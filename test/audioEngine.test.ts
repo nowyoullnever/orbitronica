@@ -364,6 +364,9 @@ function clearOrbitProcessedBuffers(engine: any, ...orbitIds: string[]) {
       if (orbitIds.some((orbitId) => key.startsWith(`${orbitId}:`))) engine[cacheName].delete(key);
     }
   }
+  for (const key of [...engine.processedWindows.keys()]) {
+    if (orbitIds.some((orbitId) => key.startsWith(`${orbitId}:`))) engine.processedWindows.delete(key);
+  }
   for (const orbitId of orbitIds) engine.buffers.delete(orbitId);
 }
 
@@ -433,7 +436,7 @@ test("current playback coordinate parameters are pinned for forward and reverse 
   engine.buffers.set(orbitId, buffer);
   // P0 pins the legacy coordinate math; P1a correctly requires a non-neutral
   // rendered buffer rather than silently falling back to this original source.
-  engine.processedBuffers.set(engine.processedBufferKey(orbitId, planetId, 1.25, 0), buffer);
+  engine.processedBuffers.set(engine.processedBufferKey(orbitId, planetId, 1.25, 0, 2, 5), buffer);
   engine.orbitRuntimes.set(orbitId, { input: new FakeNode(), panNode: { input: new FakeNode(), output: new FakeNode(), disconnect() {} }, gainNode: new FakeGain() });
   createdSources.length = 0;
   try {
@@ -518,6 +521,41 @@ test("concurrent requests for one processed tuple share one scheduled render", a
     assert.equal(renders, 1);
   } finally {
     engine.renderPlanetBuffer = originalRender;
+    clearOrbitProcessedBuffers(engine, orbitId);
+  }
+});
+
+test("trim-window processing retains guarded physical PCM whose logical content matches the full render slice", async () => {
+  await audioEngine.resume();
+  const engine = audioEngine as any;
+  const orbitId = "trim-window-orbit";
+  const planetId = "trim-window-planet";
+  const source = new FakeAudioBuffer(2, 10_000, 1000);
+  for (let channel = 0; channel < 2; channel++) for (let frame = 0; frame < source.length; frame++) {
+    source.getChannelData(channel)[frame] = Math.sin((frame + channel * 13) / 17) * .4;
+  }
+  engine.buffers.set(orbitId, source);
+  try {
+    await audioEngine.processPlanetBuffer(orbitId, planetId, 1.25, 200);
+    const fullKey = engine.processedBufferKey(orbitId, planetId, 1.25, 200);
+    const full = engine.processedBuffers.get(fullKey)!;
+    await audioEngine.processPlanetBuffer(orbitId, planetId, 1.25, 200, 2, 5);
+    const key = engine.processedBufferKey(orbitId, planetId, 1.25, 200, 2, 5);
+    const trimmed = engine.processedBuffers.get(key)!;
+    const window = engine.processedWindows.get(key);
+    assert.deepEqual(window, {
+      sourceStartFrame: 2000, sourceEndFrame: 5000,
+      contentStartFrame: 1600, contentEndFrame: 4000,
+      bufferStartFrame: 1472, bufferEndFrame: 4128, fullOutputLength: 8000
+    });
+    assert.equal(trimmed.length, 2656);
+    for (let channel = 0; channel < 2; channel++) {
+      assert.deepEqual(
+        Array.from(trimmed.getChannelData(channel).subarray(128, 2528)),
+        Array.from(full.getChannelData(channel).subarray(1600, 4000))
+      );
+    }
+  } finally {
     clearOrbitProcessedBuffers(engine, orbitId);
   }
 });
