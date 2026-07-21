@@ -13,11 +13,31 @@ type ActivePlayback = {
   source: AudioBufferSourceNode;
   planetGainNode: GainNode;
   planetPanNode: FLStylePanNode;
+  planetAudioPan: number;
   mode: "loop" | "sequence";
   isReverse: boolean;
   processedWindow?: ProcessingWindow;
   loopWindowStart?: number;
   loopWindowEnd?: number;
+  playbackPhaseOffset?: number;
+  playbackPhaseAt?: number;
+};
+
+type ActiveLoopSnapshot = {
+  readonly id: string;
+  readonly orbitId: string;
+  readonly planetId: string;
+  readonly barId: string;
+  readonly buffer: AudioBuffer;
+  readonly planetVolume: number;
+  readonly planetAudioPan: number;
+  readonly tapeRate: number;
+  readonly isReverse: boolean;
+  readonly processedWindow?: ProcessingWindow;
+  readonly loop: boolean;
+  readonly loopStart: number;
+  readonly loopEnd: number;
+  readonly resumeOffset: number;
 };
 
 type OrbitAudioRuntime = {
@@ -55,8 +75,40 @@ export type AudioMemoryStats = {
   coldPcmBytes: number;
 };
 
+export type AudioCacheDiagnostics = {
+  readonly sourceGenerations: Readonly<Record<string, number>>;
+  readonly processedKeys: readonly string[];
+  readonly reverseKeys: readonly string[];
+  readonly coldKeys: readonly string[];
+  readonly dspScheduler: {
+    readonly renderAttempts: number;
+    readonly restartedFrames: number;
+  };
+  readonly cache: {
+    readonly pcm16Enabled: boolean;
+    readonly hotBytes: number;
+    readonly hotEntries: number;
+    readonly hotByteBudget: number;
+    readonly hotEntryBudget: number;
+    readonly protectedHotOverageBytes: number;
+    readonly protectedHotOverageEntries: number;
+    readonly coldBytes: number;
+    readonly coldEntries: number;
+    readonly coldByteBudget: number;
+    readonly coldEntryBudget: number;
+  };
+};
+
+export type CachePolicy = {
+  readonly pcm16Enabled: boolean;
+  readonly hotByteBudget: number;
+  readonly hotEntryBudget: number;
+  readonly coldByteBudget: number;
+  readonly coldEntryBudget: number;
+};
+
 type PlaybackBufferResolution =
-  | { status: "ready"; buffer: AudioBuffer; key: string; usingProcessedBuffer: boolean }
+  | { status: "ready"; buffer: AudioBuffer; key: string; usingProcessedBuffer: boolean; descriptor: ProcessedBufferDescriptor }
   | { status: "pending"; cacheKey: string }
   | { status: "missing-original" };
 
@@ -68,6 +120,106 @@ export type ProcessingWindow = {
   bufferStartFrame: number;
   bufferEndFrame: number;
   fullOutputLength: number;
+};
+
+export type ProcessedBufferRequest = {
+  readonly orbitId: string;
+  readonly planetId: string;
+  readonly speed: number;
+  readonly pitchCents: number;
+  readonly sampleStart: number;
+  readonly sampleEnd: number;
+  readonly direction: "forward" | "reverse";
+};
+
+export type DspRenderPriority = "playback" | "selected" | "background";
+
+export type EnsureProcessedBufferOptions = {
+  readonly ownerId: string;
+  readonly priority?: DspRenderPriority;
+  readonly signal?: AbortSignal;
+};
+
+export type PlaybackRenderScope = {
+  readonly ownerId: string;
+  readonly signal?: AbortSignal;
+};
+
+type SourceLease = {
+  readonly orbitId: string;
+  readonly generation: number;
+  readonly buffer: AudioBuffer;
+};
+
+type ProcessedBufferDescriptor = {
+  readonly request: ProcessedBufferRequest;
+  readonly lease: SourceLease;
+  readonly window: ProcessingWindow;
+  readonly key: string;
+};
+
+type DspConsumer = {
+  readonly ownerId: string;
+  readonly promise: Promise<void>;
+  readonly resolve: () => void;
+  readonly reject: (reason: unknown) => void;
+  priority: DspRenderPriority;
+  readonly signal?: AbortSignal;
+  abortListener?: () => void;
+};
+
+type DspJob = {
+  readonly key: string;
+  readonly enqueueSequence: number;
+  readonly descriptor: ProcessedBufferDescriptor;
+  readonly consumers: Map<string, DspConsumer>;
+  state: "queued" | "running" | "finished";
+  priority: DspRenderPriority;
+  cancelRequested: boolean;
+  preemptRequested: boolean;
+  sourceInvalidated: boolean;
+  reverseRequested: boolean;
+};
+
+class DspRenderPreemptedError extends Error {
+  constructor() {
+    super("DSP render was preempted by higher-priority work.");
+    this.name = "DspRenderPreemptedError";
+  }
+}
+
+type CacheEntry = {
+  readonly request: ProcessedBufferRequest;
+  readonly lease: SourceLease;
+  readonly window: ProcessingWindow;
+  readonly direction: "forward" | "reverse";
+  readonly byteLength: number;
+};
+
+type CachedAudioEntry = {
+  readonly buffer: AudioBuffer;
+  readonly entry: CacheEntry;
+};
+
+type CachedColdEntry = {
+  readonly pcm: ColdPcm16;
+  readonly entry: CacheEntry;
+};
+
+type ResidencyEntry = {
+  readonly key: string;
+  readonly lease: SourceLease;
+  readonly request: ProcessedBufferRequest;
+};
+
+type AcquiredResidency = {
+  readonly ownerId: string;
+  readonly entries: Map<string, ResidencyEntry>;
+};
+
+type ResidencySnapshot = {
+  readonly permanent: ReadonlyMap<string, readonly ProcessedBufferRequest[]>;
+  readonly acquired: ReadonlyMap<number, { readonly ownerId: string; readonly requests: readonly ProcessedBufferRequest[] }>;
 };
 
 type RecordingSession = {
@@ -108,22 +260,39 @@ registerProcessor("orbitronica-pcm-capture", OrbitronicaPcmCapture);`;
 const recorderProcessorAssetUrl = new URL("./recorder-processor.js", import.meta.url).toString();
 
 class AudioEngine {
+  private static nextSourceGeneration = 0;
   private context: AudioContext | null = null;
   private buffers = new Map<string, AudioBuffer>();
+  private sourceLeases = new Map<string, SourceLease>();
   private waveformPeaks = new Map<string, Float32Array>();
   private waveformPeakPromises = new WeakMap<AudioBuffer, Promise<Float32Array>>();
   private waveformListeners = new Set<WaveformListener>();
   private readonly waveformResolution = 1024;
   private processedBuffers = new Map<string, AudioBuffer>();
   private coldProcessedBuffers = new Map<string, ColdPcm16>();
+  private processedEntries = new Map<string, CacheEntry>();
+  private coldProcessedEntries = new Map<string, CacheEntry>();
+  private reverseEntries = new Map<string, CacheEntry>();
+  private permanentResidencies = new Map<string, Map<string, ResidencyEntry>>();
+  private acquiredResidencies = new Map<number, AcquiredResidency>();
+  private nextResidencyLease = 0;
   /** Startup-only opt-in; production defaults to Float32 cache behavior. */
   private readonly pcm16ColdCacheEnabled = new URLSearchParams(globalThis.location?.search ?? "").get("pcm16ColdCache") === "1";
+  private cachePolicyOverride: CachePolicy | undefined;
+  private hotRecency = new Map<string, "forward" | "reverse">();
   /** Physical cache buffers are guarded; this preserves their logical output coordinates. */
   private processedWindows = new Map<string, ProcessingWindow>();
   private reverseBuffers = new Map<string, AudioBuffer>();
-  /** One render per exact cache key; all callers share its completion. */
-  private processingPromises = new Map<string, Promise<void>>();
-  private dspRenderQueue: Array<() => void> = [];
+  private dspJobs = new Map<string, DspJob>();
+  private dspJobsByOwner = new Map<string, string>();
+  private dspRenderQueues: Record<DspRenderPriority, DspJob[]> = {
+    playback: [], selected: [], background: []
+  };
+  private terminalDspPriority: DspRenderPriority | null = null;
+  private consecutiveTerminalDspJobs = 0;
+  private nextDspJobSequence = 0;
+  private dspRenderAttempts = 0;
+  private dspRestartedFrames = 0;
   private activeDspRenders = 0;
   // Each entry is a fully decoded AudioBuffer (often several MB for a long sample), and a
   // new entry is produced per distinct (speed, pitch) tuple as the user sweeps those
@@ -132,8 +301,12 @@ class AudioEngine {
   // requests. Eviction is least-recently-used, and a buffer currently backing an active
   // (including looping) playback is never evicted regardless of recency.
   private static readonly PROCESSED_BUFFER_CACHE_CAP = 64;
-  private static readonly PCM16_HOT_BUFFER_CACHE_CAP = 8;
+  private static readonly PCM16_HOT_BYTE_BUDGET = 64 * 1024 * 1024;
+  private static readonly PCM16_HOT_ENTRY_BUDGET = 64;
+  private static readonly PCM16_COLD_BYTE_BUDGET = 128 * 1024 * 1024;
+  private static readonly PCM16_COLD_ENTRY_BUDGET = 128;
   private static readonly MAX_CONCURRENT_DSP_RENDERS = 1;
+  private static readonly HIGHER_PRIORITY_TERMINAL_DISPATCH_BUDGET = 8;
   private static readonly PROCESSING_GUARD_FRAMES = 128;
   private rawFiles = new Map<string, { fileName: string; bytes: Uint8Array }>();
   /** Content-addressed weak registries never retain audio after its orbit owners release it. */
@@ -307,8 +480,11 @@ class AudioEngine {
       volume: this.orbitRuntimes.get(orbitId)?.gainNode.gain.value ?? 1,
       pan: this.orbitPanValues.get(orbitId) ?? 0
     }));
-    const oldProcessed = new Map(this.processedBuffers);
-    const oldReverse = new Map(this.reverseBuffers);
+    const oldProcessed = this.snapshotCachedAudioEntries(this.processedBuffers, this.processedEntries);
+    const oldCold = this.snapshotCachedColdEntries();
+    const oldReverse = this.snapshotCachedAudioEntries(this.reverseBuffers, this.reverseEntries);
+    const oldResidencies = this.snapshotResidencies();
+    const oldActiveLoops = this.snapshotActiveLoops();
     const clear = () => {
       const ids = new Set([...this.buffers.keys(), ...this.rawFiles.keys(), ...this.orbitRuntimes.keys()]);
       ids.forEach((id) => this.removeOrbit(id));
@@ -327,15 +503,23 @@ class AudioEngine {
         this.registerBuffer(item.orbitId, item.buffer, item.volume);
         this.setOrbitAudioPan(item.orbitId, item.pan);
       }
-      this.processedBuffers = oldProcessed;
-      this.reverseBuffers = oldReverse;
+      this.restoreResidencies(oldResidencies);
+      this.restoreCachedEntries(oldProcessed, oldCold, oldReverse);
+      this.restoreActiveLoops(oldActiveLoops);
+      this.enforceCachePolicies();
       throw error;
     }
   }
 
   private registerBuffer(orbitId: string, buffer: AudioBuffer, volume: number) {
     const context = this.getContext();
-    // A replacement source must never reuse DSP rendered from the old source.
+    this.invalidateDspJobsForOrbit(orbitId);
+    this.sourceLeases.set(orbitId, {
+      orbitId,
+      generation: ++AudioEngine.nextSourceGeneration,
+      buffer
+    });
+    this.clearOrbitResidencies(orbitId);
     this.clearOrbitProcessedCaches(orbitId);
     this.buffers.set(orbitId, buffer);
     this.waveformPeaks.delete(orbitId);
@@ -404,6 +588,79 @@ class AudioEngine {
       activeOnlyUniqueBytes: sumUnique(activeOnly, audioBufferBytes),
       totalUniqueFloatBytes: sumUnique([...originals, ...processed, ...reversed, ...active], audioBufferBytes),
       coldPcmBytes: [...this.coldProcessedBuffers.values()].reduce((total, entry) => total + entry.channels.reduce((sum, channel) => sum + channel.byteLength, 0), 0)
+    };
+  }
+
+  private setCachePolicyForTesting(policy?: Partial<CachePolicy>) {
+    if (!policy) {
+      this.cachePolicyOverride = undefined;
+    } else {
+      const base = this.cachePolicy();
+      this.cachePolicyOverride = {
+        pcm16Enabled: policy.pcm16Enabled ?? base.pcm16Enabled,
+        hotByteBudget: policy.hotByteBudget ?? base.hotByteBudget,
+        hotEntryBudget: policy.hotEntryBudget ?? base.hotEntryBudget,
+        coldByteBudget: policy.coldByteBudget ?? base.coldByteBudget,
+        coldEntryBudget: policy.coldEntryBudget ?? base.coldEntryBudget
+      };
+    }
+    this.enforceCachePolicies();
+  }
+
+  private cachePolicy(): CachePolicy {
+    return this.cachePolicyOverride ?? {
+      pcm16Enabled: this.pcm16ColdCacheEnabled,
+      hotByteBudget: AudioEngine.PCM16_HOT_BYTE_BUDGET,
+      hotEntryBudget: AudioEngine.PCM16_HOT_ENTRY_BUDGET,
+      coldByteBudget: AudioEngine.PCM16_COLD_BYTE_BUDGET,
+      coldEntryBudget: AudioEngine.PCM16_COLD_ENTRY_BUDGET
+    };
+  }
+
+  private hotCacheResidency() {
+    const buffers = new Set<AudioBuffer>([...this.processedBuffers.values(), ...this.reverseBuffers.values()]);
+    for (const buffer of this.activePlaybackBuffers()) buffers.add(buffer);
+    let bytes = 0;
+    for (const buffer of buffers) bytes += buffer.length * buffer.numberOfChannels * Float32Array.BYTES_PER_ELEMENT;
+    return { bytes, entries: buffers.size };
+  }
+
+  private coldCacheResidency() {
+    let bytes = 0;
+    for (const pcm of this.coldProcessedBuffers.values()) {
+      for (const channel of pcm.channels) bytes += channel.byteLength;
+    }
+    return { bytes, entries: this.coldProcessedBuffers.size };
+  }
+
+  getAudioCacheDiagnostics(): AudioCacheDiagnostics {
+    const sourceGenerations: Record<string, number> = {};
+    for (const [orbitId, lease] of this.sourceLeases) sourceGenerations[orbitId] = lease.generation;
+    const policy = this.cachePolicy();
+    const hot = this.hotCacheResidency();
+    const cold = this.coldCacheResidency();
+    return {
+      sourceGenerations,
+      processedKeys: [...this.processedBuffers.keys()].sort(),
+      reverseKeys: [...this.reverseBuffers.keys()].sort(),
+      coldKeys: [...this.coldProcessedBuffers.keys()].sort(),
+      dspScheduler: {
+        renderAttempts: this.dspRenderAttempts,
+        restartedFrames: this.dspRestartedFrames
+      },
+      cache: {
+        pcm16Enabled: policy.pcm16Enabled,
+        hotBytes: hot.bytes,
+        hotEntries: hot.entries,
+        hotByteBudget: policy.hotByteBudget,
+        hotEntryBudget: policy.hotEntryBudget,
+        protectedHotOverageBytes: policy.pcm16Enabled ? Math.max(0, hot.bytes - policy.hotByteBudget) : 0,
+        protectedHotOverageEntries: policy.pcm16Enabled ? Math.max(0, hot.entries - policy.hotEntryBudget) : 0,
+        coldBytes: cold.bytes,
+        coldEntries: cold.entries,
+        coldByteBudget: policy.coldByteBudget,
+        coldEntryBudget: policy.coldEntryBudget
+      }
     };
   }
 
@@ -553,9 +810,17 @@ class AudioEngine {
     return Math.abs(this.normalizedSpeed(speed) - 1) > .0001;
   }
 
-  private processingWindow(orbitId: string, speed: number, sampleStart = 0, sampleEnd = Infinity): ProcessingWindow {
-    const original = this.buffers.get(orbitId);
-    if (!original) throw new Error("Audio buffer is unavailable.");
+  private currentSourceLease(orbitId: string): SourceLease | undefined {
+    const buffer = this.buffers.get(orbitId);
+    if (!buffer) return undefined;
+    const existing = this.sourceLeases.get(orbitId);
+    if (existing?.buffer === buffer) return existing;
+    const lease = { orbitId, generation: ++AudioEngine.nextSourceGeneration, buffer };
+    this.sourceLeases.set(orbitId, lease);
+    return lease;
+  }
+
+  private processingWindowForBuffer(original: AudioBuffer, speed: number, sampleStart = 0, sampleEnd = Infinity): ProcessingWindow {
     const rate = original.sampleRate;
     const sourceStartFrame = Math.min(original.length, Math.max(0, Math.floor((Number.isFinite(sampleStart) ? sampleStart : 0) * rate)));
     const requestedEnd = Number.isFinite(sampleEnd) ? sampleEnd : original.duration;
@@ -571,31 +836,585 @@ class AudioEngine {
     };
   }
 
+  private processingWindow(orbitId: string, speed: number, sampleStart = 0, sampleEnd = Infinity): ProcessingWindow {
+    const lease = this.currentSourceLease(orbitId);
+    if (!lease) throw new Error("Audio buffer is unavailable.");
+    return this.processingWindowForBuffer(lease.buffer, speed, sampleStart, sampleEnd);
+  }
+
+  private processedBufferRequest(
+    orbitId: string, planetId: string, speed: number, pitchCents: number,
+    sampleStart = 0, sampleEnd = Infinity, direction: "forward" | "reverse" = "forward"
+  ): ProcessedBufferRequest {
+    return {
+      orbitId,
+      planetId,
+      speed: this.normalizedSpeed(speed),
+      pitchCents: Math.round(pitchCents),
+      sampleStart,
+      sampleEnd,
+      direction
+    };
+  }
+
+  private describeProcessedBuffer(request: ProcessedBufferRequest): ProcessedBufferDescriptor {
+    const lease = this.currentSourceLease(request.orbitId);
+    if (!lease) throw new Error("Audio buffer is unavailable.");
+    const window = this.processingWindowForBuffer(lease.buffer, request.speed, request.sampleStart, request.sampleEnd);
+    const baseKey = `${request.orbitId}:${request.planetId}:source=${lease.generation}:speed=${request.speed.toString()}:pitch=${request.pitchCents}:${window.sourceStartFrame}~${window.sourceEndFrame}`;
+    return { request, lease, window, key: baseKey };
+  }
+
   private processedBufferKey(orbitId: string, planetId: string, speed: number, pitchCents: number, sampleStart = 0, sampleEnd = Infinity) {
-    // The cache identity must describe exactly the speed given to SoundTouch.
-    // Number#toString round-trips IEEE-754 values while avoiding a UI-formatting
-    // change in the DSP path.
-    const window = this.processingWindow(orbitId, speed, sampleStart, sampleEnd);
-    return `${orbitId}:${planetId}:speed=${this.normalizedSpeed(speed).toString()}:pitch=${Math.round(pitchCents)}:${window.sourceStartFrame}~${window.sourceEndFrame}`;
+    return this.describeProcessedBuffer(this.processedBufferRequest(orbitId, planetId, speed, pitchCents, sampleStart, sampleEnd)).key;
   }
 
   private clearOrbitProcessedCaches(orbitId: string) {
-    for (const key of new Set([...this.processedBuffers.keys(), ...this.coldProcessedBuffers.keys()])) if (key.startsWith(`${orbitId}:`)) { this.processedBuffers.delete(key); this.coldProcessedBuffers.delete(key); this.processedWindows.delete(key); }
-    for (const key of [...this.reverseBuffers.keys()]) if (key.startsWith(`${orbitId}:`)) this.reverseBuffers.delete(key);
+    for (const key of new Set([...this.processedBuffers.keys(), ...this.coldProcessedBuffers.keys()])) if (key.startsWith(`${orbitId}:`)) this.removeProcessedEntry(key);
+    for (const key of [...this.reverseBuffers.keys()]) if (key.startsWith(`${orbitId}:`)) this.removeReverseEntry(key);
   }
 
-  private scheduleDspRender(render: () => Promise<void>): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const start = () => {
-        this.activeDspRenders++;
-        void render().then(resolve, reject).finally(() => {
-          this.activeDspRenders--;
-          this.dspRenderQueue.shift()?.();
-        });
+  private residencyEntriesFor(requests: readonly ProcessedBufferRequest[]): Map<string, ResidencyEntry> {
+    const entries = new Map<string, ResidencyEntry>();
+    for (const request of requests) {
+      if (!this.buffers.has(request.orbitId)) continue;
+      const semantic = this.processedBufferRequest(
+        request.orbitId, request.planetId, request.speed, request.pitchCents,
+        request.sampleStart, request.sampleEnd, request.direction
+      );
+      const neutral = Math.abs(semantic.speed - 1) < .0001 && semantic.pitchCents === 0;
+      if (neutral && semantic.direction === "forward") continue;
+      const descriptor = neutral
+        ? this.describeProcessedBuffer(this.processedBufferRequest(
+          semantic.orbitId, semantic.planetId, 1, 0, 0, Infinity, "reverse"
+        ))
+        : this.describeProcessedBuffer(semantic);
+      if (!neutral) entries.set(descriptor.key, { key: descriptor.key, lease: descriptor.lease, request: semantic });
+      if (semantic.direction === "reverse") {
+        const reverseKey = `${descriptor.key}:reverse`;
+        entries.set(reverseKey, { key: reverseKey, lease: descriptor.lease, request: semantic });
+      }
+    }
+    return entries;
+  }
+
+  private currentResidencyEntry(entry: ResidencyEntry): boolean {
+    const current = this.currentSourceLease(entry.lease.orbitId);
+    return current?.generation === entry.lease.generation && current.buffer === entry.lease.buffer;
+  }
+
+  private isResidencyKeyProtected(key: string): boolean {
+    const ownsCurrentKey = (entries: Map<string, ResidencyEntry>) => {
+      const entry = entries.get(key);
+      return entry !== undefined && this.currentResidencyEntry(entry);
+    };
+    for (const entries of this.permanentResidencies.values()) if (ownsCurrentKey(entries)) return true;
+    for (const residency of this.acquiredResidencies.values()) if (ownsCurrentKey(residency.entries)) return true;
+    return false;
+  }
+
+  private clearOrbitResidencies(orbitId: string) {
+    const removeOrbitEntries = (entries: Map<string, ResidencyEntry>) => {
+      for (const [key, entry] of entries) if (entry.lease.orbitId === orbitId) entries.delete(key);
+    };
+    for (const entries of this.permanentResidencies.values()) removeOrbitEntries(entries);
+    for (const residency of this.acquiredResidencies.values()) removeOrbitEntries(residency.entries);
+  }
+
+  replacePermanentResidency(ownerId: string, requests: readonly ProcessedBufferRequest[]) {
+    this.permanentResidencies.set(ownerId, this.residencyEntriesFor(requests));
+    this.enforceCachePolicies();
+  }
+
+  acquireResidency(ownerId: string, requests: readonly ProcessedBufferRequest[]): () => void {
+    const leaseId = ++this.nextResidencyLease;
+    this.acquiredResidencies.set(leaseId, { ownerId, entries: this.residencyEntriesFor(requests) });
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.acquiredResidencies.delete(leaseId);
+      this.enforceCachePolicies();
+    };
+  }
+
+  private snapshotResidencies(): ResidencySnapshot {
+    const requests = (entries: ReadonlyMap<string, ResidencyEntry>) =>
+      [...entries.values()].map((entry) => ({ ...entry.request }));
+    return {
+      permanent: new Map([...this.permanentResidencies].map(([ownerId, entries]) => [ownerId, requests(entries)])),
+      acquired: new Map([...this.acquiredResidencies].map(([leaseId, residency]) => [leaseId, {
+        ownerId: residency.ownerId,
+        requests: requests(residency.entries)
+      }]))
+    };
+  }
+
+  private restoreResidencies(snapshot: ResidencySnapshot) {
+    this.permanentResidencies.clear();
+    for (const [ownerId, requests] of snapshot.permanent) {
+      this.permanentResidencies.set(ownerId, this.residencyEntriesFor(requests));
+    }
+    this.acquiredResidencies.clear();
+    for (const [leaseId, residency] of snapshot.acquired) {
+      this.acquiredResidencies.set(leaseId, {
+        ownerId: residency.ownerId,
+        entries: this.residencyEntriesFor(residency.requests)
+      });
+    }
+  }
+
+  private snapshotActiveLoops(): ActiveLoopSnapshot[] {
+    const snapshots: ActiveLoopSnapshot[] = [];
+    for (const playback of this.active.values()) {
+      const buffer = playback.source.buffer;
+      if (playback.mode !== "loop" || !buffer) continue;
+      snapshots.push({
+        id: playback.id,
+        orbitId: playback.orbitId,
+        planetId: playback.planetId,
+        barId: playback.barId,
+        buffer,
+        planetVolume: playback.planetGainNode.gain.value,
+        planetAudioPan: playback.planetAudioPan,
+        tapeRate: playback.source.playbackRate.value,
+        isReverse: playback.isReverse,
+        processedWindow: playback.processedWindow,
+        loop: playback.source.loop,
+        loopStart: playback.source.loopStart,
+        loopEnd: playback.source.loopEnd,
+        resumeOffset: this.advanceLoopPlaybackPhase(playback, this.getContext().currentTime)
+      });
+    }
+    return snapshots;
+  }
+
+  private restoreActiveLoops(snapshots: readonly ActiveLoopSnapshot[]) {
+    const context = this.getContext();
+    for (const snapshot of snapshots) {
+      const orbitRuntime = this.orbitRuntimes.get(snapshot.orbitId);
+      if (!orbitRuntime || !this.buffers.has(snapshot.orbitId)) continue;
+      const source = context.createBufferSource();
+      const planetGain = context.createGain();
+      const planetPanNode = createFLStylePanNode(context, snapshot.buffer.numberOfChannels, snapshot.planetAudioPan);
+      source.buffer = snapshot.buffer;
+      source.playbackRate.value = snapshot.tapeRate;
+      planetGain.gain.value = snapshot.planetVolume;
+      source.connect(planetPanNode.input);
+      planetPanNode.output.connect(planetGain);
+      planetGain.connect(orbitRuntime.input);
+      const playback: ActivePlayback = {
+        id: snapshot.id,
+        orbitId: snapshot.orbitId,
+        planetId: snapshot.planetId,
+        barId: snapshot.barId,
+        source,
+        planetGainNode: planetGain,
+        planetPanNode,
+        planetAudioPan: snapshot.planetAudioPan,
+        mode: "loop",
+        isReverse: snapshot.isReverse,
+        processedWindow: snapshot.processedWindow,
+        loopWindowStart: snapshot.loopStart,
+        loopWindowEnd: snapshot.loopEnd
       };
-      if (this.activeDspRenders < AudioEngine.MAX_CONCURRENT_DSP_RENDERS) start();
-      else this.dspRenderQueue.push(start);
+      this.active.set(snapshot.id, playback);
+      source.onended = () => {
+        if (this.active.get(snapshot.id)?.source === source) this.active.delete(snapshot.id);
+        this.enforceCachePolicies();
+        try { planetGain.disconnect(); } catch {}
+        planetPanNode.disconnect();
+      };
+      if (snapshot.loop && snapshot.loopEnd - snapshot.loopStart > .001) {
+        source.loop = true;
+        source.loopStart = snapshot.loopStart;
+        source.loopEnd = snapshot.loopEnd;
+      }
+      playback.playbackPhaseOffset = snapshot.resumeOffset;
+      playback.playbackPhaseAt = context.currentTime;
+      source.start(context.currentTime, snapshot.resumeOffset);
+    }
+  }
+
+  private advanceLoopPlaybackPhase(playback: ActivePlayback, now: number) {
+    const bufferDuration = playback.source.buffer?.duration ?? 0;
+    const startOffset = playback.playbackPhaseOffset ?? playback.source.loopStart;
+    const startAt = playback.playbackPhaseAt ?? now;
+    const elapsed = Math.max(0, now - startAt) * playback.source.playbackRate.value;
+    let offset = startOffset + elapsed;
+    if (playback.source.loop && playback.source.loopEnd > playback.source.loopStart) {
+      const span = playback.source.loopEnd - playback.source.loopStart;
+      offset = playback.source.loopStart + ((offset - playback.source.loopStart) % span + span) % span;
+    } else {
+      offset = Math.min(Math.max(offset, 0), Math.max(0, bufferDuration - .001));
+    }
+    playback.playbackPhaseOffset = offset;
+    playback.playbackPhaseAt = now;
+    return offset;
+  }
+
+  private cacheEntryFor(descriptor: ProcessedBufferDescriptor, direction: "forward" | "reverse", buffer: AudioBuffer, byteLength = buffer.length * buffer.numberOfChannels * Float32Array.BYTES_PER_ELEMENT): CacheEntry {
+    return {
+      request: { ...descriptor.request, direction },
+      lease: descriptor.lease,
+      window: descriptor.window,
+      direction,
+      byteLength
+    };
+  }
+
+  private currentCacheEntry(entry: CacheEntry | undefined): boolean {
+    if (!entry) return false;
+    const current = this.currentSourceLease(entry.lease.orbitId);
+    return current?.generation === entry.lease.generation && current.buffer === entry.lease.buffer;
+  }
+
+  private removeProcessedEntry(key: string) {
+    this.processedBuffers.delete(key);
+    this.coldProcessedBuffers.delete(key);
+    this.processedEntries.delete(key);
+    this.coldProcessedEntries.delete(key);
+    this.processedWindows.delete(key);
+    this.hotRecency.delete(key);
+  }
+
+  private removeReverseEntry(key: string) {
+    this.reverseBuffers.delete(key);
+    this.reverseEntries.delete(key);
+    this.hotRecency.delete(key);
+  }
+
+  private removeHotProcessedEntry(key: string) {
+    this.processedBuffers.delete(key);
+    this.hotRecency.delete(key);
+    if (!this.coldProcessedBuffers.has(key)) {
+      this.processedEntries.delete(key);
+      this.processedWindows.delete(key);
+    }
+  }
+
+  private removeColdProcessedEntry(key: string) {
+    this.coldProcessedBuffers.delete(key);
+    this.coldProcessedEntries.delete(key);
+    if (!this.processedBuffers.has(key)) {
+      this.processedEntries.delete(key);
+      this.processedWindows.delete(key);
+    }
+  }
+
+  private snapshotCachedAudioEntries(buffers: ReadonlyMap<string, AudioBuffer>, entries: ReadonlyMap<string, CacheEntry>): CachedAudioEntry[] {
+    const snapshot: CachedAudioEntry[] = [];
+    for (const [key, buffer] of buffers) {
+      const entry = entries.get(key);
+      if (entry) snapshot.push({ buffer, entry });
+    }
+    return snapshot;
+  }
+
+  private snapshotCachedColdEntries(): CachedColdEntry[] {
+    const snapshot: CachedColdEntry[] = [];
+    for (const [key, pcm] of this.coldProcessedBuffers) {
+      const entry = this.coldProcessedEntries.get(key);
+      if (entry) snapshot.push({ pcm, entry });
+    }
+    return snapshot;
+  }
+
+  private restoreCachedEntries(processed: readonly CachedAudioEntry[], cold: readonly CachedColdEntry[], reverse: readonly CachedAudioEntry[]) {
+    const restoreAudio = (items: readonly CachedAudioEntry[], cache: Map<string, AudioBuffer>, direction: "forward" | "reverse") => {
+      for (const item of items) {
+        const current = this.currentSourceLease(item.entry.lease.orbitId);
+        if (!current || current.buffer !== item.entry.lease.buffer) continue;
+        const descriptor = this.describeProcessedBuffer(item.entry.request);
+        if (direction === "forward") this.cacheProcessedBuffer(cache, descriptor.key, item.buffer, descriptor);
+        else this.cacheProcessedBuffer(cache, `${descriptor.key}:reverse`, item.buffer, descriptor);
+      }
+    };
+    restoreAudio(processed, this.processedBuffers, "forward");
+    for (const item of cold) {
+      const current = this.currentSourceLease(item.entry.lease.orbitId);
+      if (!current || current.buffer !== item.entry.lease.buffer) continue;
+      const descriptor = this.describeProcessedBuffer(item.entry.request);
+      this.cacheColdProcessedBuffer(descriptor.key, item.pcm, descriptor, current.buffer);
+    }
+    restoreAudio(reverse, this.reverseBuffers, "reverse");
+  }
+
+  private abortError() {
+    return new DOMException("DSP render was cancelled.", "AbortError");
+  }
+
+  private preemptError() {
+    return new DspRenderPreemptedError();
+  }
+
+  private isPreemptError(error: unknown): error is DspRenderPreemptedError {
+    return error instanceof DspRenderPreemptedError;
+  }
+
+  private dspPriorityRank(priority: DspRenderPriority): number {
+    switch (priority) {
+      case "playback": return 2;
+      case "selected": return 1;
+      case "background": return 0;
+    }
+  }
+
+  private get dspRenderQueue(): readonly DspJob[] {
+    return [...this.dspRenderQueues.playback, ...this.dspRenderQueues.selected, ...this.dspRenderQueues.background];
+  }
+
+  private removeDspJobFromQueues(job: DspJob) {
+    for (const priority of ["playback", "selected", "background"] as const) {
+      const queue = this.dspRenderQueues[priority];
+      const index = queue.indexOf(job);
+      if (index >= 0) queue.splice(index, 1);
+    }
+  }
+
+  private effectiveDspPriority(job: DspJob): DspRenderPriority {
+    let priority: DspRenderPriority = "background";
+    for (const consumer of job.consumers.values()) {
+      if (this.dspPriorityRank(consumer.priority) > this.dspPriorityRank(priority)) priority = consumer.priority;
+    }
+    return priority;
+  }
+
+  private refreshDspJobPriority(job: DspJob) {
+    const nextPriority = this.effectiveDspPriority(job);
+    if (nextPriority === job.priority) return;
+    job.priority = nextPriority;
+    if (job.state === "queued") this.enqueueDspJob(job);
+  }
+
+  private enqueueDspJob(job: DspJob, front = false) {
+    this.removeDspJobFromQueues(job);
+    if (job.state !== "queued") return;
+    const queue = this.dspRenderQueues[job.priority];
+    if (front) queue.unshift(job); else queue.push(job);
+    this.refreshRunningDspPreemption();
+  }
+
+  private highestQueuedDspPriority(): DspRenderPriority | undefined {
+    for (const priority of ["playback", "selected", "background"] as const) {
+      if (this.dspRenderQueues[priority].length > 0) return priority;
+    }
+    return undefined;
+  }
+
+  private refreshRunningDspPreemption() {
+    const queuedPriority = this.highestQueuedDspPriority();
+    for (const job of this.dspJobs.values()) {
+      if (job.state !== "running") continue;
+      job.preemptRequested = queuedPriority !== undefined && this.dspPriorityRank(queuedPriority) > this.dspPriorityRank(job.priority);
+    }
+  }
+
+  private takeNextDspJob(): DspJob | undefined {
+    const highest = this.highestQueuedDspPriority();
+    if (!highest) return undefined;
+    let job: DspJob | undefined;
+    if (this.terminalDspPriority === highest && this.consecutiveTerminalDspJobs >= AudioEngine.HIGHER_PRIORITY_TERMINAL_DISPATCH_BUDGET) {
+      const priorities: readonly DspRenderPriority[] = ["playback", "selected", "background"];
+      const start = priorities.indexOf(highest) + 1;
+      const starved = priorities.slice(start).flatMap((priority) => this.dspRenderQueues[priority]);
+      job = starved.reduce<DspJob | undefined>((oldest, candidate) =>
+        !oldest || candidate.enqueueSequence < oldest.enqueueSequence ? candidate : oldest, undefined);
+      if (job) this.removeDspJobFromQueues(job);
+    }
+    job ??= this.dspRenderQueues[highest].shift();
+    this.refreshRunningDspPreemption();
+    return job;
+  }
+
+  private recordDspTerminalDispatch(job: DspJob, outcome: "success" | "error" | "cancelled") {
+    if (outcome === "cancelled") return;
+    if (this.terminalDspPriority === job.priority) this.consecutiveTerminalDspJobs++;
+    else {
+      this.terminalDspPriority = job.priority;
+      this.consecutiveTerminalDspJobs = 1;
+    }
+  }
+
+  private detachDspConsumer(job: DspJob, ownerId: string, reason: unknown = this.abortError()) {
+    const consumer = job.consumers.get(ownerId);
+    if (!consumer) return;
+    job.consumers.delete(ownerId);
+    if (this.dspJobsByOwner.get(ownerId) === job.key) this.dspJobsByOwner.delete(ownerId);
+    if (consumer.abortListener && consumer.signal) consumer.signal.removeEventListener("abort", consumer.abortListener);
+    consumer.reject(reason);
+    this.refreshDspJobPriority(job);
+    this.cancelUnobservedDspJob(job);
+    this.refreshRunningDspPreemption();
+  }
+
+  private cancelUnobservedDspJob(job: DspJob) {
+    if (job.consumers.size > 0 || job.state === "finished" || job.sourceInvalidated) return;
+    job.cancelRequested = true;
+    if (job.state !== "queued") return;
+    this.finishDspJob(job, this.abortError(), "cancelled");
+  }
+
+  private markDspJobPreemptRequested(job: DspJob) {
+    if (job.state !== "finished") job.preemptRequested = true;
+  }
+
+  private finishDspJob(job: DspJob, error?: unknown, outcome: "success" | "error" | "cancelled" = error ? "error" : "success") {
+    if (job.state === "finished") return;
+    job.state = "finished";
+    this.dspJobs.delete(job.key);
+    this.removeDspJobFromQueues(job);
+    for (const consumer of job.consumers.values()) {
+      if (this.dspJobsByOwner.get(consumer.ownerId) === job.key) this.dspJobsByOwner.delete(consumer.ownerId);
+      if (consumer.abortListener && consumer.signal) consumer.signal.removeEventListener("abort", consumer.abortListener);
+      if (error) consumer.reject(error); else consumer.resolve();
+    }
+    job.consumers.clear();
+    this.recordDspTerminalDispatch(job, outcome);
+    this.refreshRunningDspPreemption();
+  }
+
+  private invalidateDspJobsForOrbit(orbitId: string) {
+    for (const job of [...this.dspJobs.values()]) {
+      if (job.descriptor.lease.orbitId !== orbitId) continue;
+      job.sourceInvalidated = true;
+      job.cancelRequested = true;
+      if (job.state === "queued") this.finishDspJob(job, new Error("Audio source changed before rendering."), "error");
+    }
+  }
+
+  private pumpDspRenderQueue() {
+    while (this.activeDspRenders < AudioEngine.MAX_CONCURRENT_DSP_RENDERS) {
+      const job = this.takeNextDspJob();
+      if (!job) {
+        if (this.activeDspRenders === 0) {
+          this.terminalDspPriority = null;
+          this.consecutiveTerminalDspJobs = 0;
+        }
+        return;
+      }
+      if (job.state !== "queued" || job.consumers.size === 0 || job.cancelRequested) {
+        this.finishDspJob(job, this.abortError(), "cancelled");
+        continue;
+      }
+      job.state = "running";
+      this.refreshRunningDspPreemption();
+      this.activeDspRenders++;
+      this.dspRenderAttempts++;
+      let attemptFrames = 0;
+      void this.renderPlanetBuffer(
+        job.descriptor,
+        () => job.cancelRequested || job.sourceInvalidated || job.consumers.size === 0,
+        () => job.preemptRequested,
+        (frames) => { attemptFrames += frames; }
+      ).then(
+        () => {
+          try {
+            if (job.reverseRequested) {
+              const rendered = this.touchCachedBuffer(this.processedBuffers, job.descriptor.key, job.descriptor);
+              if (!rendered) throw new Error("Processed audio disappeared before reverse prewarm.");
+              this.ensureReversedBuffer(job.descriptor, rendered);
+            }
+            this.finishDspJob(job);
+          } catch (error) {
+            this.finishDspJob(job, error, "error");
+          }
+        },
+        (error: unknown) => {
+          if (this.isPreemptError(error) && !job.cancelRequested && !job.sourceInvalidated && job.consumers.size > 0) {
+            this.dspRestartedFrames += attemptFrames;
+            this.terminalDspPriority = null;
+            this.consecutiveTerminalDspJobs = 0;
+            job.preemptRequested = false;
+            job.state = "queued";
+            this.enqueueDspJob(job, true);
+            return;
+          }
+          this.finishDspJob(job, error, error instanceof DOMException && error.name === "AbortError" ? "cancelled" : "error");
+        }
+      )
+        .finally(() => {
+          this.activeDspRenders--;
+          this.pumpDspRenderQueue();
+        });
+    }
+  }
+
+  ensureProcessedBuffer(request: ProcessedBufferRequest, options: EnsureProcessedBufferOptions): Promise<void> {
+    if (options.signal?.aborted) return Promise.reject(this.abortError());
+    const semantic = this.processedBufferRequest(
+      request.orbitId, request.planetId, request.speed, request.pitchCents,
+      request.sampleStart, request.sampleEnd, request.direction
+    );
+    const neutral = Math.abs(semantic.speed - 1) < .0001 && semantic.pitchCents === 0;
+    const descriptor = this.describeProcessedBuffer(neutral
+      ? this.processedBufferRequest(semantic.orbitId, semantic.planetId, 1, 0, 0, Infinity, semantic.direction)
+      : semantic);
+    const oldKey = this.dspJobsByOwner.get(options.ownerId);
+    if (oldKey && oldKey !== descriptor.key) {
+      const oldJob = this.dspJobs.get(oldKey);
+      if (oldJob) this.detachDspConsumer(oldJob, options.ownerId);
+    }
+    if (neutral) {
+      if (semantic.direction === "reverse") this.ensureReversedBuffer(descriptor, descriptor.lease.buffer);
+      return Promise.resolve();
+    }
+    const cached = this.touchCachedBuffer(this.processedBuffers, descriptor.key, descriptor);
+    if (cached) {
+      if (semantic.direction === "reverse") this.ensureReversedBuffer(descriptor, cached);
+      return Promise.resolve();
+    }
+    const existing = this.dspJobs.get(descriptor.key);
+    if (existing) {
+      if (semantic.direction === "reverse") existing.reverseRequested = true;
+      const sameOwner = existing.consumers.get(options.ownerId);
+      if (sameOwner) {
+        sameOwner.priority = options.priority ?? "background";
+        this.refreshDspJobPriority(existing);
+        this.refreshRunningDspPreemption();
+        return sameOwner.promise;
+      }
+      existing.cancelRequested = false;
+      const promise = this.addDspConsumer(existing, options);
+      this.refreshDspJobPriority(existing);
+      this.refreshRunningDspPreemption();
+      return promise;
+    }
+    const job: DspJob = {
+      key: descriptor.key,
+      enqueueSequence: ++this.nextDspJobSequence,
+      descriptor,
+      consumers: new Map(),
+      state: "queued",
+      priority: options.priority ?? "background",
+      cancelRequested: false,
+      preemptRequested: false,
+      sourceInvalidated: false,
+      reverseRequested: semantic.direction === "reverse"
+    };
+    this.dspJobs.set(job.key, job);
+    const promise = this.addDspConsumer(job, options);
+    this.enqueueDspJob(job);
+    this.pumpDspRenderQueue();
+    return promise;
+  }
+
+  private addDspConsumer(job: DspJob, options: EnsureProcessedBufferOptions): Promise<void> {
+    let resolve!: () => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
     });
+    const consumer: DspConsumer = { ownerId: options.ownerId, promise, resolve, reject, priority: options.priority ?? "background", signal: options.signal };
+    if (options.signal) {
+      const abort = () => this.detachDspConsumer(job, options.ownerId);
+      consumer.abortListener = abort;
+      options.signal.addEventListener("abort", abort, { once: true });
+    }
+    job.consumers.set(options.ownerId, consumer);
+    this.dspJobsByOwner.set(options.ownerId, job.key);
+    return promise;
   }
 
   /** AudioBuffers currently backing any active (including looping) playback source. */
@@ -608,32 +1427,137 @@ class AudioEngine {
   }
 
   /** Reads a cache entry and, on hit, refreshes its recency to most-recently-used. */
-  private touchCachedBuffer(cache: Map<string, AudioBuffer>, key: string): AudioBuffer | undefined {
+  private touchCachedBuffer(cache: Map<string, AudioBuffer>, key: string, descriptor?: ProcessedBufferDescriptor): AudioBuffer | undefined {
     let value = cache.get(key);
-    if (value === undefined && cache === this.processedBuffers) value = this.inflateColdProcessedBuffer(key);
+    if (value === undefined && cache === this.processedBuffers) value = this.inflateColdProcessedBuffer(key, descriptor);
     if (value === undefined) return undefined;
-    // Map iteration order is insertion order, so a delete+re-set moves this key to the
-    // most-recently-used end without needing a separate recency structure.
+    const entries = cache === this.processedBuffers ? this.processedEntries : this.reverseEntries;
+    const entry = entries.get(key);
+    if (entry && !this.currentCacheEntry(entry)) {
+      if (cache === this.processedBuffers) this.removeProcessedEntry(key);
+      else this.removeReverseEntry(key);
+      return undefined;
+    }
+    if (!entry && descriptor) {
+      entries.set(key, this.cacheEntryFor(descriptor, cache === this.reverseBuffers ? "reverse" : "forward", value));
+    }
     cache.delete(key);
     cache.set(key, value);
+    if (this.cachePolicy().pcm16Enabled) this.touchHotRecency(key, cache === this.reverseBuffers ? "reverse" : "forward");
     return value;
   }
 
-  /** Inserts a cache entry, then evicts least-recently-used entries beyond the cap. */
-  private cacheProcessedBuffer(cache: Map<string, AudioBuffer>, key: string, value: AudioBuffer) {
-    if (cache === this.processedBuffers && this.pcm16ColdCacheEnabled) this.coldProcessedBuffers.set(key, this.toColdPcm16(value));
+  private touchHotRecency(key: string, direction: "forward" | "reverse") {
+    this.hotRecency.delete(key);
+    this.hotRecency.set(key, direction);
+  }
+
+  private cacheProcessedBuffer(
+    cache: Map<string, AudioBuffer>, key: string, value: AudioBuffer,
+    descriptor?: ProcessedBufferDescriptor, preserveCold = false
+  ) {
+    const direction = cache === this.reverseBuffers ? "reverse" as const : "forward" as const;
+    const entry = descriptor ? this.cacheEntryFor(descriptor, direction, value) : undefined;
+    const policy = this.cachePolicy();
+    if (cache === this.processedBuffers && policy.pcm16Enabled && !preserveCold) {
+      this.cacheColdProcessedBuffer(key, this.toColdPcm16(value), descriptor, value);
+    }
+    if (entry) {
+      if (cache === this.processedBuffers) {
+        this.processedEntries.set(key, entry);
+        this.processedWindows.set(key, entry.window);
+      } else this.reverseEntries.set(key, entry);
+    }
     cache.delete(key);
     cache.set(key, value);
-    const cap = cache === this.processedBuffers && this.pcm16ColdCacheEnabled ? AudioEngine.PCM16_HOT_BUFFER_CACHE_CAP : AudioEngine.PROCESSED_BUFFER_CACHE_CAP;
-    if (cache.size <= cap) return;
+    if (policy.pcm16Enabled) this.touchHotRecency(key, direction);
+    this.enforceCachePolicies();
+  }
+
+  private cacheColdProcessedBuffer(key: string, pcm: ColdPcm16, descriptor?: ProcessedBufferDescriptor, source?: AudioBuffer) {
+    const policy = this.cachePolicy();
+    const bytes = pcm.channels.reduce((total, channel) => total + channel.byteLength, 0);
+    if (bytes > policy.coldByteBudget) return;
+    this.coldProcessedBuffers.delete(key);
+    this.coldProcessedBuffers.set(key, pcm);
+    if (descriptor && source) this.coldProcessedEntries.set(key, this.cacheEntryFor(descriptor, "forward", source, bytes));
+    this.enforceColdCache(policy);
+  }
+
+  private isHotEntryProtected(key: string, buffer: AudioBuffer, activeBuffers: ReadonlySet<AudioBuffer>) {
+    return activeBuffers.has(buffer) || this.isResidencyKeyProtected(key);
+  }
+
+  private hotCacheValue(key: string, direction: "forward" | "reverse") {
+    return direction === "forward" ? this.processedBuffers.get(key) : this.reverseBuffers.get(key);
+  }
+
+  private ensureHotRecency() {
+    for (const key of this.processedBuffers.keys()) if (!this.hotRecency.has(key)) this.hotRecency.set(key, "forward");
+    for (const key of this.reverseBuffers.keys()) if (!this.hotRecency.has(key)) this.hotRecency.set(key, "reverse");
+  }
+
+  private enforceLegacyCacheCap(cache: Map<string, AudioBuffer>) {
     const protectedBuffers = this.activePlaybackBuffers();
-    for (const [candidateKey, candidateValue] of cache) {
-      if (cache.size <= cap) break;
-      if (candidateKey === key) continue;
-      if (protectedBuffers.has(candidateValue)) continue;
-      cache.delete(candidateKey);
-      if (cache === this.processedBuffers && !this.coldProcessedBuffers.has(candidateKey)) this.processedWindows.delete(candidateKey);
+    while (cache.size > AudioEngine.PROCESSED_BUFFER_CACHE_CAP) {
+      let removed = false;
+      for (const [candidateKey, candidateValue] of cache) {
+        if (protectedBuffers.has(candidateValue) || this.isResidencyKeyProtected(candidateKey)) continue;
+        cache.delete(candidateKey);
+        if (cache === this.processedBuffers && !this.coldProcessedBuffers.has(candidateKey)) {
+          this.processedEntries.delete(candidateKey);
+          this.processedWindows.delete(candidateKey);
+        }
+        if (cache === this.reverseBuffers) this.reverseEntries.delete(candidateKey);
+        removed = true;
+        break;
+      }
+      if (!removed) return;
     }
+  }
+
+  private enforceHotCache(policy: CachePolicy) {
+    this.ensureHotRecency();
+    const activeBuffers = this.activePlaybackBuffers();
+    while (true) {
+      const residency = this.hotCacheResidency();
+      if (residency.bytes <= policy.hotByteBudget && residency.entries <= policy.hotEntryBudget) return;
+      let removed = false;
+      for (const [key, direction] of this.hotRecency) {
+        const buffer = this.hotCacheValue(key, direction);
+        if (!buffer) {
+          this.hotRecency.delete(key);
+          continue;
+        }
+        if (this.isHotEntryProtected(key, buffer, activeBuffers)) continue;
+        if (direction === "forward") this.removeHotProcessedEntry(key);
+        else this.removeReverseEntry(key);
+        removed = true;
+        break;
+      }
+      if (!removed) return;
+    }
+  }
+
+  private enforceColdCache(policy: CachePolicy) {
+    while (true) {
+      const residency = this.coldCacheResidency();
+      if (residency.bytes <= policy.coldByteBudget && residency.entries <= policy.coldEntryBudget) return;
+      const oldest = this.coldProcessedBuffers.keys().next().value as string | undefined;
+      if (oldest === undefined) return;
+      this.removeColdProcessedEntry(oldest);
+    }
+  }
+
+  private enforceCachePolicies() {
+    const policy = this.cachePolicy();
+    if (!policy.pcm16Enabled) {
+      this.enforceLegacyCacheCap(this.processedBuffers);
+      this.enforceLegacyCacheCap(this.reverseBuffers);
+      return;
+    }
+    this.enforceColdCache(policy);
+    this.enforceHotCache(policy);
   }
 
   private toColdPcm16(buffer: AudioBuffer): ColdPcm16 {
@@ -648,15 +1572,22 @@ class AudioEngine {
     return { channels, length: buffer.length, sampleRate: buffer.sampleRate };
   }
 
-  private inflateColdProcessedBuffer(key: string): AudioBuffer | undefined {
+  private inflateColdProcessedBuffer(key: string, descriptor?: ProcessedBufferDescriptor): AudioBuffer | undefined {
     const cold = this.coldProcessedBuffers.get(key);
     if (!cold) return undefined;
+    const entry = this.coldProcessedEntries.get(key);
+    if (entry && !this.currentCacheEntry(entry)) {
+      this.removeProcessedEntry(key);
+      return undefined;
+    }
+    this.coldProcessedBuffers.delete(key);
+    this.coldProcessedBuffers.set(key, cold);
     const buffer = this.getContext().createBuffer(cold.channels.length, cold.length, cold.sampleRate);
     for (let channel = 0; channel < cold.channels.length; channel++) {
       const target = buffer.getChannelData(channel), source = cold.channels[channel];
       for (let frame = 0; frame < source.length; frame++) target[frame] = source[frame] / 32768;
     }
-    this.cacheProcessedBuffer(this.processedBuffers, key, buffer);
+    this.cacheProcessedBuffer(this.processedBuffers, key, buffer, descriptor, true);
     return buffer;
   }
 
@@ -666,34 +1597,63 @@ class AudioEngine {
     const normalizedSpeed = this.normalizedSpeed(speed);
     const roundedPitch = Math.round(pitchCents);
     if (Math.abs(normalizedSpeed - 1) < .0001 && roundedPitch === 0) {
+      const descriptor = this.describeProcessedBuffer(this.processedBufferRequest(orbitId, planetId, 1, 0));
       return {
         status: "ready",
         buffer: original,
-        key: this.processedBufferKey(orbitId, planetId, 1, 0),
-        usingProcessedBuffer: false
+        key: descriptor.key,
+        usingProcessedBuffer: false,
+        descriptor
       };
     }
-    const key = this.processedBufferKey(orbitId, planetId, normalizedSpeed, roundedPitch, sampleStart, sampleEnd);
-    const processed = this.touchCachedBuffer(this.processedBuffers, key);
-    if (processed) return { status: "ready", buffer: processed, key, usingProcessedBuffer: true };
+    const descriptor = this.describeProcessedBuffer(this.processedBufferRequest(orbitId, planetId, normalizedSpeed, roundedPitch, sampleStart, sampleEnd));
+    const processed = this.touchCachedBuffer(this.processedBuffers, descriptor.key, descriptor);
+    if (processed) return { status: "ready", buffer: processed, key: descriptor.key, usingProcessedBuffer: true, descriptor };
     // Playing the original here silently discards requested speed/pitch. The
     // caller skips this trigger until its explicit prewarm/render completes.
-    return { status: "pending", cacheKey: key };
+    return { status: "pending", cacheKey: descriptor.key };
+  }
+
+  private ensurePlaybackMiss(
+    resolution: Extract<PlaybackBufferResolution, { status: "pending" }>,
+    orbitId: string,
+    planetId: string,
+    speed: number,
+    pitchCents: number,
+    reverse: boolean,
+    sampleStart: number,
+    sampleEnd: number,
+    scope?: PlaybackRenderScope
+  ) {
+    if (!this.buffers.has(orbitId) || scope?.signal?.aborted) return;
+    const request = this.processedBufferRequest(
+      orbitId, planetId, speed, pitchCents, sampleStart, sampleEnd,
+      reverse ? "reverse" : "forward"
+    );
+    void this.ensureProcessedBuffer(request, {
+      ownerId: scope?.ownerId ?? `playback:${resolution.cacheKey}`,
+      priority: "playback",
+      ...(scope?.signal ? { signal: scope.signal } : {})
+    }).then(() => undefined, () => undefined);
   }
 
   private createPlayback(
     id: string, orbitId: string, planetId: string, barId: string,
     mode: "loop" | "sequence", planetVolume: number, planetAudioPan: number, tapeRate = 1,
-    userSpeed = 1, pitchCents = 0, reverse = false, sampleStart = 0, sampleEnd = Infinity
+    userSpeed = 1, pitchCents = 0, reverse = false, sampleStart = 0, sampleEnd = Infinity,
+    scope?: PlaybackRenderScope
   ) {
     const context = this.getContext();
     const resolved = this.getPlaybackBuffer(orbitId, planetId, userSpeed, pitchCents, sampleStart, sampleEnd);
     const orbitRuntime = this.orbitRuntimes.get(orbitId);
+    if (resolved.status === "pending") {
+      if (orbitRuntime) this.ensurePlaybackMiss(resolved, orbitId, planetId, userSpeed, pitchCents, reverse, sampleStart, sampleEnd, scope);
+      return null;
+    }
     if (resolved.status !== "ready" || !orbitRuntime) return null;
     let playbackBuffer = resolved.buffer;
     if (reverse) {
-      const reverseKey = `${resolved.key}:reverse`;
-      playbackBuffer = this.touchCachedBuffer(this.reverseBuffers, reverseKey) ?? this.createReversedBuffer(reverseKey, resolved.buffer);
+      playbackBuffer = this.ensureReversedBuffer(resolved.descriptor, resolved.buffer);
     }
     const source = context.createBufferSource();
     const planetGain = context.createGain();
@@ -707,12 +1667,13 @@ class AudioEngine {
     planetPanNode.output.connect(planetGain);
     planetGain.connect(orbitRuntime.input);
     const playback: ActivePlayback = {
-      id, orbitId, planetId, barId, source, planetGainNode: planetGain, planetPanNode, mode, isReverse: reverse,
+      id, orbitId, planetId, barId, source, planetGainNode: planetGain, planetPanNode, planetAudioPan, mode, isReverse: reverse,
       processedWindow: resolved.usingProcessedBuffer ? this.processedWindows.get(resolved.key) : undefined
     };
     this.active.set(id, playback);
     source.onended = () => {
       if (this.active.get(id)?.source === source) this.active.delete(id);
+      this.enforceCachePolicies();
       try { planetGain.disconnect(); } catch { /* disconnected */ }
       planetPanNode.disconnect();
     };
@@ -724,7 +1685,7 @@ class AudioEngine {
     };
   }
 
-  private createReversedBuffer(key: string, source: AudioBuffer) {
+  private createReversedBuffer(key: string, source: AudioBuffer, descriptor: ProcessedBufferDescriptor) {
     const reversed = this.getContext().createBuffer(
       source.numberOfChannels, source.length, source.sampleRate
     );
@@ -733,15 +1694,21 @@ class AudioEngine {
       const output = reversed.getChannelData(channel);
       for (let index = 0; index < input.length; index++) output[index] = input[input.length - 1 - index];
     }
-    this.cacheProcessedBuffer(this.reverseBuffers, key, reversed);
+    this.cacheProcessedBuffer(this.reverseBuffers, key, reversed, descriptor);
     return reversed;
+  }
+
+  private ensureReversedBuffer(descriptor: ProcessedBufferDescriptor, source: AudioBuffer) {
+    const reverseKey = `${descriptor.key}:reverse`;
+    return this.touchCachedBuffer(this.reverseBuffers, reverseKey, descriptor) ??
+      this.createReversedBuffer(reverseKey, source, descriptor);
   }
 
   syncLoop(
     orbitId: string, planetId: string, barId: string, inside: boolean,
     audioTime: number, planetVolume: number, planetAudioPan: number,
     tapeRate: number, userSpeed: number, pitchCents: number,
-    reverse = false, sampleStart = 0, sampleEnd = Infinity
+    reverse = false, sampleStart = 0, sampleEnd = Infinity, scope?: PlaybackRenderScope
   ) {
     const key = `loop:${planetId}:${barId}`;
     const current = this.active.get(key);
@@ -766,14 +1733,16 @@ class AudioEngine {
       if (current.isReverse !== reverse || current.loopWindowStart !== loopStart || current.loopWindowEnd !== loopEnd) {
         this.stopPlayback(key);
       } else {
-        current.planetGainNode.gain.setValueAtTime(planetVolume, this.getContext().currentTime);
-        current.source.playbackRate.setValueAtTime(tapeRate, this.getContext().currentTime);
+        const now = this.getContext().currentTime;
+        this.advanceLoopPlaybackPhase(current, now);
+        current.planetGainNode.gain.setValueAtTime(planetVolume, now);
+        current.source.playbackRate.setValueAtTime(tapeRate, now);
         return;
       }
     }
     const created = this.createPlayback(
       key, orbitId, planetId, barId, "loop", planetVolume, planetAudioPan,
-      tapeRate, userSpeed, pitchCents, reverse, sampleStart, sampleEnd
+      tapeRate, userSpeed, pitchCents, reverse, sampleStart, sampleEnd, scope
     );
     if (!created) return;
     // Match commit 3e8ee22 exactly when the user speed is unchanged:
@@ -800,20 +1769,22 @@ class AudioEngine {
       created.playback.loopWindowStart = loopStart;
       created.playback.loopWindowEnd = loopEnd;
     }
+    created.playback.playbackPhaseOffset = safeOffset;
+    created.playback.playbackPhaseAt = created.context.currentTime;
     created.playback.source.start(created.context.currentTime, safeOffset);
   }
 
   triggerSequence(
     orbitId: string, planetId: string, barId: string, planetVolume: number, planetAudioPan: number,
     tapeRate: number, pitchCents: number, reverse: boolean,
-    retriggerMode: SequenceRetriggerMode, sampleStart = 0, sampleEnd = Infinity
+    retriggerMode: SequenceRetriggerMode, sampleStart = 0, sampleEnd = Infinity, scope?: PlaybackRenderScope
   ) {
     if (retriggerMode === "ignore-until-end" && this.hasActiveSequencePlayback(orbitId)) return;
     if (retriggerMode === "cut-previous") this.stopActiveSequencePlaybacksForOrbit(orbitId);
     const id = `sequence:${planetId}:${barId}:${crypto.randomUUID()}`;
     const created = this.createPlayback(
       id, orbitId, planetId, barId, "sequence", planetVolume, planetAudioPan,
-      tapeRate, 1, pitchCents, reverse, sampleStart, sampleEnd
+      tapeRate, 1, pitchCents, reverse, sampleStart, sampleEnd, scope
     );
     if (created) {
       // Play only the trimmed window. Pitch shifting preserves length, so the
@@ -833,6 +1804,7 @@ class AudioEngine {
     const playback = this.active.get(id);
     if (!playback) return;
     this.active.delete(id);
+    this.enforceCachePolicies();
     try { playback.source.stop(); } catch { /* already stopped */ }
     try { playback.planetGainNode.disconnect(); } catch { /* disconnected */ }
     playback.planetPanNode.disconnect();
@@ -892,7 +1864,10 @@ class AudioEngine {
 
   setActivePlanetAudioPan(planetId: string, audioPan: number) {
     for (const playback of this.active.values()) {
-      if (playback.planetId === planetId) playback.planetPanNode.setPan(audioPan);
+      if (playback.planetId === planetId) {
+        playback.planetAudioPan = audioPan;
+        playback.planetPanNode.setPan(audioPan);
+      }
     }
   }
 
@@ -900,6 +1875,7 @@ class AudioEngine {
     const context = this.getContext();
     for (const playback of this.active.values()) {
       if (playback.planetId === planetId && playback.mode === "loop") {
+        this.advanceLoopPlaybackPhase(playback, context.currentTime);
         playback.source.playbackRate.setValueAtTime(tapeRate, context.currentTime);
       }
     }
@@ -908,42 +1884,25 @@ class AudioEngine {
   hasProcessedBuffer(orbitId: string, planetId: string, speed: number, pitchCents: number, sampleStart = 0, sampleEnd = Infinity) {
     const normalizedSpeed = this.normalizedSpeed(speed);
     const roundedPitch = Math.round(pitchCents);
-    return (Math.abs(normalizedSpeed - 1) < .0001 && roundedPitch === 0) ||
-      this.processedBuffers.has(this.processedBufferKey(orbitId, planetId, normalizedSpeed, roundedPitch, sampleStart, sampleEnd)) ||
-      this.coldProcessedBuffers.has(this.processedBufferKey(orbitId, planetId, normalizedSpeed, roundedPitch, sampleStart, sampleEnd));
+    if (Math.abs(normalizedSpeed - 1) < .0001 && roundedPitch === 0) return true;
+    const descriptor = this.describeProcessedBuffer(this.processedBufferRequest(orbitId, planetId, normalizedSpeed, roundedPitch, sampleStart, sampleEnd));
+    return this.touchCachedBuffer(this.processedBuffers, descriptor.key, descriptor) !== undefined ||
+      (this.coldProcessedBuffers.has(descriptor.key) && this.currentCacheEntry(this.coldProcessedEntries.get(descriptor.key)));
   }
 
-  hasPitchBuffer(orbitId: string, planetId: string, pitchCents: number) {
-    return this.hasProcessedBuffer(orbitId, planetId, 1, pitchCents);
-  }
+  private async renderPlanetBuffer(
+    descriptor: ProcessedBufferDescriptor,
+    shouldCancel: () => boolean = () => false,
+    shouldPreempt: () => boolean = () => false,
+    onRenderedFrames: (frames: number) => void = () => {}
+  ) {
+    const { key, lease, request, window: renderWindow } = descriptor;
+    const original = lease.buffer;
+    if (!this.currentCacheEntry(this.cacheEntryFor(descriptor, "forward", original))) throw new Error("Audio source changed before rendering.");
+    if (shouldCancel()) throw this.abortError();
 
-  async processPitchBuffer(orbitId: string, planetId: string, pitchCents: number, sampleStart = 0, sampleEnd = Infinity) {
-    return this.processPlanetBuffer(orbitId, planetId, 1, pitchCents, sampleStart, sampleEnd);
-  }
-
-  async processPlanetBuffer(orbitId: string, planetId: string, speed: number, pitchCents: number, sampleStart = 0, sampleEnd = Infinity) {
-    const normalizedSpeed = this.normalizedSpeed(speed);
-    const roundedPitch = Math.round(pitchCents);
-    if (this.hasProcessedBuffer(orbitId, planetId, normalizedSpeed, roundedPitch, sampleStart, sampleEnd)) return;
-    const window = this.processingWindow(orbitId, normalizedSpeed, sampleStart, sampleEnd);
-    const key = this.processedBufferKey(orbitId, planetId, normalizedSpeed, roundedPitch, sampleStart, sampleEnd);
-    const inFlight = this.processingPromises.get(key);
-    if (inFlight) return inFlight;
-    const scheduled = this.scheduleDspRender(() => this.renderPlanetBuffer(key, orbitId, normalizedSpeed, roundedPitch, window));
-    this.processingPromises.set(key, scheduled);
-    try {
-      await scheduled;
-    } finally {
-      if (this.processingPromises.get(key) === scheduled) this.processingPromises.delete(key);
-    }
-  }
-
-  private async renderPlanetBuffer(key: string, orbitId: string, normalizedSpeed: number, roundedPitch: number, renderWindow: ProcessingWindow) {
-    const original = this.buffers.get(orbitId);
-    if (!original) throw new Error("Audio buffer is unavailable.");
-
-    const pitchRate = Math.pow(2, roundedPitch / 1200);
-    const outputLength = Math.max(1, Math.ceil(original.length / normalizedSpeed));
+    const pitchRate = Math.pow(2, request.pitchCents / 1200);
+    const outputLength = Math.max(1, Math.ceil(original.length / request.speed));
     const output = this.getContext().createBuffer(
       original.numberOfChannels, outputLength, original.sampleRate
     );
@@ -960,7 +1919,7 @@ class AudioEngine {
     soundTouch.stretch.setParameters(original.sampleRate, 0, 0, 12);
     // Processing order is effectively original -> pitch-preserving tempo -> pitch shift -> reverse.
     // The rendered buffer replaces the dry/original source; playback never layers both.
-    soundTouch.tempo = normalizedSpeed;
+    soundTouch.tempo = request.speed;
     soundTouch.pitch = pitchRate;
     const filter = new SimpleFilter(new WebAudioBufferSource(padded), soundTouch);
     const blockFrames = 8192;
@@ -983,7 +1942,10 @@ class AudioEngine {
         peak = Math.max(peak, Math.abs(left), Math.abs(right));
       }
       outputPosition += frames;
+      onRenderedFrames(frames);
       await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      if (shouldCancel()) throw this.abortError();
+      if (shouldPreempt()) throw this.preemptError();
     }
 
     if (peak > .98) {
@@ -1001,8 +1963,10 @@ class AudioEngine {
     for (let channel = 0; channel < output.numberOfChannels; channel++) {
       physical.copyToChannel(output.getChannelData(channel).subarray(renderWindow.bufferStartFrame, renderWindow.bufferEndFrame), channel);
     }
-    this.cacheProcessedBuffer(this.processedBuffers, key, physical);
-    this.processedWindows.set(key, renderWindow);
+    if (!this.currentCacheEntry(this.cacheEntryFor(descriptor, "forward", original))) throw new Error("Audio source changed before rendering.");
+    if (shouldCancel()) throw this.abortError();
+    if (shouldPreempt()) throw this.preemptError();
+    this.cacheProcessedBuffer(this.processedBuffers, key, physical, descriptor);
   }
 
   private async loadRecordingProcessor(context: AudioContext) {
@@ -1137,18 +2101,13 @@ class AudioEngine {
 
   removeOrbit(orbitId: string) {
     this.stopAllActivePlaybacksForOrbit(orbitId);
+    this.invalidateDspJobsForOrbit(orbitId);
     this.buffers.delete(orbitId);
+    this.sourceLeases.delete(orbitId);
+    this.clearOrbitResidencies(orbitId);
     this.waveformPeaks.delete(orbitId);
     this.publishWaveformPeaks(orbitId, null);
-    for (const key of [...this.processedBuffers.keys()]) {
-      if (key.startsWith(`${orbitId}:`)) { this.processedBuffers.delete(key); this.coldProcessedBuffers.delete(key); this.processedWindows.delete(key); }
-    }
-    for (const key of [...this.coldProcessedBuffers.keys()]) {
-      if (key.startsWith(`${orbitId}:`)) { this.coldProcessedBuffers.delete(key); this.processedWindows.delete(key); }
-    }
-    for (const key of [...this.reverseBuffers.keys()]) {
-      if (key.startsWith(`${orbitId}:`)) this.reverseBuffers.delete(key);
-    }
+    this.clearOrbitProcessedCaches(orbitId);
     this.rawFiles.delete(orbitId);
     const rack = this.orbitWamRacks.get(orbitId);
     if (rack) { this.orbitWamRacks.delete(orbitId); void rack.disposeAll(); }

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import test from "node:test";
 
 const app = fs.readFileSync(new URL("../src/renderer/App.tsx", import.meta.url), "utf8");
+const speedPitch = fs.readFileSync(new URL("../src/renderer/hooks/useSpeedPitchProcessing.ts", import.meta.url), "utf8");
 const body = (name: string, nextName: string) => {
   const start = app.indexOf(`function ${name}`);
   const end = app.indexOf(`function ${nextName}`, start + 1);
@@ -21,6 +22,27 @@ test("splice gesture frames publish without creating a second history boundary",
   }
   assert.match(app, /onBeginMutation=\{pushHistory\}/);
   assert.match(app, /pushParameterHistory\(\);\s*setOrbitSpliceCount/);
+});
+
+test("render producers use owner-scoped scheduler lifetimes instead of immortal cache-key requests", () => {
+  assert.doesNotMatch(app, /processPlanetBuffer\(/);
+  assert.doesNotMatch(speedPitch, /processPlanetBuffer\(/);
+  assert.match(app, /ensureProcessedBuffer\([\s\S]*ownerId, priority, signal: controller\.signal/);
+  assert.match(app, /duplicate-scene:\$\{duplicate\.id\}/);
+  assert.match(app, /duplicate-orbit:\$\{newOrbitId\}/);
+  assert.match(app, /paste:\$\{newPlanet\.orbitId\}/);
+  assert.match(app, /project-open:\$\{projectRenderOwnerEpoch\}/);
+  assert.match(app, /trim:\$\{trimOwnerEpoch\}/);
+  assert.match(app, /abortRenderOwners/);
+  assert.match(app, /startRenderOwner/);
+  assert.match(app, /releaseRenderOwner/);
+  assert.match(app, /abortRenderOwners\(\(ownerId\) => ownerId\.startsWith\("edit:"\)\)/);
+  assert.match(app, /abortRenderOwners\(\(ownerId\) => ownerId\.startsWith\(`edit:\$\{current\.activeSceneId\}:`\)\)/);
+  assert.match(app, /abortRenderOwners\(\(\) => true\)/);
+  assert.match(speedPitch, /edit:\$\{sceneId\}:\$\{orbitId\}:\$\{planetId\}/);
+  assert.match(speedPitch, /startRenderOwner\(ownerId\)/);
+  assert.match(speedPitch, /releaseRenderOwner\(ownerId, controller\)/);
+  assert.match(speedPitch, /priority: "selected", signal/);
 });
 
 test("project open preflights and swaps a fresh allocator around the audio transaction", () => {

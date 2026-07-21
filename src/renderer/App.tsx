@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { SetStateAction } from "react";
-import { audioEngine, type ProjectAudioInput } from "./audio/audioEngine";
+import { audioEngine, type DspRenderPriority, type ProjectAudioInput } from "./audio/audioEngine";
+import { applyPlanetMotionUpdates, collectSceneAudioRequests, runSceneAudioReadinessTransition } from "./audio/sceneAudioReadiness";
 import { collectRetainedPluginSlotIds } from "./audio/wamRack";
 import { getWamCatalogEntry } from "./audio/wamCatalog";
 import { encodeWav, type WavSampleFormat } from "./audio/wavEncoder";
@@ -113,11 +114,16 @@ export default function App() {
   // Updated synchronously at the transition boundary so stale Canvas callbacks cannot revive old audio.
   const audibleSceneId = useRef<string | null>(activeSceneId);
   const playbackEpoch = useRef(0);
+  const playbackRenderController = useRef(new AbortController());
   // Separate from playbackEpoch: this cancels stale WAM hydration, not Canvas callbacks.
   const sceneTransitionEpoch = useRef(0);
+  const sceneTransitionController = useRef<AbortController | null>(null);
+  const permanentSceneResidencyOwner = useRef("scene:audible");
   const clipboardRef = useRef<AppClipboard>(null);
   const sceneDuplicationPending = useRef(false);
   const recordingInFlight = useRef(false);
+  const renderControllers = useRef(new Map<string, AbortController>());
+  const projectRenderEpoch = useRef(0);
   const stateRef = useRef({
     scenes, activeSceneId, orbits, planets, bars, selection, multiSelection,
     lastLoopBarLengthRadians, masterVolume, masterPan
@@ -180,6 +186,15 @@ export default function App() {
       return next;
     });
   }), []);
+
+  useEffect(() => () => {
+    sceneTransitionController.current?.abort();
+    sceneTransitionController.current = null;
+    playbackRenderController.current.abort();
+    audioEngine.replacePermanentResidency(permanentSceneResidencyOwner.current, []);
+    for (const controller of renderControllers.current.values()) controller.abort();
+    renderControllers.current.clear();
+  }, []);
 
   const selectedOrbit = useMemo(
     () => orbits.find((orbit) => orbit.id === selection.orbitId) ?? null,
@@ -267,8 +282,9 @@ export default function App() {
   function prepareActiveSceneTransition(nextSceneId: string, force = false) {
     return runActiveSceneTransition(stateRef.current.activeSceneId, nextSceneId, {
       designateAudibleScene: () => {
-        audibleSceneId.current = nextSceneId;
+        audibleSceneId.current = null;
         playbackEpoch.current += 1;
+        resetPlaybackRenderScope();
       },
       stopActivePlaybacks: () => audioEngine.stopAllActivePlaybacks(),
       closeTransientUi: () => setMenu(null),
@@ -276,28 +292,78 @@ export default function App() {
     }, force);
   }
 
-  /** One reconciliation path for scene tabs, open, undo/redo and structural edits. */
-  function scheduleScenePluginTransition(previous: readonly Orbit[], target: readonly Orbit[], targetSceneId: string) {
+  function sameSceneAudioRequirements(previous: Scene | undefined, next: Scene | undefined) {
+    if (!previous || !next) return previous === next;
+    const describe = (scene: Scene) => collectSceneAudioRequests(scene)
+      .map((request) => [
+        request.orbitId, request.planetId, request.speed, request.pitchCents,
+        request.sampleStart, request.sampleEnd, request.direction
+      ].join("|"))
+      .sort();
+    const before = describe(previous);
+    const after = describe(next);
+    return before.length === after.length && before.every((value, index) => value === after[index]);
+  }
+
+  function refreshCommittedSceneReadiness(
+    nextScenes: Scene[], nextActiveSceneId: string, afterAudioReady?: () => void
+  ) {
+    const current = stateRef.current;
+    const previous = current.scenes.find((scene) => scene.id === current.activeSceneId);
+    const target = nextScenes.find((scene) => scene.id === nextActiveSceneId);
+    const changedScene = previous?.id !== target?.id || previous?.orbits !== target?.orbits;
+    if (!changedScene && sameSceneAudioRequirements(previous, target)) return;
+    prepareActiveSceneTransition(nextActiveSceneId, true);
+    scheduleScenePluginTransition(previous?.orbits ?? [], target, nextActiveSceneId, afterAudioReady);
+  }
+
+  function scheduleScenePluginTransition(
+    previous: readonly Orbit[], target: Scene | undefined, targetSceneId: string, afterAudioReady?: () => void
+  ) {
     const epoch = ++sceneTransitionEpoch.current;
+    sceneTransitionController.current?.abort();
+    const controller = new AbortController();
+    sceneTransitionController.current = controller;
     audibleSceneId.current = null;
-    void audioEngine.transitionScenePluginRacks(previous, target, epoch, targetSceneId).then((ownsTarget) => {
-      if (ownsTarget && sceneTransitionEpoch.current === epoch) audibleSceneId.current = targetSceneId;
-    }).catch(() => {
-      // A single unavailable slot is dry; the rest of the target may remain audible.
-      if (sceneTransitionEpoch.current === epoch) audibleSceneId.current = targetSceneId;
+    const requests = target ? collectSceneAudioRequests(target) : [];
+    const ownerPrefix = `scene-prewarm:${epoch}`;
+    void runSceneAudioReadinessTransition({
+      requests,
+      signal: controller.signal,
+      isCurrent: () => sceneTransitionEpoch.current === epoch,
+      acquire: () => audioEngine.acquireResidency(`scene:provisional:${epoch}`, requests),
+      prewarm: (request, index) => audioEngine.ensureProcessedBuffer(request, {
+        ownerId: `${ownerPrefix}:${index}:${request.orbitId}:${request.planetId}`,
+        priority: "playback",
+        signal: controller.signal
+      }),
+      hydrate: () => audioEngine.transitionScenePluginRacks(previous, target?.orbits ?? [], epoch, targetSceneId),
+      publish: () => {
+        audioEngine.replacePermanentResidency(permanentSceneResidencyOwner.current, requests);
+        audibleSceneId.current = targetSceneId;
+        afterAudioReady?.();
+      },
+      reportAudioFailure: (error) => {
+        controller.abort();
+        flash(error instanceof Error ? `Scene audio is not ready: ${error.message}` : "Scene audio is not ready.");
+      }
+    }).finally(() => {
+      if (sceneTransitionController.current === controller) sceneTransitionController.current = null;
     });
   }
 
   function activateScene(nextSceneId: string) {
     if (!stateRef.current.scenes.some((scene) => scene.id === nextSceneId)) return;
-    if (!prepareActiveSceneTransition(nextSceneId)) return;
+    const changed = prepareActiveSceneTransition(nextSceneId);
+    if (!changed && audibleSceneId.current === nextSceneId) return;
+    if (!changed) prepareActiveSceneTransition(nextSceneId, true);
     resetParameterHistoryWindow();
-    setActiveSceneId(nextSceneId);
+    if (changed) setActiveSceneId(nextSceneId);
     // Publishing the target selection stays synchronous for the existing tab
     // contract. Audio remains gated until the newest hydration transaction settles.
     const previous = stateRef.current.scenes.find((scene) => scene.id === stateRef.current.activeSceneId);
     const target = stateRef.current.scenes.find((scene) => scene.id === nextSceneId);
-    scheduleScenePluginTransition(previous?.orbits ?? [], target?.orbits ?? [], nextSceneId);
+    scheduleScenePluginTransition(previous?.orbits ?? [], target, nextSceneId);
   }
 
   function commitSceneDocument(nextScenes: Scene[], nextActiveSceneId: string) {
@@ -306,19 +372,21 @@ export default function App() {
     if (undoStack.current.length > MAX_HISTORY) undoStack.current.shift();
     redoStack.current = [];
     bumpHistoryRevision();
-    const previous = stateRef.current.scenes.find((scene) => scene.id === stateRef.current.activeSceneId);
-    const target = nextScenes.find((scene) => scene.id === nextActiveSceneId);
-    // Scene metadata changes retain the orbit array by reference. Rehydrating an
-    // unchanged active rack would destroy live WAMs and cause an avoidable dropout.
-    const shouldTransition = previous?.id !== target?.id || previous?.orbits !== target?.orbits;
-    if (shouldTransition) prepareActiveSceneTransition(nextActiveSceneId);
+    refreshCommittedSceneReadiness(nextScenes, nextActiveSceneId);
     setScenes(nextScenes);
     setActiveSceneId(nextActiveSceneId);
-    if (shouldTransition) {
-      scheduleScenePluginTransition(previous?.orbits ?? [], target?.orbits ?? [], nextActiveSceneId);
-    }
     pruneUnreferencedAudio(nextScenes);
     setIsDirty(true);
+  }
+
+  function commitActiveSceneMutation(update: (scene: Scene) => Scene, markDirty = true) {
+    resetPlaybackRenderScope();
+    const current = stateRef.current;
+    const nextScenes = updateSceneById(current.scenes, current.activeSceneId, update);
+    refreshCommittedSceneReadiness(nextScenes, current.activeSceneId);
+    setScenes(nextScenes);
+    if (markDirty) setIsDirty(true);
+    return nextScenes;
   }
 
   // Gesture owners (Canvas onBeginMutation / settings pushParameterHistory) already
@@ -338,6 +406,7 @@ export default function App() {
     const current = stateRef.current;
     const next = deleteScene(current.scenes, current.activeSceneId, current.activeSceneId);
     if (next.scenes === current.scenes) return;
+    abortRenderOwners((ownerId) => ownerId.startsWith(`edit:${current.activeSceneId}:`));
     commitSceneDocument(next.scenes, next.activeSceneId);
   }
 
@@ -407,8 +476,11 @@ export default function App() {
       for (const planet of duplicate.planets) {
         if (planet.speed !== 1 || planet.pitchCents) {
           const orbit = duplicate.orbits.find((item) => item.id === planet.orbitId);
-          void audioEngine.processPlanetBuffer(planet.orbitId, planet.id, planet.speed, planet.pitchCents,
-            orbit ? getSampleStart(orbit) : 0, orbit ? getSampleEnd(orbit) : Infinity);
+          void requestProcessedPlanet(
+            planet.orbitId, planet.id, planet.speed, planet.pitchCents,
+            orbit ? getSampleStart(orbit) : 0, orbit ? getSampleEnd(orbit) : Infinity,
+            `duplicate-scene:${duplicate.id}:${planet.orbitId}:${planet.id}`, "background"
+          );
         }
       }
     } catch (error) {
@@ -425,7 +497,8 @@ export default function App() {
 
   function restoreSnapshot(next: HistorySnapshot) {
     // Undo/redo is a runtime boundary even when the owning scene ID is unchanged.
-    prepareActiveSceneTransition(next.activeSceneId, true);
+    abortRenderOwners((ownerId) => ownerId.startsWith("edit:"));
+    refreshCommittedSceneReadiness(next.scenes, next.activeSceneId);
     setScenes(next.scenes);
     setActiveSceneId(next.activeSceneId);
     setMasterVolume(next.master.volume);
@@ -434,9 +507,6 @@ export default function App() {
       audioEngine.setVolume(orbitId, volume);
       audioEngine.setOrbitAudioPan(orbitId, pan);
     });
-    const prior = stateRef.current.scenes.find((scene) => scene.id === stateRef.current.activeSceneId);
-    const target = next.scenes.find((scene) => scene.id === next.activeSceneId);
-    scheduleScenePluginTransition(prior?.orbits ?? [], target?.orbits ?? [], next.activeSceneId);
   }
 
   function undo() {
@@ -468,6 +538,67 @@ export default function App() {
     window.setTimeout(() => setMessage(null), duration);
   }
 
+  function isExpectedDspAbort(error: unknown) {
+    return error instanceof DOMException && error.name === "AbortError";
+  }
+
+  function abortRenderOwners(matches: (ownerId: string) => boolean) {
+    for (const [ownerId, controller] of renderControllers.current) {
+      if (!matches(ownerId)) continue;
+      controller.abort();
+      renderControllers.current.delete(ownerId);
+    }
+  }
+
+  function startRenderOwner(ownerId: string) {
+    renderControllers.current.get(ownerId)?.abort();
+    const controller = new AbortController();
+    renderControllers.current.set(ownerId, controller);
+    return controller;
+  }
+
+  function releaseRenderOwner(ownerId: string, controller: AbortController) {
+    if (renderControllers.current.get(ownerId) === controller) renderControllers.current.delete(ownerId);
+  }
+
+  function requestProcessedPlanet(
+    orbitId: string, planetId: string, speed: number, pitchCents: number,
+    sampleStart: number, sampleEnd: number, ownerId: string, priority: DspRenderPriority,
+    direction: "forward" | "reverse" = "forward"
+  ) {
+    const controller = startRenderOwner(ownerId);
+    const promise = audioEngine.ensureProcessedBuffer({
+      orbitId, planetId, speed, pitchCents, sampleStart, sampleEnd, direction
+    }, { ownerId, priority, signal: controller.signal });
+    void promise.catch((error: unknown) => {
+      if (!isExpectedDspAbort(error)) flash("Audio processing failed.");
+    }).finally(() => {
+      releaseRenderOwner(ownerId, controller);
+    });
+    return promise;
+  }
+
+  async function prewarmAndCommitSceneMutation(
+    nextScenes: Scene[], nextSceneId: string, ownerId: string, priority: DspRenderPriority, publish: () => void
+  ) {
+    const target = nextScenes.find((scene) => scene.id === nextSceneId);
+    const requests = target ? collectSceneAudioRequests(target) : [];
+    const controller = startRenderOwner(ownerId);
+    const release = audioEngine.acquireResidency(`scene:staged:${ownerId}`, requests);
+    try {
+      await Promise.all(requests.map((request, index) => audioEngine.ensureProcessedBuffer(request, {
+        ownerId: `${ownerId}:${index}:${request.orbitId}:${request.planetId}`,
+        priority,
+        signal: controller.signal
+      })));
+      if (controller.signal.aborted) return;
+      publish();
+    } finally {
+      release();
+      releaseRenderOwner(ownerId, controller);
+    }
+  }
+
   function canOrbitSound(orbitId: string) {
     const state = stateRef.current;
     const audibleScene = state.scenes.find((scene) => scene.id === audibleSceneId.current);
@@ -481,10 +612,26 @@ export default function App() {
     return sceneId === audibleSceneId.current && epoch === playbackEpoch.current;
   }
 
+  function resetPlaybackRenderScope() {
+    playbackRenderController.current.abort();
+    playbackRenderController.current = new AbortController();
+  }
+
+  function playbackRenderScope(sceneId: string, epoch: number, kind: "loop" | "sequence", planetId: string, barId: string) {
+    return {
+      ownerId: `playback:${sceneId}:${epoch}:${kind}:${planetId}:${barId}`,
+      signal: playbackRenderController.current.signal
+    };
+  }
+
   function deletePlanet(planetId: string) {
     pushHistory();
+    abortRenderOwners((ownerId) => ownerId.endsWith(`:${planetId}`));
     audioEngine.stopAllActivePlaybacksForPlanet(planetId);
-    setPlanets((current) => current.filter((planet) => planet.id !== planetId));
+    commitActiveSceneMutation((scene) => ({
+      ...scene,
+      planets: scene.planets.filter((planet) => planet.id !== planetId)
+    }));
     if (stateRef.current.selection.planetId === planetId) {
       selectSingle({ ...stateRef.current.selection, planetId: null });
     }
@@ -507,10 +654,14 @@ export default function App() {
     } else if (state.selection.orbitId) {
       const orbitId = state.selection.orbitId;
       pushHistory();
+      abortRenderOwners((ownerId) => ownerId.includes(`:${orbitId}:`));
       audioEngine.stopAllActivePlaybacksForOrbit(orbitId);
-      setOrbits((current) => current.filter((orbit) => orbit.id !== orbitId));
-      setPlanets((current) => current.filter((planet) => planet.orbitId !== orbitId));
-      setBars((current) => current.filter((bar) => bar.orbitId !== orbitId));
+      commitActiveSceneMutation((scene) => ({
+        ...scene,
+        orbits: scene.orbits.filter((orbit) => orbit.id !== orbitId),
+        planets: scene.planets.filter((planet) => planet.orbitId !== orbitId),
+        bars: scene.bars.filter((bar) => bar.orbitId !== orbitId)
+      }));
       clearSelection();
     }
   }
@@ -523,12 +674,16 @@ export default function App() {
     const planetIds = new Set(state.multiSelection.planetIds);
     if (!orbitIds.size && !planetIds.size) return;
     pushHistory();
+    for (const orbitId of orbitIds) abortRenderOwners((ownerId) => ownerId.includes(`:${orbitId}:`));
+    for (const planetId of planetIds) abortRenderOwners((ownerId) => ownerId.endsWith(`:${planetId}`));
     for (const orbitId of orbitIds) audioEngine.stopAllActivePlaybacksForOrbit(orbitId);
     for (const planetId of planetIds) audioEngine.stopAllActivePlaybacksForPlanet(planetId);
-    setOrbits((current) => current.filter((orbit) => !orbitIds.has(orbit.id)));
-    setPlanets((current) => current.filter((planet) =>
-      !planetIds.has(planet.id) && !orbitIds.has(planet.orbitId)));
-    setBars((current) => current.filter((bar) => !orbitIds.has(bar.orbitId)));
+    commitActiveSceneMutation((scene) => ({
+      ...scene,
+      orbits: scene.orbits.filter((orbit) => !orbitIds.has(orbit.id)),
+      planets: scene.planets.filter((planet) => !planetIds.has(planet.id) && !orbitIds.has(planet.orbitId)),
+      bars: scene.bars.filter((bar) => !orbitIds.has(bar.orbitId))
+    }));
     clearSelection();
   }
 
@@ -622,8 +777,11 @@ export default function App() {
     reconcileOrbitPlugins(duplicate);
     for (const planet of copiedPlanets) {
       if (planet.speed !== 1 || planet.pitchCents) {
-        void audioEngine.processPlanetBuffer(newOrbitId, planet.id, planet.speed, planet.pitchCents,
-          getSampleStart(duplicate), getSampleEnd(duplicate));
+        void requestProcessedPlanet(
+          newOrbitId, planet.id, planet.speed, planet.pitchCents,
+          getSampleStart(duplicate), getSampleEnd(duplicate),
+          `duplicate-orbit:${newOrbitId}:${planet.id}`, "background"
+        );
       }
     }
   }
@@ -680,14 +838,15 @@ export default function App() {
       collisionFlashRemaining: 0
     };
     pushHistory();
-    setPlanets((current) => [...current, newPlanet]);
+    commitActiveSceneMutation((scene) => ({ ...scene, planets: [...scene.planets, newPlanet] }));
     selectSingle({ orbitId: targetId, planetId, barId: null });
     if (newPlanet.speed !== 1 || newPlanet.pitchCents) {
       const targetOrbit = stateRef.current.orbits.find((orbit) => orbit.id === newPlanet.orbitId);
-      void audioEngine.processPlanetBuffer(
+      void requestProcessedPlanet(
         newPlanet.orbitId, newPlanet.id, newPlanet.speed, newPlanet.pitchCents,
-        targetOrbit ? getSampleStart(targetOrbit) : 0, targetOrbit ? getSampleEnd(targetOrbit) : Infinity
-      ).catch(() => flash("Pasted planet audio processing failed."));
+        targetOrbit ? getSampleStart(targetOrbit) : 0, targetOrbit ? getSampleEnd(targetOrbit) : Infinity,
+        `paste:${newPlanet.orbitId}:${newPlanet.id}`, "selected"
+      );
     }
     flash("Planet pasted.");
   }
@@ -706,7 +865,8 @@ export default function App() {
 
   const { previewPlanetSpeed, commitPlanetSpeed, previewPlanetPitch, commitPlanetPitch } = useSpeedPitchProcessing({
     stateRef, setPlanets, setScenes, pushHistory, flash, audioEngine,
-    randomId, clamp, minDirectRate: MIN_DIRECT_RATE, maxDirectRate: MAX_DIRECT_RATE
+    randomId, clamp, minDirectRate: MIN_DIRECT_RATE, maxDirectRate: MAX_DIRECT_RATE,
+    startRenderOwner, releaseRenderOwner, refreshCommittedScene: refreshCommittedSceneReadiness
   });
 
   async function createOrbitFromAudio(
@@ -822,6 +982,9 @@ export default function App() {
       if (!result.canceled) flash(result.error ?? "Project could not be opened.");
       return;
     }
+    const projectRenderOwnerEpoch = ++projectRenderEpoch.current;
+    abortRenderOwners(() => true);
+    resetPlaybackRenderScope();
     try {
       const project = parseProject(result.text);
       // Parsing has already validated JSON shape/limits. Keep the restored store
@@ -876,9 +1039,6 @@ export default function App() {
           audioEngine.replaceProjectAudio(stagedAudio);
         },
         publish: () => {
-          const previousOrbits = stateRef.current.scenes.find((scene) => scene.id === stateRef.current.activeSceneId)?.orbits ?? [];
-          const restoredActiveOrbits = restoredScenes.find((scene) => scene.id === project.activeSceneId)?.orbits ?? [];
-          prepareActiveSceneTransition(project.activeSceneId, true);
           resetParameterHistoryWindow();
           projectIds.current = restoredProjectIds;
           audioEngine.replacePluginStateStore(restoredPluginStates);
@@ -894,18 +1054,21 @@ export default function App() {
           undoStack.current = [];
           redoStack.current = [];
           bumpHistoryRevision();
-          // Only the active scene is hydrated after open; inactive scenes retain
-          // validated blobs until their own gate-first activation transaction.
-          scheduleScenePluginTransition(previousOrbits, restoredActiveOrbits, project.activeSceneId);
+          refreshCommittedSceneReadiness(restoredScenes, project.activeSceneId, () => {
+            for (const scene of restoredScenes) {
+              if (scene.id === project.activeSceneId) continue;
+              for (const request of collectSceneAudioRequests(scene)) {
+                void requestProcessedPlanet(
+                  request.orbitId, request.planetId, request.speed, request.pitchCents,
+                  request.sampleStart, request.sampleEnd,
+                  `project-open:${projectRenderOwnerEpoch}:${scene.id}:${request.orbitId}:${request.planetId}`,
+                  "background", request.direction
+                );
+              }
+            }
+          });
           if (missing.length) flash(`Project loaded with missing audio: ${missing.join(", ")}`, 5000);
           else flash("Project loaded.");
-          for (const scene of restoredScenes) for (const planet of scene.planets) {
-            if (planet.speed !== 1 || planet.pitchCents) {
-              const orbit = scene.orbits.find((item) => item.id === planet.orbitId);
-              void audioEngine.processPlanetBuffer(planet.orbitId, planet.id, planet.speed, planet.pitchCents,
-                orbit ? getSampleStart(orbit) : 0, orbit ? getSampleEnd(orbit) : Infinity);
-            }
-          }
         }
       });
     } catch (error) {
@@ -979,10 +1142,14 @@ export default function App() {
 
   function setOrbitMode(orbitId: string, mode: OrbitMode) {
     audioEngine.stopAllActivePlaybacksForOrbit(orbitId);
-    updateOrbit(orbitId, { mode });
-    if (mode === "loop") {
-      setBars((current) => current.map((bar) => bar.orbitId === orbitId ? { ...bar, kind: "play" } : bar));
-    }
+    pushHistory();
+    commitActiveSceneMutation((scene) => ({
+      ...scene,
+      orbits: scene.orbits.map((orbit) => orbit.id === orbitId ? { ...orbit, mode } : orbit),
+      bars: mode === "loop"
+        ? scene.bars.map((bar) => bar.orbitId === orbitId ? { ...bar, kind: "play" } : bar)
+        : scene.bars
+    }));
   }
 
   function toggleOrbitPause(orbitId = menu?.orbitId) {
@@ -1212,11 +1379,12 @@ export default function App() {
         onAddPlanet={(orbitId, angle) => {
           pushHistory();
           const planetId = projectId();
-          setPlanets((current) => [...current, {
+          const planet: Planet = {
             id: planetId, orbitId, angle, speed: 1, volume: 1, audioPan: 0, pitchCents: 0, isActive: true,
             direction: 1, collisionSpeedMultiplier: 1,
             collisionFlashRemaining: 0
-          }]);
+          };
+          commitActiveSceneMutation((scene) => ({ ...scene, planets: [...scene.planets, planet] }));
           selectSingle({ orbitId, planetId, barId: null });
         }}
         onAddBar={(orbitId, angle) => {
@@ -1244,10 +1412,7 @@ export default function App() {
               );
             }
           }
-          setPlanets((current) => current.map((planet) => {
-            const changes = updates.get(planet.id);
-            return changes ? { ...planet, ...changes } : planet;
-          }));
+          commitActiveSceneMutation((scene) => applyPlanetMotionUpdates(scene, updates), false);
         }}
         sceneId={activeSceneId}
         playbackEpoch={playbackEpoch.current}
@@ -1258,7 +1423,8 @@ export default function App() {
             getSampleStart(orbit) + angle / TAU * getSampleDuration(orbit), planet.volume,
             planet.audioPan,
             getTapeStyleRuntimeRateOnly(orbit, planet), planet.speed, planet.pitchCents,
-            planet.direction === -1, getSampleStart(orbit), getSampleEnd(orbit)
+            planet.direction === -1, getSampleStart(orbit), getSampleEnd(orbit),
+            playbackRenderScope(callback.sceneId, callback.epoch, "loop", planet.id, bar.id)
           );
         }}
         onSequencePlay={(orbit, planet, bar, callback) => {
@@ -1266,7 +1432,8 @@ export default function App() {
           audioEngine.triggerSequence(
             orbit.id, planet.id, bar.id, planet.volume, planet.audioPan, 1, planet.pitchCents,
             planet.direction === -1, orbit.sequenceRetriggerMode,
-            getSampleStart(orbit), getSampleEnd(orbit)
+            getSampleStart(orbit), getSampleEnd(orbit),
+            playbackRenderScope(callback.sceneId, callback.epoch, "sequence", planet.id, bar.id)
           );
         }}
         onSequenceStop={(orbitId, callback) => {
@@ -1310,19 +1477,24 @@ export default function App() {
         const orbit = stateRef.current.orbits.find((item) => item.id === orbitId);
         if (!orbit) return;
         const window = normalizeSampleWindow(orbit.audioDuration, start, end);
-        const required = stateRef.current.planets.filter((planet) => planet.orbitId === orbitId && (planet.speed !== 1 || planet.pitchCents));
-        // Two-phase trim commit: keep the document and active sources on their
-        // old window until every requested artifact is render-ready.
-        void Promise.all(required.map((planet) => audioEngine.processPlanetBuffer(
-          orbitId, planet.id, planet.speed, planet.pitchCents, window.start, window.end
-        ))).then(() => {
-          if (stateRef.current.orbits.find((item) => item.id === orbitId) !== orbit) return;
-          pushParameterHistory();
-          setOrbits((current) => current.map((item) => item.id === orbitId
+        const currentScenes = stateRef.current.scenes;
+        const nextScenes = updateSceneById(currentScenes, stateRef.current.activeSceneId, (scene) => ({
+          ...scene,
+          orbits: scene.orbits.map((item) => item.id === orbitId
             ? { ...item, sampleStart: window.start, sampleEnd: window.end }
-            : item));
+            : item)
+        }));
+        const trimOwnerEpoch = projectRenderEpoch.current;
+        void prewarmAndCommitSceneMutation(
+          nextScenes, stateRef.current.activeSceneId, `trim:${trimOwnerEpoch}:${orbitId}`, "selected", () => {
+          if (stateRef.current.scenes !== currentScenes) return;
+          pushParameterHistory();
+          refreshCommittedSceneReadiness(nextScenes, stateRef.current.activeSceneId);
+          setScenes(nextScenes);
           audioEngine.stopActiveLoopPlaybacksForOrbit(orbitId);
-        }).catch(() => flash("Trim processing failed; the previous sample window remains active."));
+        }).catch((error: unknown) => {
+          if (!isExpectedDspAbort(error)) flash("Trim processing failed; the previous sample window remains active.");
+        });
       }}
       hasPlanetClipboard={clipboard?.type === "planet"}
       onProjectName={(name) => { setProjectName(name); setIsDirty(true); }}
@@ -1412,8 +1584,11 @@ export default function App() {
       onPlanetReverse={(planetId, reverse) => {
         pushHistory();
         audioEngine.stopAllActivePlaybacksForPlanet(planetId);
-        setPlanets((current) => current.map((planet) =>
-          planet.id === planetId ? { ...planet, direction: reverse ? -1 : 1 } : planet));
+        commitActiveSceneMutation((scene) => ({
+          ...scene,
+          planets: scene.planets.map((planet) =>
+            planet.id === planetId ? { ...planet, direction: reverse ? -1 : 1 } : planet)
+        }));
       }}
       onCopyPlanet={copyPlanet}
       onPastePlanetToOrbit={(orbitId) => pastePlanet(orbitId)}

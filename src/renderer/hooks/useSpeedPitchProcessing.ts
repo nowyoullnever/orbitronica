@@ -1,4 +1,5 @@
 import type { SetStateAction } from "react";
+import type { DspRenderPriority, ProcessedBufferRequest } from "../audio/audioEngine";
 import { updatePlanetForFreshRequest } from "../state/scenes";
 import type { Planet, Scene } from "../state/types";
 import { getSampleEnd, getSampleStart } from "../utils/geometry";
@@ -28,11 +29,13 @@ export type SpeedPitchStateSnapshot = {
   planets: Planet[];
 };
 
-/** audioEngine.processPlanetBuffer's shape, injected so this hook stays a plain closure over
- *  explicit dependencies rather than importing the audioEngine singleton itself. */
 export type SpeedPitchAudioEngine = {
   hasProcessedBuffer(orbitId: string, planetId: string, speed: number, pitchCents: number, sampleStart?: number, sampleEnd?: number): boolean;
-  processPlanetBuffer(orbitId: string, planetId: string, speed: number, pitchCents: number, sampleStart?: number, sampleEnd?: number): Promise<void>;
+  ensureProcessedBuffer(request: ProcessedBufferRequest, options: {
+    ownerId: string;
+    priority: DspRenderPriority;
+    signal: AbortSignal;
+  }): Promise<void>;
 };
 
 export type UseSpeedPitchProcessingDeps = {
@@ -46,15 +49,28 @@ export type UseSpeedPitchProcessingDeps = {
   clamp: (value: number, min: number, max: number) => number;
   minDirectRate: number;
   maxDirectRate: number;
+  startRenderOwner: (ownerId: string) => AbortController;
+  releaseRenderOwner: (ownerId: string, controller: AbortController) => void;
 };
 
 /**
  * The SoundTouch speed/pitch preview+commit pipeline lifted out of App.tsx. This only
- * orchestrates React state around audioEngine.processPlanetBuffer; the actual DSP transform
+ * orchestrates React state around owner-scoped DSP requests; the actual DSP transform
  * lives in audioEngine.ts (pinned by a dedicated test in test/audioEngine.test.ts).
  */
 export function useSpeedPitchProcessing(deps: UseSpeedPitchProcessingDeps) {
-  const { stateRef, setPlanets, setScenes, pushHistory, flash, audioEngine, randomId, clamp, minDirectRate, maxDirectRate } = deps;
+  const { stateRef, setPlanets, setScenes, pushHistory, flash, audioEngine, randomId, clamp, minDirectRate, maxDirectRate, startRenderOwner, releaseRenderOwner } = deps;
+  const startEdit = (sceneId: string, orbitId: string, planetId: string) => {
+    const ownerId = `edit:${sceneId}:${orbitId}:${planetId}`;
+    return { ownerId, controller: startRenderOwner(ownerId) };
+  };
+  const ensureSelected = (
+    orbitId: string, planetId: string, speed: number, pitchCents: number,
+    sampleStart: number, sampleEnd: number, ownerId: string, signal: AbortSignal
+  ) => audioEngine.ensureProcessedBuffer({
+    orbitId, planetId, speed, pitchCents, sampleStart, sampleEnd, direction: "forward"
+  }, { ownerId, priority: "selected", signal });
+  const isAbortError = (error: unknown) => error instanceof DOMException && error.name === "AbortError";
   const sampleWindow = (orbitId: string) => {
     const orbit = stateRef.current.scenes.find((scene) => scene.id === stateRef.current.activeSceneId)?.orbits.find((item) => item.id === orbitId);
     return orbit ? [getSampleStart(orbit), getSampleEnd(orbit)] as const : [0, Infinity] as const;
@@ -85,6 +101,7 @@ export function useSpeedPitchProcessing(deps: UseSpeedPitchProcessingDeps) {
         item.id === planetId ? { ...clearSpeedProcessing(item), speed, speedProcessingError: undefined } : item));
       return;
     }
+    const { ownerId, controller } = startEdit(sceneId, planet.orbitId, planetId);
     setPlanets((current) => current.map((item) => item.id === planetId ? {
       ...item,
       pendingSpeed: speed,
@@ -94,13 +111,13 @@ export function useSpeedPitchProcessing(deps: UseSpeedPitchProcessingDeps) {
       speedProcessingError: undefined
     } : item));
     try {
-      await audioEngine.processPlanetBuffer(planet.orbitId, planet.id, speed, pitchAtRequest, sampleStart, sampleEnd);
+      await ensureSelected(planet.orbitId, planet.id, speed, pitchAtRequest, sampleStart, sampleEnd, ownerId, controller.signal);
       let latest = stateRef.current.scenes.find((scene) => scene.id === sceneId)
         ?.planets.find((item) => item.id === planetId);
       if (latest?.speedProcessRequestId !== requestId) return;
       if (latest.pitchCents !== pitchAtRequest) {
         const [latestStart, latestEnd] = sampleWindow(latest.orbitId);
-        await audioEngine.processPlanetBuffer(latest.orbitId, latest.id, speed, latest.pitchCents, latestStart, latestEnd);
+        await ensureSelected(latest.orbitId, latest.id, speed, latest.pitchCents, latestStart, latestEnd, ownerId, controller.signal);
         latest = stateRef.current.scenes.find((scene) => scene.id === sceneId)
           ?.planets.find((item) => item.id === planetId);
         if (latest?.speedProcessRequestId !== requestId) return;
@@ -109,7 +126,8 @@ export function useSpeedPitchProcessing(deps: UseSpeedPitchProcessingDeps) {
         current, sceneId, planetId, "speed", requestId,
         (item) => ({ ...clearSpeedProcessing(item), speed, speedProcessingError: undefined })
       ));
-    } catch {
+    } catch (error) {
+      if (isAbortError(error)) return;
       const latest = stateRef.current.scenes.find((scene) => scene.id === sceneId)
         ?.planets.find((item) => item.id === planetId);
       if (latest?.speedProcessRequestId !== requestId) return;
@@ -118,6 +136,8 @@ export function useSpeedPitchProcessing(deps: UseSpeedPitchProcessingDeps) {
         (item) => ({ ...clearSpeedProcessing(item), speedProcessingError: "Speed processing failed" })
       ));
       flash("Speed processing failed; the previous speed remains active.");
+    } finally {
+      releaseRenderOwner(ownerId, controller);
     }
   }
 
@@ -146,18 +166,19 @@ export function useSpeedPitchProcessing(deps: UseSpeedPitchProcessingDeps) {
         item.id === planetId ? { ...clearPitchProcessing(item), pitchCents } : item));
       return;
     }
+    const { ownerId, controller } = startEdit(sceneId, planet.orbitId, planetId);
     setPlanets((current) => current.map((item) => item.id === planetId ? {
       ...item, pendingPitchCents: pitchCents, isPitchProcessing: true,
       processingPitchCents: pitchCents, pitchProcessRequestId: requestId
     } : item));
     try {
-      await audioEngine.processPlanetBuffer(planet.orbitId, planet.id, speedAtRequest, pitchCents, sampleStart, sampleEnd);
+      await ensureSelected(planet.orbitId, planet.id, speedAtRequest, pitchCents, sampleStart, sampleEnd, ownerId, controller.signal);
       let latest = stateRef.current.scenes.find((scene) => scene.id === sceneId)
         ?.planets.find((item) => item.id === planetId);
       if (latest?.pitchProcessRequestId !== requestId) return;
       if (latest.speed !== speedAtRequest) {
         const [latestStart, latestEnd] = sampleWindow(latest.orbitId);
-        await audioEngine.processPlanetBuffer(latest.orbitId, latest.id, latest.speed, pitchCents, latestStart, latestEnd);
+        await ensureSelected(latest.orbitId, latest.id, latest.speed, pitchCents, latestStart, latestEnd, ownerId, controller.signal);
         latest = stateRef.current.scenes.find((scene) => scene.id === sceneId)
           ?.planets.find((item) => item.id === planetId);
         if (latest?.pitchProcessRequestId !== requestId) return;
@@ -166,7 +187,8 @@ export function useSpeedPitchProcessing(deps: UseSpeedPitchProcessingDeps) {
         current, sceneId, planetId, "pitch", requestId,
         (item) => ({ ...clearPitchProcessing(item), pitchCents })
       ));
-    } catch {
+    } catch (error) {
+      if (isAbortError(error)) return;
       const latest = stateRef.current.scenes.find((scene) => scene.id === sceneId)
         ?.planets.find((item) => item.id === planetId);
       if (latest?.pitchProcessRequestId !== requestId) return;
@@ -174,6 +196,8 @@ export function useSpeedPitchProcessing(deps: UseSpeedPitchProcessingDeps) {
         current, sceneId, planetId, "pitch", requestId, clearPitchProcessing
       ));
       flash("Pitch processing failed; the previous pitch remains active.");
+    } finally {
+      releaseRenderOwner(ownerId, controller);
     }
   }
 
