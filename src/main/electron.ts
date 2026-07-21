@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from "electron";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -9,6 +10,7 @@ import { PreferencesStore } from "./preferences.js";
 import { newProjectPath, projectDialogExtensions } from "./projectPaths.js";
 import { validateProjectSavePayload } from "./projectPayload.js";
 import { installAppMenu } from "./appMenu.js";
+import { buildRendererLaunchUrl, getRendererLaunchQuery } from "./rendererLaunchQuery.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -17,7 +19,9 @@ app.setName("Orbitronica");
 function createWindow() {
   const wamSmoke = process.argv.includes("--wam-smoke");
   const wamDspTest = process.argv.includes("--wam-dsp-test");
+  const audioCacheSmoke = process.argv.includes("--audio-cache-smoke");
   const pcm16ColdCache = process.argv.includes("--pcm16-cold-cache");
+  const rendererLaunchQuery = getRendererLaunchQuery({ pcm16ColdCache, wamDspTest, wamSmoke, audioCacheSmoke });
   const win = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -35,17 +39,58 @@ function createWindow() {
   });
   mainWindow = win;
 
-  if (wamSmoke || wamDspTest) {
-    const marker = wamDspTest ? "ORBITRONICA_WAM_DSP" : "ORBITRONICA_WAM_SMOKE";
+  if (wamSmoke || wamDspTest || audioCacheSmoke) {
+    const marker = audioCacheSmoke ? "ORBITRONICA_AUDIO_CACHE" : wamDspTest ? "ORBITRONICA_WAM_DSP" : "ORBITRONICA_WAM_SMOKE";
     const timeout = setTimeout(() => {
       console.error(`${marker} {\"status\":\"fail\",\"error\":\"renderer timeout\"}`);
       app.exit(1);
-    }, wamDspTest ? 90_000 : 30_000);
+    }, audioCacheSmoke ? 180_000 : wamDspTest ? 90_000 : 30_000);
     win.webContents.on("console-message", (_event, _level, message) => {
       if (!message.startsWith(`${marker} `)) return;
       clearTimeout(timeout);
-      console.log(message);
-      app.exit(message.includes('"status":"pass"') ? 0 : 1);
+      if (!audioCacheSmoke) {
+        console.log(message);
+        app.exit(message.includes('"status":"pass"') ? 0 : 1);
+        return;
+      }
+      void (async () => {
+        try {
+          const payload = JSON.parse(message.slice(marker.length + 1)) as Record<string, unknown>;
+          const processMemory = await process.getProcessMemoryInfo();
+          const appRss = app.getAppMetrics().map((metric) => ({ pid: metric.pid, type: metric.type, memory: metric.memory?.workingSetSize ?? 0 }));
+          const enriched = {
+            ...payload,
+            reproducibility: {
+              ...(payload.reproducibility as Record<string, unknown>),
+              packagedBuildPath: app.getAppPath(),
+              runtime: {
+                electron: process.versions.electron,
+                chromium: process.versions.chrome,
+                node: process.versions.node,
+                platform: process.platform,
+                arch: process.arch,
+                osRelease: os.release(),
+                cpuModel: os.cpus()[0]?.model ?? "unknown"
+              }
+            },
+            mainProcessMemory: processMemory,
+            appRss,
+            runMetrics: {
+              rendererMemory: payload.rendererMemory,
+              mainProcessMemory: processMemory,
+              appRss,
+              latency: payload.latency,
+              cold: payload.cold,
+              longTaskMaximumMs: payload.longTaskMaximumMs
+            }
+          };
+          console.log(`${marker} ${JSON.stringify(enriched)}`);
+          app.exit(payload.status === "pass" ? 0 : 1);
+        } catch (error) {
+          console.error(`${marker} ${JSON.stringify({ status: "fail", error: error instanceof Error ? error.message : String(error) })}`);
+          app.exit(1);
+        }
+      })();
     });
     win.webContents.on("did-fail-load", (_event, _errorCode, errorDescription) => {
       clearTimeout(timeout);
@@ -55,11 +100,11 @@ function createWindow() {
   }
 
   if (process.argv.includes("--dev")) {
-    void win.loadURL("http://localhost:5173");
+    void win.loadURL(buildRendererLaunchUrl("http://localhost:5173", rendererLaunchQuery));
   } else {
     void win.loadFile(
-      path.join(__dirname, "../dist", wamDspTest ? "wam-dsp-test.html" : wamSmoke ? "wam-smoke.html" : "index.html"),
-      pcm16ColdCache && !wamSmoke && !wamDspTest ? { query: { pcm16ColdCache: "1" } } : undefined
+      path.join(__dirname, "../dist", audioCacheSmoke ? "audio-cache-smoke.html" : wamDspTest ? "wam-dsp-test.html" : wamSmoke ? "wam-smoke.html" : "index.html"),
+      rendererLaunchQuery ? { query: rendererLaunchQuery } : undefined
     );
   }
 }

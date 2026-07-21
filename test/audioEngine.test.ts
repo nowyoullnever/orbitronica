@@ -419,6 +419,47 @@ function ensureTestPitch(orbitId: string, planetId: string, pitchCents: number) 
   return ensureTestProcessed(orbitId, planetId, 1, pitchCents);
 }
 
+test("packaged cache smoke adapter reports scheduler state and promotes a cold entry without rendering", async () => {
+  await audioEngine.resume();
+  const adapter = audioEngine.getAudioCacheSmokeAdapter();
+  const orbitId = "smoke-adapter-orbit";
+  const request = {
+    orbitId,
+    planetId: "smoke-adapter-planet",
+    speed: 1,
+    pitchCents: 100,
+    sampleStart: 0,
+    sampleEnd: Infinity,
+    direction: "forward"
+  } as const;
+  adapter.setCachePolicy({ pcm16Enabled: true, hotByteBudget: 128, hotEntryBudget: 2, coldByteBudget: 128, coldEntryBudget: 2 });
+  adapter.registerFixtureBuffer(orbitId, new FakeAudioBuffer(1, 16, 1000), 1);
+  try {
+    await audioEngine.ensureProcessedBuffer(request, { ownerId: "smoke-adapter", priority: "playback" });
+    const warmed = adapter.getDiagnostics();
+    assert.ok(warmed.scheduler.running <= 1);
+    assert.equal(warmed.scheduler.pendingJobs, 0);
+    assert.ok(warmed.processedKeys.some((key) => key.startsWith(`${orbitId}:`)));
+    assert.ok(warmed.coldKeys.some((key) => key.startsWith(`${orbitId}:`)));
+
+    const attemptsBeforePromotion = warmed.dspScheduler.renderAttempts;
+    assert.equal(adapter.dropHotProcessedBuffer(request), true);
+    const afterDrop = adapter.getDiagnostics();
+    assert.equal(afterDrop.processedKeys.some((key) => key.startsWith(`${orbitId}:`)), false);
+    assert.ok(afterDrop.coldKeys.some((key) => key.startsWith(`${orbitId}:`)));
+
+    assert.equal(audioEngine.hasProcessedBuffer(orbitId, request.planetId, request.speed, request.pitchCents), true);
+    const promoted = adapter.getDiagnostics();
+    assert.equal(promoted.dspScheduler.renderAttempts, attemptsBeforePromotion);
+    assert.ok(promoted.processedKeys.some((key) => key.startsWith(`${orbitId}:`)));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assert.equal(adapter.getDiagnostics().scheduler.running, 0);
+  } finally {
+    audioEngine.removeOrbit(orbitId);
+    adapter.setCachePolicy();
+  }
+});
+
 test("audio memory statistics distinguish referenced, unique, and active-only logical residency", () => {
   const engine = privateAudioEngine();
   const baseline = audioEngine.getAudioMemoryStats();

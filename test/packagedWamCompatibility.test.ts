@@ -3,10 +3,56 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { buildRendererLaunchUrl, getRendererLaunchQuery } from "../src/main/rendererLaunchQuery.ts";
 
 const root = new URL("../", import.meta.url);
 const read = (file: string) => fs.readFileSync(new URL(file, root), "utf8");
 const assetPath = (file: string) => new URL(`public/wam/burns-simple-delay/${file}`, root);
+
+test("Given startup flags, when building dev and packaged renderer launch queries, then PCM16 is explicit, isolated, and parity-safe", () => {
+  const enabled = { pcm16ColdCache: true, wamDspTest: false, wamSmoke: false, audioCacheSmoke: false };
+  const disabled = { pcm16ColdCache: false, wamDspTest: false, wamSmoke: false, audioCacheSmoke: false };
+
+  assert.deepEqual(getRendererLaunchQuery(enabled), { pcm16ColdCache: "1" });
+  assert.equal(buildRendererLaunchUrl("http://localhost:5173/?existing=preserved", getRendererLaunchQuery(enabled)), "http://localhost:5173/?existing=preserved&pcm16ColdCache=1");
+  assert.equal(getRendererLaunchQuery(disabled), undefined);
+  assert.equal(getRendererLaunchQuery({ ...enabled, wamSmoke: true }), undefined);
+  assert.equal(getRendererLaunchQuery({ ...enabled, wamDspTest: true }), undefined);
+  assert.deepEqual(getRendererLaunchQuery({ ...enabled, audioCacheSmoke: true }), { pcm16ColdCache: "1" });
+});
+
+test("Given the Electron launch entry, when PCM16 startup selection is enabled, then dev and packaged paths consume the same query", () => {
+  const main = read("src/main/electron.ts");
+
+  assert.match(main, /getRendererLaunchQuery\(\{ pcm16ColdCache, wamDspTest, wamSmoke, audioCacheSmoke \}\)/);
+  assert.match(main, /loadURL\(buildRendererLaunchUrl\("http:\/\/localhost:5173", rendererLaunchQuery\)\)/);
+  assert.match(main, /rendererLaunchQuery \? \{ query: rendererLaunchQuery \} : undefined/);
+});
+
+test("audio-cache smoke remains packaged-only and reports real Chromium cache diagnostics", () => {
+  const packageJson = read("package.json");
+  const harness = read("scripts/audio-cache-smoke.mjs");
+  const renderer = read("src/renderer/audioCacheSmoke.ts");
+  const main = read("src/main/electron.ts");
+
+  assert.match(packageJson, /"smoke:audio-cache"/);
+  assert.match(harness, /--audio-cache-smoke/);
+  assert.match(harness, /--pcm16-cold-cache/);
+  assert.match(harness, /durationSeconds !== 180/);
+  assert.match(harness, /measuredRuns\.length !== 5/);
+  assert.match(renderer, /ORBITRONICA_AUDIO_CACHE/);
+  assert.match(renderer, /fixtureSeconds = 180/);
+  assert.match(renderer, /SHA-256/);
+  assert.match(renderer, /buildCommit/);
+  assert.match(renderer, /fixtureWindow = \{ start: 60, end: 75 \}/);
+  assert.match(renderer, /ensureProcessedBuffer/);
+  assert.match(renderer, /syncLoop/);
+  assert.match(renderer, /triggerSequence/);
+  assert.match(renderer, /protectedOverageDuringProtection/);
+  assert.match(main, /audio-cache-smoke\.html/);
+  assert.match(main, /process\.getProcessMemoryInfo/);
+  assert.match(main, /packagedBuildPath/);
+});
 
 test("frozen trusted WAM payload is hash-locked and packaged file smoke is required", () => {
   const record = read("docs/packaged-wam-compatibility.md");
@@ -99,6 +145,7 @@ test("first-party build ownership cannot rewrite immutable Burns payloads", () =
   const builder = read("scripts/build-plugins.mjs");
   const pluginIds = read("scripts/lib/plugin-ids.mjs");
   assert.match(builder, /import \{ FIRST_PARTY_PLUGIN_IDS \} from "\.\/lib\/plugin-ids\.mjs"/);
+  assert.match(builder, /preserveSymlinks:\s*true/, "bundled source labels must remain stable when a task worktree links node_modules to another checkout");
   assert.match(pluginIds, /FIRST_PARTY_PLUGIN_IDS = \[\s*"orbitronica-filter",\s*"orbitronica-overdrive",\s*"orbitronica-compressor",\s*"orbitronica-bitcrusher",\s*"orbitronica-flanger",\s*"orbitronica-phaser",\s*"orbitronica-reverb"\s*\]/);
   assert.doesNotMatch(builder, /burns-simple-eq|burns-distortion/);
   assert.doesNotMatch(pluginIds, /burns-simple-eq|burns-distortion/);

@@ -14,6 +14,7 @@
     "verify:wam-assets": "node --experimental-strip-types scripts/verify-wam-assets.mjs",
     "build": "npm run build:plugins && npm run verify:wam-assets && tsc -b --force && node scripts/verify-preload.mjs && vite build && electron-builder --dir",
     "smoke:packaged-wam": "node --experimental-strip-types scripts/verify-wam-assets.mjs dist && node scripts/packaged-wam-smoke.mjs",
+    "smoke:audio-cache": "node scripts/audio-cache-smoke.mjs",
     "test:wam-dsp": "npm run build && node scripts/wam-dsp-test.mjs",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "preview": "vite preview",

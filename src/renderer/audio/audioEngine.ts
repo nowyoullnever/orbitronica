@@ -99,6 +99,22 @@ export type AudioCacheDiagnostics = {
   };
 };
 
+export type AudioCacheSmokeDiagnostics = AudioCacheDiagnostics & {
+  readonly activePlaybackCount: number;
+  readonly scheduler: {
+    readonly running: number;
+    readonly pendingJobs: number;
+    readonly queueDepth: Readonly<Record<DspRenderPriority, number>>;
+  };
+};
+
+export type AudioCacheSmokeAdapter = {
+  readonly registerFixtureBuffer: (orbitId: string, buffer: AudioBuffer, volume: number) => void;
+  readonly setCachePolicy: (policy?: Partial<CachePolicy>) => void;
+  readonly dropHotProcessedBuffer: (request: ProcessedBufferRequest) => boolean;
+  readonly getDiagnostics: () => AudioCacheSmokeDiagnostics;
+};
+
 export type CachePolicy = {
   readonly pcm16Enabled: boolean;
   readonly hotByteBudget: number;
@@ -661,6 +677,33 @@ class AudioEngine {
         coldByteBudget: policy.coldByteBudget,
         coldEntryBudget: policy.coldEntryBudget
       }
+    };
+  }
+
+  getAudioCacheSmokeAdapter(): AudioCacheSmokeAdapter {
+    return {
+      registerFixtureBuffer: (orbitId, buffer, volume) => this.registerBuffer(orbitId, buffer, volume),
+      setCachePolicy: (policy) => this.setCachePolicyForTesting(policy),
+      dropHotProcessedBuffer: (request) => {
+        const descriptor = this.describeProcessedBuffer(request);
+        if (!this.processedBuffers.has(descriptor.key)) return false;
+        this.removeHotProcessedEntry(descriptor.key);
+        this.enforceCachePolicies();
+        return true;
+      },
+      getDiagnostics: () => ({
+        ...this.getAudioCacheDiagnostics(),
+        activePlaybackCount: this.active.size,
+        scheduler: {
+          running: this.activeDspRenders,
+          pendingJobs: this.dspJobs.size,
+          queueDepth: {
+            playback: this.dspRenderQueues.playback.length,
+            selected: this.dspRenderQueues.selected.length,
+            background: this.dspRenderQueues.background.length
+          }
+        }
+      })
     };
   }
 
