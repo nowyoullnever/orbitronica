@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import test from "node:test";
 
@@ -11,6 +12,18 @@ class FakeParam {
 class FakeNode {
   connect() { return this; }
   disconnect() {}
+}
+
+class FakeBufferSource extends FakeNode {
+  buffer: FakeAudioBuffer | null = null;
+  playbackRate = new FakeParam();
+  loop = false;
+  loopStart = 0;
+  loopEnd = 0;
+  onended: (() => void) | null = null;
+  starts: Array<{ when: number; offset: number; duration?: number }> = [];
+  start(when: number, offset: number, duration?: number) { this.starts.push({ when, offset, duration }); }
+  stop() { this.onended?.(); }
 }
 
 class FakeGain extends FakeNode { gain = new FakeParam(); }
@@ -41,6 +54,7 @@ class FakeAudioBuffer {
 let contextCount = 0;
 let masterGain: FakeGain | undefined;
 let masterPanner: FakePanner | undefined;
+const createdSources: FakeBufferSource[] = [];
 
 class FakeAudioContext {
   currentTime = 0;
@@ -62,6 +76,11 @@ class FakeAudioContext {
   createAnalyser() { return new FakeAnalyser(); }
   createBuffer(numberOfChannels: number, length: number, sampleRate: number) {
     return new FakeAudioBuffer(numberOfChannels, length, sampleRate);
+  }
+  createBufferSource() {
+    const source = new FakeBufferSource();
+    createdSources.push(source);
+    return source;
   }
   async decodeAudioData(raw: ArrayBuffer) {
     if (new Uint8Array(raw)[0] === 255) throw new Error("bad audio");
@@ -348,6 +367,95 @@ function clearOrbitProcessedBuffers(engine: any, ...orbitIds: string[]) {
   for (const orbitId of orbitIds) engine.buffers.delete(orbitId);
 }
 
+function float32Hash(buffer: FakeAudioBuffer | AudioBuffer) {
+  const hash = createHash("sha256");
+  for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+    const samples = buffer.getChannelData(channel);
+    hash.update(Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength));
+  }
+  return hash.digest("hex");
+}
+
+test("audio memory statistics distinguish referenced, unique, and active-only logical residency", () => {
+  const engine = audioEngine as any;
+  const baseline = audioEngine.getAudioMemoryStats();
+  const original = new FakeAudioBuffer(2, 10, 1000);
+  const processed = new FakeAudioBuffer(1, 8, 1000);
+  const reverse = new FakeAudioBuffer(1, 4, 1000);
+  const activeOnly = new FakeAudioBuffer(1, 6, 1000);
+  const bytes = new Uint8Array(7);
+  engine.buffers.set("stats-a", original);
+  engine.buffers.set("stats-b", original);
+  engine.rawFiles.set("stats-a", { fileName: "a.wav", bytes });
+  engine.rawFiles.set("stats-b", { fileName: "b.wav", bytes });
+  engine.processedBuffers.set("stats-a:p", processed);
+  engine.reverseBuffers.set("stats-a:r", reverse);
+  engine.active.set("stats-active-owned", { source: { buffer: processed } });
+  engine.active.set("stats-active-only", { source: { buffer: activeOnly } });
+  try {
+    const stats = audioEngine.getAudioMemoryStats();
+    assert.deepEqual({
+      originalReferencedBytes: stats.originalReferencedBytes - baseline.originalReferencedBytes,
+      originalUniqueBytes: stats.originalUniqueBytes - baseline.originalUniqueBytes,
+      rawReferencedBytes: stats.rawReferencedBytes - baseline.rawReferencedBytes,
+      rawUniqueBytes: stats.rawUniqueBytes - baseline.rawUniqueBytes,
+      processedUniqueBytes: stats.processedUniqueBytes - baseline.processedUniqueBytes,
+      reverseUniqueBytes: stats.reverseUniqueBytes - baseline.reverseUniqueBytes,
+      activeOnlyUniqueBytes: stats.activeOnlyUniqueBytes - baseline.activeOnlyUniqueBytes,
+      totalUniqueFloatBytes: stats.totalUniqueFloatBytes - baseline.totalUniqueFloatBytes,
+      coldPcmBytes: stats.coldPcmBytes - baseline.coldPcmBytes
+    }, {
+      originalReferencedBytes: 160,
+      originalUniqueBytes: 80,
+      rawReferencedBytes: 14,
+      rawUniqueBytes: 7,
+      processedUniqueBytes: 32,
+      reverseUniqueBytes: 16,
+      activeOnlyUniqueBytes: 24,
+      totalUniqueFloatBytes: 152,
+      coldPcmBytes: 0
+    });
+  } finally {
+    for (const id of ["stats-a", "stats-b"]) { engine.buffers.delete(id); engine.rawFiles.delete(id); }
+    engine.processedBuffers.delete("stats-a:p");
+    engine.reverseBuffers.delete("stats-a:r");
+    engine.active.delete("stats-active-owned");
+    engine.active.delete("stats-active-only");
+  }
+});
+
+test("current playback coordinate parameters are pinned for forward and reverse loop/sequence playback", async () => {
+  await audioEngine.resume();
+  const engine = audioEngine as any;
+  const orbitId = "coordinate-baseline-orbit";
+  const planetId = "coordinate-baseline-planet";
+  const buffer = new FakeAudioBuffer(1, 10000, 1000);
+  engine.buffers.set(orbitId, buffer);
+  engine.orbitRuntimes.set(orbitId, { input: new FakeNode(), panNode: { input: new FakeNode(), output: new FakeNode(), disconnect() {} }, gainNode: new FakeGain() });
+  createdSources.length = 0;
+  try {
+    audioEngine.syncLoop(orbitId, planetId, "forward", true, 3, 1, 0, 1, 1.25, 0, false, 2, 5);
+    const forward = createdSources.at(-1)!;
+    assert.deepEqual(forward.starts, [{ when: 0, offset: 2.4, duration: undefined }]);
+    assert.equal(forward.loopStart, 1.6);
+    assert.equal(forward.loopEnd, 4);
+
+    audioEngine.syncLoop(orbitId, planetId, "reverse", true, 3, 1, 0, 1, 1.25, 0, true, 2, 5);
+    const reverse = createdSources.at(-1)!;
+    assert.deepEqual(reverse.starts, [{ when: 0, offset: 7.6, duration: undefined }]);
+    assert.equal(reverse.loopStart, 6);
+    assert.equal(reverse.loopEnd, 8.4);
+
+    audioEngine.triggerSequence(orbitId, planetId, "sequence-forward", 1, 0, 1, 0, false, "overlap", 2, 5);
+    assert.deepEqual(createdSources.at(-1)!.starts, [{ when: 0, offset: 2, duration: 3 }]);
+    audioEngine.triggerSequence(orbitId, planetId, "sequence-reverse", 1, 0, 1, 0, true, "overlap", 2, 5);
+    assert.deepEqual(createdSources.at(-1)!.starts, [{ when: 0, offset: 5, duration: 3 }]);
+  } finally {
+    audioEngine.removeOrbit(orbitId);
+    createdSources.length = 0;
+  }
+});
+
 test("processed-buffer cache stays bounded to the LRU cap across many distinct speed/pitch tuples", async () => {
   await audioEngine.resume();
   const orbitId = "lru-cap-orbit";
@@ -514,6 +622,27 @@ test("processPlanetBuffer pins exact output shape and sample values for a fixed 
       roundedRight.slice(-6),
       [.18727, .170846, .147205, .11685, .080476, .038942]
     );
+    assert.equal(float32Hash(output), "af827d8237689d8b10831f0b3997af74c63a87403e756fe6e24dafaf7d69d6bc");
+  } finally {
+    clearOrbitProcessedBuffers(engine, orbitId);
+  }
+});
+
+test("processPlanetBuffer pins an independently hashed global-normalization render", async () => {
+  await audioEngine.resume();
+  const orbitId = "pin-normalized-orbit";
+  const planetId = "pin-normalized-planet";
+  const engine = audioEngine as any;
+  const source = new FakeAudioBuffer(2, 64, 8000);
+  source.getChannelData(0).fill(1.2);
+  source.getChannelData(1).fill(-1.2);
+  engine.buffers.set(orbitId, source);
+  try {
+    await audioEngine.processPlanetBuffer(orbitId, planetId, 1, 200);
+    const output = engine.processedBuffers.get(engine.processedBufferKey(orbitId, planetId, 1, 200));
+    assert.ok(output);
+    assert.ok(Math.max(...output.getChannelData(0).map(Math.abs), ...output.getChannelData(1).map(Math.abs)) <= .98);
+    assert.equal(float32Hash(output), "b14448e31bbd5bb66600bd4e71d6d9858ef16d3e41da580fe4bd566c407bf348");
   } finally {
     clearOrbitProcessedBuffers(engine, orbitId);
   }

@@ -39,6 +39,19 @@ export type StagedProjectAudio = ProjectAudioInput & { buffer: AudioBuffer };
 
 export type RecordedPcm = { channels: Float32Array[]; sampleRate: number };
 
+/** Logical AudioBuffer/encoded-byte residency, deduplicated by object identity where noted. */
+export type AudioMemoryStats = {
+  originalReferencedBytes: number;
+  originalUniqueBytes: number;
+  rawReferencedBytes: number;
+  rawUniqueBytes: number;
+  processedUniqueBytes: number;
+  reverseUniqueBytes: number;
+  activeOnlyUniqueBytes: number;
+  totalUniqueFloatBytes: number;
+  coldPcmBytes: number;
+};
+
 type RecordingSession = {
   id: number;
   state: "starting" | "recording" | "stopping";
@@ -289,6 +302,50 @@ class AudioEngine {
 
   getProjectAsset(orbitId: string) {
     return this.rawFiles.get(orbitId);
+  }
+
+  /**
+   * Reports logical residency rather than allocator/RSS usage. Shared identities are
+   * deliberately counted once in the unique fields so P5 can be measured without
+   * confusing orbit references for retained memory.
+   */
+  getAudioMemoryStats(): AudioMemoryStats {
+    const audioBufferBytes = (buffer: AudioBuffer) => buffer.length * buffer.numberOfChannels * Float32Array.BYTES_PER_ELEMENT;
+    const byteArrayBytes = (bytes: Uint8Array) => bytes.byteLength;
+    const sumReferenced = <T>(values: Iterable<T>, bytes: (value: T) => number) => {
+      let total = 0;
+      for (const value of values) total += bytes(value);
+      return total;
+    };
+    const sumUnique = <T extends object>(values: Iterable<T>, bytes: (value: T) => number) => {
+      const seen = new Set<T>();
+      let total = 0;
+      for (const value of values) {
+        if (seen.has(value)) continue;
+        seen.add(value);
+        total += bytes(value);
+      }
+      return total;
+    };
+    const originals = [...this.buffers.values()];
+    const rawBytes = [...this.rawFiles.values()].map((asset) => asset.bytes);
+    const processed = [...this.processedBuffers.values()];
+    const reversed = [...this.reverseBuffers.values()];
+    const active = [...this.active.values()].flatMap((playback) => playback.source.buffer ? [playback.source.buffer] : []);
+    const cacheOwned = new Set<AudioBuffer>([...originals, ...processed, ...reversed]);
+    const activeOnly = active.filter((buffer) => !cacheOwned.has(buffer));
+    return {
+      originalReferencedBytes: sumReferenced(originals, audioBufferBytes),
+      originalUniqueBytes: sumUnique(originals, audioBufferBytes),
+      rawReferencedBytes: sumReferenced(rawBytes, byteArrayBytes),
+      rawUniqueBytes: sumUnique(rawBytes, byteArrayBytes),
+      processedUniqueBytes: sumUnique(processed, audioBufferBytes),
+      reverseUniqueBytes: sumUnique(reversed, audioBufferBytes),
+      activeOnlyUniqueBytes: sumUnique(activeOnly, audioBufferBytes),
+      totalUniqueFloatBytes: sumUnique([...originals, ...processed, ...reversed, ...active], audioBufferBytes),
+      // P6 adds the cold PCM16 tier. Keep the P0 measurement shape stable before it exists.
+      coldPcmBytes: 0
+    };
   }
 
   subscribeWaveformPeaks(listener: WaveformListener) {

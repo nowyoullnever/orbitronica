@@ -165,6 +165,52 @@ async function safetyMetrics() {
   });
 }
 
+/*
+ * Keep this in packaged Chromium because loop-boundary interpolation belongs to
+ * Web Audio, not to the Node fake context used by audioEngine unit tests.  The
+ * fixture completes an integral number of cycles inside the loop window, so a
+ * discontinuity here indicates a coordinate/loop-boundary regression rather
+ * than an intentional waveform edge.
+ */
+async function renderPlaybackBoundary(reverse: boolean, tapeRate: number) {
+  const sampleRate = 48_000;
+  const context = new OfflineAudioContext(1, Math.ceil(sampleRate * .9), sampleRate);
+  const source = context.createBufferSource();
+  const full = context.createBuffer(1, sampleRate, sampleRate);
+  const data = full.getChannelData(0);
+  for (let frame = 0; frame < data.length; frame++) data[frame] = Math.sin(2 * Math.PI * 10 * frame / sampleRate);
+  if (reverse) {
+    const trimmed = context.createBuffer(1, Math.round(sampleRate * .4), sampleRate);
+    const reversed = trimmed.getChannelData(0);
+    for (let frame = 0; frame < reversed.length; frame++) reversed[frame] = data[Math.round(sampleRate * .6) - 1 - frame];
+    source.buffer = trimmed;
+    source.loopStart = 0;
+    source.loopEnd = trimmed.duration;
+    source.start(0, .15);
+  } else {
+    source.buffer = full;
+    source.loopStart = .2;
+    source.loopEnd = .6;
+    source.start(0, .35);
+  }
+  source.loop = true;
+  source.playbackRate.value = tapeRate;
+  source.connect(context.destination);
+  return context.startRendering();
+}
+
+async function audioEnginePlaybackBaselines() {
+  for (const tapeRate of [.75, 1.25]) for (const reverse of [false, true]) {
+    await check(reverse ? "reverse" : "forward", `loop-boundary-continuity-${tapeRate}x`, "max adjacent delta < .01 FS", async () => {
+      const rendered = await renderPlaybackBoundary(reverse, tapeRate);
+      const samples = rendered.getChannelData(0);
+      let maximumDelta = 0;
+      for (let frame = 1; frame < samples.length; frame++) maximumDelta = Math.max(maximumDelta, Math.abs(samples[frame] - samples[frame - 1]));
+      return { observed: maximumDelta, ok: finite(samples) && maximumDelta < .01 };
+    }, "audio-engine-playback");
+  }
+}
+
 const bitcrusherDefaults: BitcrusherParams = { bitDepth: 8, reduction: 1, mix: 0 };
 async function renderBitcrusher(params: BitcrusherParams, fixture: Fixture, sampleRate: number) {
   const context = new OfflineAudioContext(2, Math.ceil(1.4 * sampleRate), sampleRate);
@@ -471,7 +517,7 @@ async function phase5Metrics() {
 
 async function run() {
   try {
-    await controlMetrics(44_100); await controlMetrics(48_000); await safetyMetrics(); await bitcrusherMetrics(); await phase4Metrics(); await phase5Metrics(); await legacyMetrics();
+    await controlMetrics(44_100); await controlMetrics(48_000); await safetyMetrics(); await audioEnginePlaybackBaselines(); await bitcrusherMetrics(); await phase4Metrics(); await phase5Metrics(); await legacyMetrics();
     const status = metrics.every((metric) => metric.ok) ? "pass" : "fail";
     const catalogHarness = Object.fromEntries(legacyIds.map((catalogId) => [catalogId, {
       publicControls: legacyControlIds[catalogId],
