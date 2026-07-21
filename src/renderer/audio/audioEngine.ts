@@ -40,6 +40,7 @@ export type StagedProjectAudio = ProjectAudioInput & { buffer: AudioBuffer };
 
 export type RecordedPcm = { channels: Float32Array[]; sampleRate: number };
 type DecodedContent = { hash: string; bytes: Uint8Array; buffer: AudioBuffer };
+type ColdPcm16 = { channels: Int16Array[]; length: number; sampleRate: number };
 
 /** Logical AudioBuffer/encoded-byte residency, deduplicated by object identity where noted. */
 export type AudioMemoryStats = {
@@ -114,6 +115,9 @@ class AudioEngine {
   private waveformListeners = new Set<WaveformListener>();
   private readonly waveformResolution = 1024;
   private processedBuffers = new Map<string, AudioBuffer>();
+  private coldProcessedBuffers = new Map<string, ColdPcm16>();
+  /** Startup-only opt-in; production defaults to Float32 cache behavior. */
+  private readonly pcm16ColdCacheEnabled = (globalThis as { __ORBITRONICA_PCM16_COLD_CACHE__?: boolean }).__ORBITRONICA_PCM16_COLD_CACHE__ === true;
   /** Physical cache buffers are guarded; this preserves their logical output coordinates. */
   private processedWindows = new Map<string, ProcessingWindow>();
   private reverseBuffers = new Map<string, AudioBuffer>();
@@ -128,6 +132,7 @@ class AudioEngine {
   // requests. Eviction is least-recently-used, and a buffer currently backing an active
   // (including looping) playback is never evicted regardless of recency.
   private static readonly PROCESSED_BUFFER_CACHE_CAP = 64;
+  private static readonly PCM16_HOT_BUFFER_CACHE_CAP = 8;
   private static readonly MAX_CONCURRENT_DSP_RENDERS = 1;
   private static readonly PROCESSING_GUARD_FRAMES = 128;
   private rawFiles = new Map<string, { fileName: string; bytes: Uint8Array }>();
@@ -398,8 +403,7 @@ class AudioEngine {
       reverseUniqueBytes: sumUnique(reversed, audioBufferBytes),
       activeOnlyUniqueBytes: sumUnique(activeOnly, audioBufferBytes),
       totalUniqueFloatBytes: sumUnique([...originals, ...processed, ...reversed, ...active], audioBufferBytes),
-      // P6 adds the cold PCM16 tier. Keep the P0 measurement shape stable before it exists.
-      coldPcmBytes: 0
+      coldPcmBytes: [...this.coldProcessedBuffers.values()].reduce((total, entry) => total + entry.channels.reduce((sum, channel) => sum + channel.byteLength, 0), 0)
     };
   }
 
@@ -576,7 +580,7 @@ class AudioEngine {
   }
 
   private clearOrbitProcessedCaches(orbitId: string) {
-    for (const key of [...this.processedBuffers.keys()]) if (key.startsWith(`${orbitId}:`)) { this.processedBuffers.delete(key); this.processedWindows.delete(key); }
+    for (const key of new Set([...this.processedBuffers.keys(), ...this.coldProcessedBuffers.keys()])) if (key.startsWith(`${orbitId}:`)) { this.processedBuffers.delete(key); this.coldProcessedBuffers.delete(key); this.processedWindows.delete(key); }
     for (const key of [...this.reverseBuffers.keys()]) if (key.startsWith(`${orbitId}:`)) this.reverseBuffers.delete(key);
   }
 
@@ -605,7 +609,8 @@ class AudioEngine {
 
   /** Reads a cache entry and, on hit, refreshes its recency to most-recently-used. */
   private touchCachedBuffer(cache: Map<string, AudioBuffer>, key: string): AudioBuffer | undefined {
-    const value = cache.get(key);
+    let value = cache.get(key);
+    if (value === undefined && cache === this.processedBuffers) value = this.inflateColdProcessedBuffer(key);
     if (value === undefined) return undefined;
     // Map iteration order is insertion order, so a delete+re-set moves this key to the
     // most-recently-used end without needing a separate recency structure.
@@ -616,17 +621,43 @@ class AudioEngine {
 
   /** Inserts a cache entry, then evicts least-recently-used entries beyond the cap. */
   private cacheProcessedBuffer(cache: Map<string, AudioBuffer>, key: string, value: AudioBuffer) {
+    if (cache === this.processedBuffers && this.pcm16ColdCacheEnabled) this.coldProcessedBuffers.set(key, this.toColdPcm16(value));
     cache.delete(key);
     cache.set(key, value);
-    if (cache.size <= AudioEngine.PROCESSED_BUFFER_CACHE_CAP) return;
+    const cap = cache === this.processedBuffers && this.pcm16ColdCacheEnabled ? AudioEngine.PCM16_HOT_BUFFER_CACHE_CAP : AudioEngine.PROCESSED_BUFFER_CACHE_CAP;
+    if (cache.size <= cap) return;
     const protectedBuffers = this.activePlaybackBuffers();
     for (const [candidateKey, candidateValue] of cache) {
-      if (cache.size <= AudioEngine.PROCESSED_BUFFER_CACHE_CAP) break;
+      if (cache.size <= cap) break;
       if (candidateKey === key) continue;
       if (protectedBuffers.has(candidateValue)) continue;
       cache.delete(candidateKey);
-      if (cache === this.processedBuffers) this.processedWindows.delete(candidateKey);
+      if (cache === this.processedBuffers && !this.coldProcessedBuffers.has(candidateKey)) this.processedWindows.delete(candidateKey);
     }
+  }
+
+  private toColdPcm16(buffer: AudioBuffer): ColdPcm16 {
+    const channels = Array.from({ length: buffer.numberOfChannels }, (_, channel) => {
+      const source = buffer.getChannelData(channel), pcm = new Int16Array(source.length);
+      for (let frame = 0; frame < source.length; frame++) {
+        const value = source[frame];
+        pcm[frame] = Number.isFinite(value) ? Math.max(-32768, Math.min(32767, Math.round(value * 32768))) : 0;
+      }
+      return pcm;
+    });
+    return { channels, length: buffer.length, sampleRate: buffer.sampleRate };
+  }
+
+  private inflateColdProcessedBuffer(key: string): AudioBuffer | undefined {
+    const cold = this.coldProcessedBuffers.get(key);
+    if (!cold) return undefined;
+    const buffer = this.getContext().createBuffer(cold.channels.length, cold.length, cold.sampleRate);
+    for (let channel = 0; channel < cold.channels.length; channel++) {
+      const target = buffer.getChannelData(channel), source = cold.channels[channel];
+      for (let frame = 0; frame < source.length; frame++) target[frame] = source[frame] / 32768;
+    }
+    this.cacheProcessedBuffer(this.processedBuffers, key, buffer);
+    return buffer;
   }
 
   private getPlaybackBuffer(orbitId: string, planetId: string, speed: number, pitchCents: number, sampleStart = 0, sampleEnd = Infinity): PlaybackBufferResolution {
@@ -874,7 +905,8 @@ class AudioEngine {
     const normalizedSpeed = this.normalizedSpeed(speed);
     const roundedPitch = Math.round(pitchCents);
     return (Math.abs(normalizedSpeed - 1) < .0001 && roundedPitch === 0) ||
-      this.processedBuffers.has(this.processedBufferKey(orbitId, planetId, normalizedSpeed, roundedPitch, sampleStart, sampleEnd));
+      this.processedBuffers.has(this.processedBufferKey(orbitId, planetId, normalizedSpeed, roundedPitch, sampleStart, sampleEnd)) ||
+      this.coldProcessedBuffers.has(this.processedBufferKey(orbitId, planetId, normalizedSpeed, roundedPitch, sampleStart, sampleEnd));
   }
 
   hasPitchBuffer(orbitId: string, planetId: string, pitchCents: number) {
@@ -1105,7 +1137,10 @@ class AudioEngine {
     this.waveformPeaks.delete(orbitId);
     this.publishWaveformPeaks(orbitId, null);
     for (const key of [...this.processedBuffers.keys()]) {
-      if (key.startsWith(`${orbitId}:`)) { this.processedBuffers.delete(key); this.processedWindows.delete(key); }
+      if (key.startsWith(`${orbitId}:`)) { this.processedBuffers.delete(key); this.coldProcessedBuffers.delete(key); this.processedWindows.delete(key); }
+    }
+    for (const key of [...this.coldProcessedBuffers.keys()]) {
+      if (key.startsWith(`${orbitId}:`)) { this.coldProcessedBuffers.delete(key); this.processedWindows.delete(key); }
     }
     for (const key of [...this.reverseBuffers.keys()]) {
       if (key.startsWith(`${orbitId}:`)) this.reverseBuffers.delete(key);

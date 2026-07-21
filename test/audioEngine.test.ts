@@ -444,6 +444,25 @@ test("audio memory statistics distinguish referenced, unique, and active-only lo
   }
 });
 
+test("PCM16 cold conversion is opt-in, preserves silence, and inflates within one LSB", async () => {
+  await audioEngine.resume();
+  const engine = audioEngine as any;
+  assert.equal(engine.pcm16ColdCacheEnabled, false, "the cold tier must be startup-default off");
+  const source = new FakeAudioBuffer(1, 5, 1000);
+  source.getChannelData(0).set([-1, -.25, 0, .25, 1]);
+  const cold = engine.toColdPcm16(source);
+  engine.coldProcessedBuffers.set("pcm16-test", cold);
+  try {
+    const inflated = engine.inflateColdProcessedBuffer("pcm16-test") as FakeAudioBuffer;
+    const values = inflated.getChannelData(0);
+    assert.equal(values[2], 0);
+    for (let index = 0; index < values.length; index++) assert.ok(Math.abs(values[index] - source.getChannelData(0)[index]) <= 1 / 32768 + 1e-7);
+  } finally {
+    engine.coldProcessedBuffers.delete("pcm16-test");
+    engine.processedBuffers.delete("pcm16-test");
+  }
+});
+
 test("current playback coordinate parameters are pinned for forward and reverse loop/sequence playback", async () => {
   await audioEngine.resume();
   const engine = audioEngine as any;
