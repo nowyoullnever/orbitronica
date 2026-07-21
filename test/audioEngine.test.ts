@@ -448,6 +448,9 @@ test("PCM16 cold conversion is opt-in, preserves silence, and inflates within on
   await audioEngine.resume();
   const engine = audioEngine as any;
   assert.equal(engine.pcm16ColdCacheEnabled, false, "the cold tier must be startup-default off");
+  const electron = fs.readFileSync(new URL("../src/main/electron.ts", import.meta.url), "utf8");
+  assert.match(electron, /--pcm16-cold-cache/);
+  assert.match(electron, /pcm16ColdCache: "1"/);
   const source = new FakeAudioBuffer(1, 5, 1000);
   source.getChannelData(0).set([-1, -.25, 0, .25, 1]);
   const cold = engine.toColdPcm16(source);

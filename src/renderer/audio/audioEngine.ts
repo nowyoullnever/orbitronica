@@ -117,7 +117,7 @@ class AudioEngine {
   private processedBuffers = new Map<string, AudioBuffer>();
   private coldProcessedBuffers = new Map<string, ColdPcm16>();
   /** Startup-only opt-in; production defaults to Float32 cache behavior. */
-  private readonly pcm16ColdCacheEnabled = (globalThis as { __ORBITRONICA_PCM16_COLD_CACHE__?: boolean }).__ORBITRONICA_PCM16_COLD_CACHE__ === true;
+  private readonly pcm16ColdCacheEnabled = new URLSearchParams(globalThis.location?.search ?? "").get("pcm16ColdCache") === "1";
   /** Physical cache buffers are guarded; this preserves their logical output coordinates. */
   private processedWindows = new Map<string, ProcessingWindow>();
   private reverseBuffers = new Map<string, AudioBuffer>();

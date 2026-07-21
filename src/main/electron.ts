@@ -17,6 +17,7 @@ app.setName("Orbitronica");
 function createWindow() {
   const wamSmoke = process.argv.includes("--wam-smoke");
   const wamDspTest = process.argv.includes("--wam-dsp-test");
+  const pcm16ColdCache = process.argv.includes("--pcm16-cold-cache");
   const win = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -56,7 +57,10 @@ function createWindow() {
   if (process.argv.includes("--dev")) {
     void win.loadURL("http://localhost:5173");
   } else {
-    void win.loadFile(path.join(__dirname, "../dist", wamDspTest ? "wam-dsp-test.html" : wamSmoke ? "wam-smoke.html" : "index.html"));
+    void win.loadFile(
+      path.join(__dirname, "../dist", wamDspTest ? "wam-dsp-test.html" : wamSmoke ? "wam-smoke.html" : "index.html"),
+      pcm16ColdCache && !wamSmoke && !wamDspTest ? { query: { pcm16ColdCache: "1" } } : undefined
+    );
   }
 }
 
