@@ -52,6 +52,11 @@ export type AudioMemoryStats = {
   coldPcmBytes: number;
 };
 
+type PlaybackBufferResolution =
+  | { status: "ready"; buffer: AudioBuffer; key: string; usingProcessedBuffer: boolean }
+  | { status: "pending"; cacheKey: string }
+  | { status: "missing-original" };
+
 type RecordingSession = {
   id: number;
   state: "starting" | "recording" | "stopping";
@@ -98,6 +103,10 @@ class AudioEngine {
   private readonly waveformResolution = 1024;
   private processedBuffers = new Map<string, AudioBuffer>();
   private reverseBuffers = new Map<string, AudioBuffer>();
+  /** One render per exact cache key; all callers share its completion. */
+  private processingPromises = new Map<string, Promise<void>>();
+  private dspRenderQueue: Array<() => void> = [];
+  private activeDspRenders = 0;
   // Each entry is a fully decoded AudioBuffer (often several MB for a long sample), and a
   // new entry is produced per distinct (speed, pitch) tuple as the user sweeps those
   // controls. Left unbounded this grows without limit; 64 entries per cache keeps steady
@@ -105,6 +114,7 @@ class AudioEngine {
   // requests. Eviction is least-recently-used, and a buffer currently backing an active
   // (including looping) playback is never evicted regardless of recency.
   private static readonly PROCESSED_BUFFER_CACHE_CAP = 64;
+  private static readonly MAX_CONCURRENT_DSP_RENDERS = 1;
   private rawFiles = new Map<string, { fileName: string; bytes: Uint8Array }>();
   private orbitRuntimes = new Map<string, OrbitAudioRuntime>();
   private orbitPanValues = new Map<string, number>();
@@ -277,6 +287,8 @@ class AudioEngine {
 
   private registerBuffer(orbitId: string, buffer: AudioBuffer, volume: number) {
     const context = this.getContext();
+    // A replacement source must never reuse DSP rendered from the old source.
+    this.clearOrbitProcessedCaches(orbitId);
     this.buffers.set(orbitId, buffer);
     this.waveformPeaks.delete(orbitId);
     this.publishWaveformPeaks(orbitId, null);
@@ -495,7 +507,29 @@ class AudioEngine {
   }
 
   private processedBufferKey(orbitId: string, planetId: string, speed: number, pitchCents: number) {
-    return `${orbitId}:${planetId}:speed=${this.normalizedSpeed(speed).toFixed(4)}:pitch=${Math.round(pitchCents)}`;
+    // The cache identity must describe exactly the speed given to SoundTouch.
+    // Number#toString round-trips IEEE-754 values while avoiding a UI-formatting
+    // change in the DSP path.
+    return `${orbitId}:${planetId}:speed=${this.normalizedSpeed(speed).toString()}:pitch=${Math.round(pitchCents)}`;
+  }
+
+  private clearOrbitProcessedCaches(orbitId: string) {
+    for (const key of [...this.processedBuffers.keys()]) if (key.startsWith(`${orbitId}:`)) this.processedBuffers.delete(key);
+    for (const key of [...this.reverseBuffers.keys()]) if (key.startsWith(`${orbitId}:`)) this.reverseBuffers.delete(key);
+  }
+
+  private scheduleDspRender(render: () => Promise<void>): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const start = () => {
+        this.activeDspRenders++;
+        void render().then(resolve, reject).finally(() => {
+          this.activeDspRenders--;
+          this.dspRenderQueue.shift()?.();
+        });
+      };
+      if (this.activeDspRenders < AudioEngine.MAX_CONCURRENT_DSP_RENDERS) start();
+      else this.dspRenderQueue.push(start);
+    });
   }
 
   /** AudioBuffers currently backing any active (including looping) playback source. */
@@ -532,13 +566,14 @@ class AudioEngine {
     }
   }
 
-  private getPlaybackBuffer(orbitId: string, planetId: string, speed: number, pitchCents: number) {
+  private getPlaybackBuffer(orbitId: string, planetId: string, speed: number, pitchCents: number): PlaybackBufferResolution {
     const original = this.buffers.get(orbitId);
-    if (!original) return null;
+    if (!original) return { status: "missing-original" };
     const normalizedSpeed = this.normalizedSpeed(speed);
     const roundedPitch = Math.round(pitchCents);
     if (Math.abs(normalizedSpeed - 1) < .0001 && roundedPitch === 0) {
       return {
+        status: "ready",
         buffer: original,
         key: this.processedBufferKey(orbitId, planetId, 1, 0),
         usingProcessedBuffer: false
@@ -546,11 +581,10 @@ class AudioEngine {
     }
     const key = this.processedBufferKey(orbitId, planetId, normalizedSpeed, roundedPitch);
     const processed = this.touchCachedBuffer(this.processedBuffers, key);
-    return {
-      buffer: processed ?? original,
-      key: processed ? key : this.processedBufferKey(orbitId, planetId, 1, 0),
-      usingProcessedBuffer: Boolean(processed)
-    };
+    if (processed) return { status: "ready", buffer: processed, key, usingProcessedBuffer: true };
+    // Playing the original here silently discards requested speed/pitch. The
+    // caller skips this trigger until its explicit prewarm/render completes.
+    return { status: "pending", cacheKey: key };
   }
 
   private createPlayback(
@@ -561,7 +595,7 @@ class AudioEngine {
     const context = this.getContext();
     const resolved = this.getPlaybackBuffer(orbitId, planetId, userSpeed, pitchCents);
     const orbitRuntime = this.orbitRuntimes.get(orbitId);
-    if (!resolved || !orbitRuntime) return null;
+    if (resolved.status !== "ready" || !orbitRuntime) return null;
     let playbackBuffer = resolved.buffer;
     if (reverse) {
       const reverseKey = `${resolved.key}:reverse`;
@@ -786,6 +820,18 @@ class AudioEngine {
     const roundedPitch = Math.round(pitchCents);
     if (this.hasProcessedBuffer(orbitId, planetId, normalizedSpeed, roundedPitch)) return;
     const key = this.processedBufferKey(orbitId, planetId, normalizedSpeed, roundedPitch);
+    const inFlight = this.processingPromises.get(key);
+    if (inFlight) return inFlight;
+    const scheduled = this.scheduleDspRender(() => this.renderPlanetBuffer(key, orbitId, normalizedSpeed, roundedPitch));
+    this.processingPromises.set(key, scheduled);
+    try {
+      await scheduled;
+    } finally {
+      if (this.processingPromises.get(key) === scheduled) this.processingPromises.delete(key);
+    }
+  }
+
+  private async renderPlanetBuffer(key: string, orbitId: string, normalizedSpeed: number, roundedPitch: number) {
     const original = this.buffers.get(orbitId);
     if (!original) throw new Error("Audio buffer is unavailable.");
 

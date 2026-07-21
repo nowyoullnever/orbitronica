@@ -431,6 +431,9 @@ test("current playback coordinate parameters are pinned for forward and reverse 
   const planetId = "coordinate-baseline-planet";
   const buffer = new FakeAudioBuffer(1, 10000, 1000);
   engine.buffers.set(orbitId, buffer);
+  // P0 pins the legacy coordinate math; P1a correctly requires a non-neutral
+  // rendered buffer rather than silently falling back to this original source.
+  engine.processedBuffers.set(engine.processedBufferKey(orbitId, planetId, 1.25, 0), buffer);
   engine.orbitRuntimes.set(orbitId, { input: new FakeNode(), panNode: { input: new FakeNode(), output: new FakeNode(), disconnect() {} }, gainNode: new FakeGain() });
   createdSources.length = 0;
   try {
@@ -453,6 +456,69 @@ test("current playback coordinate parameters are pinned for forward and reverse 
   } finally {
     audioEngine.removeOrbit(orbitId);
     createdSources.length = 0;
+  }
+});
+
+test("nearby speeds no longer share a rounded cache key or silently play the original on a miss", async () => {
+  await audioEngine.resume();
+  const engine = audioEngine as any;
+  const orbitId = "exact-speed-key-orbit";
+  const planetId = "exact-speed-key-planet";
+  const original = new FakeAudioBuffer(1, 1000, 1000);
+  engine.buffers.set(orbitId, original);
+  engine.orbitRuntimes.set(orbitId, { input: new FakeNode(), panNode: { input: new FakeNode(), output: new FakeNode(), disconnect() {} }, gainNode: new FakeGain() });
+  createdSources.length = 0;
+  try {
+    const first = engine.processedBufferKey(orbitId, planetId, 1.00001, 100);
+    const second = engine.processedBufferKey(orbitId, planetId, 1.00002, 100);
+    assert.notEqual(first, second, "the key must retain the exact DSP speed");
+    assert.deepEqual(engine.getPlaybackBuffer(orbitId, planetId, 1.25, 100), { status: "pending", cacheKey: engine.processedBufferKey(orbitId, planetId, 1.25, 100) });
+    audioEngine.syncLoop(orbitId, planetId, "pending", true, 0, 1, 0, 1, 1.25, 100, false, 0, 1);
+    assert.equal(createdSources.length, 0, "a non-neutral cache miss must skip rather than replay the original");
+  } finally {
+    audioEngine.removeOrbit(orbitId);
+    createdSources.length = 0;
+  }
+});
+
+test("registering a replacement source invalidates that orbit's processed and reverse cache entries", async () => {
+  await audioEngine.resume();
+  const engine = audioEngine as any;
+  const orbitId = "source-replacement-orbit";
+  engine.buffers.set(orbitId, new FakeAudioBuffer(1, 16, 1000));
+  engine.processedBuffers.set(`${orbitId}:planet:speed=1.25:pitch=100`, new FakeAudioBuffer(1, 16, 1000));
+  engine.reverseBuffers.set(`${orbitId}:planet:speed=1.25:pitch=100:reverse`, new FakeAudioBuffer(1, 16, 1000));
+  try {
+    engine.registerBuffer(orbitId, new FakeAudioBuffer(1, 32, 1000), 1);
+    assert.equal([...engine.processedBuffers.keys()].some((key: string) => key.startsWith(`${orbitId}:`)), false);
+    assert.equal([...engine.reverseBuffers.keys()].some((key: string) => key.startsWith(`${orbitId}:`)), false);
+  } finally {
+    audioEngine.removeOrbit(orbitId);
+  }
+});
+
+test("concurrent requests for one processed tuple share one scheduled render", async () => {
+  await audioEngine.resume();
+  const engine = audioEngine as any;
+  const orbitId = "dedup-render-orbit";
+  const planetId = "dedup-render-planet";
+  engine.buffers.set(orbitId, new FakeAudioBuffer(1, 256, 1000));
+  const originalRender = engine.renderPlanetBuffer;
+  let renders = 0;
+  engine.renderPlanetBuffer = async (...args: unknown[]) => {
+    renders++;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return originalRender.apply(engine, args);
+  };
+  try {
+    await Promise.all([
+      audioEngine.processPlanetBuffer(orbitId, planetId, 1.25, 100),
+      audioEngine.processPlanetBuffer(orbitId, planetId, 1.25, 100)
+    ]);
+    assert.equal(renders, 1);
+  } finally {
+    engine.renderPlanetBuffer = originalRender;
+    clearOrbitProcessedBuffers(engine, orbitId);
   }
 });
 
