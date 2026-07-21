@@ -1,0 +1,19 @@
+{
+  "task": 8,
+  "status": "pass",
+  "checks": {
+    "immutableNextState": ["mode", "direction", "speed", "pitch", "trim", "add", "delete", "paste", "duplicate", "undo-redo", "project-open"],
+    "stagedTrimResidency": true,
+    "projectActiveBeforeInactive": true,
+    "unmountReleasesSceneResidency": true
+  },
+  "commands": [
+    "node --experimental-strip-types --test test/appSceneContract.test.ts",
+    "npm test",
+    "npx tsc -b --force",
+    "ORBITRONICA_PLUGIN_OUTPUT=/tmp/orbitronica-wam-task8-20260721 npm run test:wam-dsp",
+    "ORBITRONICA_PLUGIN_OUTPUT=/tmp/orbitronica-wam-task8-20260721 npm run smoke:packaged-wam",
+    "git diff --check"
+  ],
+  "manualSurface": "Packaged Chromium WAM DSP and file-protocol smoke completed from the task worktree."
+}

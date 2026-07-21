@@ -1,0 +1,24 @@
+{
+  "task": 6,
+  "surface": "scene-audio-readiness",
+  "focusedTests": { "passed": 9, "failed": 0 },
+  "directCollector": {
+    "requestCount": 2,
+    "loop": { "speed": 1.5, "direction": "reverse", "window": [1, 5] },
+    "sequence": { "speed": 1, "direction": "forward", "window": [2, 6] }
+  },
+  "directResidency": {
+    "forwardAndReverseProtected": true,
+    "stagedSurvivesPermanentRelease": true,
+    "allReleasedUnprotected": true,
+    "sourceReplacementInvalidates": true
+  },
+  "fullTest": {
+    "status": "blocked-by-concurrent-todo-4-contract-update",
+    "error": "owner-ID contract expectation has not caught up with the hook implementation"
+  },
+  "typecheck": {
+    "status": "blocked-by-concurrent-todo-4-app-integration",
+    "error": "App has not supplied newly required speed/pitch render-owner dependencies"
+  }
+}

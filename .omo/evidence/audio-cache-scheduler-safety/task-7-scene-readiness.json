@@ -1,0 +1,43 @@
+{
+  "task": "todo-7-scene-readiness-and-todo-6-production-residency",
+  "focused": {
+    "command": "node --experimental-strip-types --test --test-name-pattern='scene audio requirements|residency|pin|staged admission' test/audioEngine.test.ts test/appSceneContract.test.ts test/sceneAudioReadiness.test.ts",
+    "result": "10 focused reverse/residency/readiness cases passed, 0 failed"
+  },
+  "typecheck": {
+    "command": "npx tsc -b --pretty false",
+    "result": "passed"
+  },
+  "full": {
+    "command": "npm test",
+    "result": "251 passed, 0 failed"
+  },
+  "direct": {
+    "command": "node --experimental-strip-types --input-type=module -e '<scene readiness coordinator fixture>'",
+    "result": {
+      "protocol": "node-direct-scene-readiness",
+      "calls": [
+        "acquire-before-prewarm",
+        "exact-audio-ready",
+        "wam-ready",
+        "atomic-publish",
+        "release-after-publish"
+      ],
+      "passed": true
+    }
+  },
+  "reversePrewarm": {
+    "processed": "forward and reverse hot artifacts exist before the first reverse loop edge",
+    "neutral": "full-source reverse hot artifact exists without a SoundTouch render",
+    "firstEdge": "does not create a second reverse artifact"
+  },
+  "deferredTransition": {
+    "cases": [
+      "active selection changes synchronously while audible remains gated",
+      "B to C prevents late B publication",
+      "C audio failure keeps A permanent residency",
+      "same-scene C retry publishes atomically without another selection mutation"
+    ],
+    "result": "passed"
+  }
+}

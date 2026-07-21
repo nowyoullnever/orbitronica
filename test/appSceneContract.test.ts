@@ -75,10 +75,9 @@ test("all document replacement paths reconcile the active WAM scene", () => {
   const undoRedo = body("restoreSnapshot", "undo");
   const duplicate = body("duplicateOrbit", "copyPlanet");
   const open = body("openProject", "toggleRecording");
-  assert.match(undoRedo, /scheduleScenePluginTransition/);
+  assert.match(undoRedo, /refreshCommittedSceneReadiness/);
   assert.match(duplicate, /reconcileOrbitPlugins\(duplicate\)/);
-  assert.match(open, /restoredActiveOrbits/);
-  assert.match(open, /scheduleScenePluginTransition\(previousOrbits, restoredActiveOrbits/);
+  assert.match(open, /refreshCommittedSceneReadiness\(restoredScenes, project\.activeSceneId/);
 });
 
 test("scene duplication maps plugin slots after audio staging and uses the normal gate-first transition", () => {
@@ -87,14 +86,51 @@ test("scene duplication maps plugin slots after audio staging and uses the norma
   assert.ok(duplicate.indexOf("stageSceneDuplicate") < duplicate.indexOf("copyPluginStatesBySlotMap"));
   assert.match(duplicate, /createPluginSlotId: \(\) => projectId\(\)/);
   assert.match(duplicate, /removePluginSlotStates\(copiedPluginStateIds\)/);
-  assert.match(commit, /scheduleScenePluginTransition\(previous\?\.orbits/);
+  assert.match(commit, /refreshCommittedSceneReadiness\(nextScenes, nextActiveSceneId\)/);
 });
 
 test("metadata-only scene commits do not tear down an unchanged active WAM rack", () => {
   const commit = body("commitSceneDocument", "publishPreRecordedSceneEdit");
-  assert.match(commit, /const shouldTransition = previous\?\.id !== target\?\.id \|\| previous\?\.orbits !== target\?\.orbits/);
-  assert.match(commit, /if \(shouldTransition\) prepareActiveSceneTransition/);
-  assert.match(commit, /if \(shouldTransition\) \{\s*scheduleScenePluginTransition/);
+  const refresh = body("refreshCommittedSceneReadiness", "scheduleScenePluginTransition");
+  assert.match(commit, /refreshCommittedSceneReadiness\(nextScenes, nextActiveSceneId\)/);
+  assert.match(refresh, /changedScene/);
+  assert.match(refresh, /sameSceneAudioRequirements/);
+  assert.match(refresh, /if \(!changedScene && sameSceneAudioRequirements/);
+});
+
+test("scene audibility waits for the latest audio and WAM readiness transaction", () => {
+  const transition = body("scheduleScenePluginTransition", "activateScene");
+  const activate = body("activateScene", "commitSceneDocument");
+  const commit = body("commitSceneDocument", "publishPreRecordedSceneEdit");
+  assert.match(app, /collectSceneAudioRequests/);
+  assert.match(transition, /sceneTransitionController\.current\?\.abort\(\)/);
+  assert.match(transition, /audioEngine\.acquireResidency/);
+  assert.match(transition, /ensureProcessedBuffer/);
+  assert.match(transition, /priority: "playback"/);
+  assert.match(transition, /runSceneAudioReadinessTransition/);
+  assert.match(transition, /replacePermanentResidency/);
+  assert.match(transition, /sceneTransitionEpoch\.current === epoch/);
+  assert.match(activate, /prepareActiveSceneTransition\(nextSceneId, true\)/);
+  assert.match(activate, /if \(changed\) setActiveSceneId\(nextSceneId\)/);
+  assert.match(commit, /refreshCommittedSceneReadiness\(nextScenes, nextActiveSceneId\)/);
+});
+
+test("committed audio mutations derive the next immutable scene before refreshing residency", () => {
+  const trim = app.slice(app.indexOf("onSampleTrim={"), app.indexOf("hasPlanetClipboard=", app.indexOf("onSampleTrim={")));
+  const projectOpen = body("openProject", "toggleRecording");
+  const staged = body("prewarmAndCommitSceneMutation", "canOrbitSound");
+  assert.match(app, /function commitActiveSceneMutation/);
+  assert.match(app, /onPlanetReverse=.*commitActiveSceneMutation/s);
+  assert.match(app, /function setOrbitMode[\s\S]*commitActiveSceneMutation/);
+  assert.match(trim, /const nextScenes = updateSceneById/);
+  assert.match(trim, /prewarmAndCommitSceneMutation\(/);
+  assert.match(staged, /audioEngine\.acquireResidency/);
+  assert.match(trim, /refreshCommittedSceneReadiness\(nextScenes/);
+  assert.match(projectOpen, /refreshCommittedSceneReadiness\(restoredScenes, project\.activeSceneId/);
+  assert.match(projectOpen, /if \(scene\.id === project\.activeSceneId\) continue/);
+  assert.match(app, /sceneTransitionController\.current\?\.abort\(\)/);
+  assert.match(app, /replacePermanentResidency\(permanentSceneResidencyOwner\.current, \[\]\)/);
+  assert.match(app, /onMovePlanets=\{\(updates\) => \{[\s\S]*commitActiveSceneMutation\(\(scene\) => applyPlanetMotionUpdates\(scene, updates\), false\)/);
 });
 
 test("project save keeps every failure in the save barrier and never reports a failed serialize as success", () => {

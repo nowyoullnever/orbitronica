@@ -1,6 +1,6 @@
 import type { SetStateAction } from "react";
 import type { DspRenderPriority, ProcessedBufferRequest } from "../audio/audioEngine";
-import { updatePlanetForFreshRequest } from "../state/scenes";
+import { updatePlanetForFreshRequest, updateSceneById } from "../state/scenes";
 import type { Planet, Scene } from "../state/types";
 import { getSampleEnd, getSampleStart } from "../utils/geometry";
 
@@ -51,6 +51,7 @@ export type UseSpeedPitchProcessingDeps = {
   maxDirectRate: number;
   startRenderOwner: (ownerId: string) => AbortController;
   releaseRenderOwner: (ownerId: string, controller: AbortController) => void;
+  refreshCommittedScene: (nextScenes: Scene[], nextActiveSceneId: string) => void;
 };
 
 /**
@@ -59,7 +60,7 @@ export type UseSpeedPitchProcessingDeps = {
  * lives in audioEngine.ts (pinned by a dedicated test in test/audioEngine.test.ts).
  */
 export function useSpeedPitchProcessing(deps: UseSpeedPitchProcessingDeps) {
-  const { stateRef, setPlanets, setScenes, pushHistory, flash, audioEngine, randomId, clamp, minDirectRate, maxDirectRate, startRenderOwner, releaseRenderOwner } = deps;
+  const { stateRef, setPlanets, setScenes, pushHistory, flash, audioEngine, randomId, clamp, minDirectRate, maxDirectRate, startRenderOwner, releaseRenderOwner, refreshCommittedScene } = deps;
   const startEdit = (sceneId: string, orbitId: string, planetId: string) => {
     const ownerId = `edit:${sceneId}:${orbitId}:${planetId}`;
     return { ownerId, controller: startRenderOwner(ownerId) };
@@ -97,8 +98,14 @@ export function useSpeedPitchProcessing(deps: UseSpeedPitchProcessingDeps) {
     const requestId = randomId();
     const [sampleStart, sampleEnd] = sampleWindow(planet.orbitId);
     if (audioEngine.hasProcessedBuffer(planet.orbitId, planet.id, speed, planet.pitchCents, sampleStart, sampleEnd)) {
-      setPlanets((current) => current.map((item) =>
-        item.id === planetId ? { ...clearSpeedProcessing(item), speed, speedProcessingError: undefined } : item));
+      const nextScenes = updateSceneById(stateRef.current.scenes, sceneId, (scene) => ({
+        ...scene,
+        planets: scene.planets.map((item) => item.id === planetId
+          ? { ...clearSpeedProcessing(item), speed, speedProcessingError: undefined }
+          : item)
+      }));
+      setScenes(nextScenes);
+      refreshCommittedScene(nextScenes, sceneId);
       return;
     }
     const { ownerId, controller } = startEdit(sceneId, planet.orbitId, planetId);
@@ -122,10 +129,12 @@ export function useSpeedPitchProcessing(deps: UseSpeedPitchProcessingDeps) {
           ?.planets.find((item) => item.id === planetId);
         if (latest?.speedProcessRequestId !== requestId) return;
       }
-      setScenes((current) => updatePlanetForFreshRequest(
-        current, sceneId, planetId, "speed", requestId,
+      const nextScenes = updatePlanetForFreshRequest(
+        stateRef.current.scenes, sceneId, planetId, "speed", requestId,
         (item) => ({ ...clearSpeedProcessing(item), speed, speedProcessingError: undefined })
-      ));
+      );
+      setScenes(nextScenes);
+      refreshCommittedScene(nextScenes, sceneId);
     } catch (error) {
       if (isAbortError(error)) return;
       const latest = stateRef.current.scenes.find((scene) => scene.id === sceneId)
@@ -162,8 +171,14 @@ export function useSpeedPitchProcessing(deps: UseSpeedPitchProcessingDeps) {
     const requestId = randomId();
     const [sampleStart, sampleEnd] = sampleWindow(planet.orbitId);
     if (audioEngine.hasProcessedBuffer(planet.orbitId, planet.id, planet.speed, pitchCents, sampleStart, sampleEnd)) {
-      setPlanets((current) => current.map((item) =>
-        item.id === planetId ? { ...clearPitchProcessing(item), pitchCents } : item));
+      const nextScenes = updateSceneById(stateRef.current.scenes, sceneId, (scene) => ({
+        ...scene,
+        planets: scene.planets.map((item) => item.id === planetId
+          ? { ...clearPitchProcessing(item), pitchCents }
+          : item)
+      }));
+      setScenes(nextScenes);
+      refreshCommittedScene(nextScenes, sceneId);
       return;
     }
     const { ownerId, controller } = startEdit(sceneId, planet.orbitId, planetId);
@@ -183,10 +198,12 @@ export function useSpeedPitchProcessing(deps: UseSpeedPitchProcessingDeps) {
           ?.planets.find((item) => item.id === planetId);
         if (latest?.pitchProcessRequestId !== requestId) return;
       }
-      setScenes((current) => updatePlanetForFreshRequest(
-        current, sceneId, planetId, "pitch", requestId,
+      const nextScenes = updatePlanetForFreshRequest(
+        stateRef.current.scenes, sceneId, planetId, "pitch", requestId,
         (item) => ({ ...clearPitchProcessing(item), pitchCents })
-      ));
+      );
+      setScenes(nextScenes);
+      refreshCommittedScene(nextScenes, sceneId);
     } catch (error) {
       if (isAbortError(error)) return;
       const latest = stateRef.current.scenes.find((scene) => scene.id === sceneId)
