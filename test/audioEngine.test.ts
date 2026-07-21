@@ -596,6 +596,22 @@ test("trim-window processing retains guarded physical PCM whose logical content 
   }
 });
 
+test("locked 180-second stereo fixture reduces guarded processed residency by at least 90 percent", () => {
+  const engine = audioEngine as any;
+  const orbitId = "trim-memory-fixture";
+  const sampleRate = 44_100;
+  engine.buffers.set(orbitId, new FakeAudioBuffer(2, 180 * sampleRate, sampleRate));
+  try {
+    const window = engine.processingWindow(orbitId, 1, 30, 45);
+    const fullBytes = window.fullOutputLength * 2 * Float32Array.BYTES_PER_ELEMENT;
+    const residentBytes = (window.bufferEndFrame - window.bufferStartFrame) * 2 * Float32Array.BYTES_PER_ELEMENT;
+    assert.equal(window.bufferEndFrame - window.bufferStartFrame, 15 * sampleRate + 256);
+    assert.ok(1 - residentBytes / fullBytes >= .9, `expected >=90% reduction, got ${(1 - residentBytes / fullBytes) * 100}%`);
+  } finally {
+    engine.buffers.delete(orbitId);
+  }
+});
+
 test("processed-buffer cache stays bounded to the LRU cap across many distinct speed/pitch tuples", async () => {
   await audioEngine.resume();
   const orbitId = "lru-cap-orbit";
