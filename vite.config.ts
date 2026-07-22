@@ -3,7 +3,12 @@ import { execFileSync } from "node:child_process";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-const buildCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: import.meta.dirname, encoding: "utf8" }).trim();
+let buildCommit = "unknown";
+try {
+  buildCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: import.meta.dirname, encoding: "utf8" }).trim();
+} catch {
+  // git is unavailable (e.g. building outside a git checkout); fall back to "unknown".
+}
 
 export default defineConfig({
   define: {

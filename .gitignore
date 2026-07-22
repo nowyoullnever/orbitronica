@@ -4,6 +4,7 @@ dist-electron
 release
 *.log
 .omx
+.omo/
 *.tsbuildinfo
 
 # Mapo Flower Island font — license prohibits redistribution, so it is never
