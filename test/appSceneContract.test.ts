@@ -98,6 +98,24 @@ test("metadata-only scene commits do not tear down an unchanged active WAM rack"
   assert.match(refresh, /if \(!changedScene && sameSceneAudioRequirements/);
 });
 
+test("same-scene audio requirement changes prewarm in the background instead of stopping active playback", () => {
+  const refresh = body("refreshCommittedSceneReadiness", "scheduleScenePluginTransition");
+  const prewarm = body("scheduleSameSceneAudioPrewarm", "refreshCommittedSceneReadiness");
+  // The changed-requirements-but-same-scene branch must route to the background prewarm
+  // helper, never to prepareActiveSceneTransition/stopAllActivePlaybacks (that would cut
+  // every currently-sounding planet for an edit that only touches one of them).
+  assert.match(refresh, /if \(!changedScene\) \{\s*scheduleSameSceneAudioPrewarm\(target, afterAudioReady\);\s*return;\s*\}/);
+  // The same-scene early return must precede the full-transition call, so a same-scene
+  // requirement change can never fall through into prepareActiveSceneTransition.
+  assert.ok(refresh.indexOf("scheduleSameSceneAudioPrewarm(target") < refresh.indexOf("prepareActiveSceneTransition(nextActiveSceneId, true)"));
+  assert.match(prewarm, /replacePermanentResidency\(permanentSceneResidencyOwner\.current, requests\)/);
+  assert.match(prewarm, /ensureProcessedBuffer\(/);
+  assert.match(prewarm, /priority: "selected"/);
+  assert.match(prewarm, /startRenderOwner\(ownerId\)/);
+  assert.match(prewarm, /releaseRenderOwner\(ownerId, controller\)/);
+  assert.doesNotMatch(prewarm, /prepareActiveSceneTransition|stopAllActivePlaybacks/);
+});
+
 test("scene audibility waits for the latest audio and WAM readiness transaction", () => {
   const transition = body("scheduleScenePluginTransition", "activateScene");
   const activate = body("activateScene", "commitSceneDocument");
@@ -110,6 +128,13 @@ test("scene audibility waits for the latest audio and WAM readiness transaction"
   assert.match(transition, /runSceneAudioReadinessTransition/);
   assert.match(transition, /replacePermanentResidency/);
   assert.match(transition, /sceneTransitionEpoch\.current === epoch/);
+  // A partial prewarm failure must not abort the transition or block publish -- only
+  // reportAudioFailure (full/WAM failure) aborts the controller.
+  assert.match(transition, /reportPartialAudioFailure: \(failedRequests\) => \{/);
+  assert.doesNotMatch(
+    transition.slice(transition.indexOf("reportPartialAudioFailure:")),
+    /controller\.abort\(\)/
+  );
   assert.match(activate, /prepareActiveSceneTransition\(nextSceneId, true\)/);
   assert.match(activate, /if \(changed\) setActiveSceneId\(nextSceneId\)/);
   assert.match(commit, /refreshCommittedSceneReadiness\(nextScenes, nextActiveSceneId\)/);
@@ -122,15 +147,43 @@ test("committed audio mutations derive the next immutable scene before refreshin
   assert.match(app, /function commitActiveSceneMutation/);
   assert.match(app, /onPlanetReverse=.*commitActiveSceneMutation/s);
   assert.match(app, /function setOrbitMode[\s\S]*commitActiveSceneMutation/);
-  assert.match(trim, /const nextScenes = updateSceneById/);
+  // Trim publishes rebase onto the current document (not a captured `nextScenes`) so a
+  // motion commit landing mid-render can't make the publish silently no-op (see the
+  // dedicated rebase test below for the full contract).
+  assert.match(trim, /const applyWindow = \(scenes: Scene\[\]\) => updateSceneById/);
+  assert.match(trim, /const nextScenes = applyWindow\(currentScenes\)/);
   assert.match(trim, /prewarmAndCommitSceneMutation\(/);
   assert.match(staged, /audioEngine\.acquireResidency/);
-  assert.match(trim, /refreshCommittedSceneReadiness\(nextScenes/);
+  assert.match(trim, /const rebased = applyWindow\(stateRef\.current\.scenes\)/);
+  assert.match(trim, /refreshCommittedSceneReadiness\(rebased, sceneIdAtRequest\)/);
   assert.match(projectOpen, /refreshCommittedSceneReadiness\(restoredScenes, project\.activeSceneId/);
   assert.match(projectOpen, /if \(scene\.id === project\.activeSceneId\) continue/);
   assert.match(app, /sceneTransitionController\.current\?\.abort\(\)/);
   assert.match(app, /replacePermanentResidency\(permanentSceneResidencyOwner\.current, \[\]\)/);
-  assert.match(app, /onMovePlanets=\{\(updates\) => \{[\s\S]*commitActiveSceneMutation\(\(scene\) => applyPlanetMotionUpdates\(scene, updates\), false\)/);
+  // The physics loop's angle/collision commits (onMovePlanets) go through a dedicated
+  // motion-commit path, not the general commitActiveSceneMutation -- see the livelock
+  // test below for why (resetPlaybackRenderScope must never run on this hot path).
+  assert.match(app, /onMovePlanets=\{\(updates\) => \{[\s\S]*commitMotionSceneMutation\(updates\)/);
+  assert.doesNotMatch(
+    app.slice(app.indexOf("onMovePlanets={"), app.indexOf("sceneId={activeSceneId}")),
+    /commitActiveSceneMutation/
+  );
+});
+
+test("motion commits never abort in-flight playback renders and only redo audio requirements on a direction flip", () => {
+  const motion = body("commitMotionSceneMutation", "publishPreRecordedSceneEdit");
+  // The whole point of this dedicated path: it must never call resetPlaybackRenderScope
+  // (that would abort in-flight playback-priority self-heal renders every physics tick,
+  // livelocking any render slower than the angle-sync interval) and must never run the
+  // general readiness refresh (which allocates two collected+sorted request lists) on
+  // every motion commit -- only the direction-flip subcase does any requirement work.
+  assert.doesNotMatch(motion, /resetPlaybackRenderScope\(\)/);
+  assert.doesNotMatch(motion, /refreshCommittedSceneReadiness\(/);
+  assert.match(motion, /"direction" in update/);
+  assert.match(motion, /collectSceneAudioRequests\(target\)/);
+  assert.match(motion, /replacePermanentResidency\(permanentSceneResidencyOwner\.current, requests\)/);
+  assert.match(motion, /requestProcessedPlanet\(/);
+  assert.match(motion, /"playback"/);
 });
 
 test("project save keeps every failure in the save barrier and never reports a failed serialize as success", () => {

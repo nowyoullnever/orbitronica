@@ -305,6 +305,32 @@ export default function App() {
     return before.length === after.length && before.every((value, index) => value === after[index]);
   }
 
+  // In-scene edits (deleting one planet, toggling reverse, a speed/pitch commit, a trim)
+  // must not cut every currently-sounding planet in the scene -- only a genuine scene
+  // identity change (switching tabs, undo/redo across scenes, project load) warrants the
+  // full stop-everything-and-rehydrate-the-WAM-rack transition below. Same-scene audio
+  // requirement changes instead update residency and prewarm in the background while
+  // whatever is already audible keeps playing; callers that need a specific planet/orbit
+  // silenced already do that themselves (e.g. deletePlanet calls stopAllActivePlaybacksForPlanet).
+  function scheduleSameSceneAudioPrewarm(target: Scene | undefined, afterAudioReady?: () => void) {
+    if (!target) return;
+    const requests = collectSceneAudioRequests(target);
+    audioEngine.replacePermanentResidency(permanentSceneResidencyOwner.current, requests);
+    const ownerId = `same-scene-audio:${target.id}`;
+    const controller = startRenderOwner(ownerId);
+    void Promise.allSettled(requests.map((request, index) => audioEngine.ensureProcessedBuffer(request, {
+      ownerId: `${ownerId}:${index}:${request.orbitId}:${request.planetId}`,
+      priority: "selected",
+      signal: controller.signal
+    }))).then((results) => {
+      if (controller.signal.aborted) return;
+      const failed = results.some((result) =>
+        result.status === "rejected" && !isExpectedDspAbort(result.reason));
+      if (failed) flash("Some planet audio is not ready; it will retry on the next trigger.");
+      afterAudioReady?.();
+    }).finally(() => releaseRenderOwner(ownerId, controller));
+  }
+
   function refreshCommittedSceneReadiness(
     nextScenes: Scene[], nextActiveSceneId: string, afterAudioReady?: () => void
   ) {
@@ -313,6 +339,10 @@ export default function App() {
     const target = nextScenes.find((scene) => scene.id === nextActiveSceneId);
     const changedScene = previous?.id !== target?.id || previous?.orbits !== target?.orbits;
     if (!changedScene && sameSceneAudioRequirements(previous, target)) return;
+    if (!changedScene) {
+      scheduleSameSceneAudioPrewarm(target, afterAudioReady);
+      return;
+    }
     prepareActiveSceneTransition(nextActiveSceneId, true);
     scheduleScenePluginTransition(previous?.orbits ?? [], target, nextActiveSceneId, afterAudioReady);
   }
@@ -346,6 +376,12 @@ export default function App() {
       reportAudioFailure: (error) => {
         controller.abort();
         flash(error instanceof Error ? `Scene audio is not ready: ${error.message}` : "Scene audio is not ready.");
+      },
+      // A partial failure still publishes (see runSceneAudioReadinessTransition): the
+      // scene becomes audible, and any planet missing its artifact self-heals via the
+      // ordinary miss path on its next trigger. This just surfaces that it's retrying.
+      reportPartialAudioFailure: (failedRequests) => {
+        flash(`${failedRequests.length} planet${failedRequests.length === 1 ? "" : "s"} audio not ready; retrying on trigger.`);
       }
     }).finally(() => {
       if (sceneTransitionController.current === controller) sceneTransitionController.current = null;
@@ -386,6 +422,47 @@ export default function App() {
     refreshCommittedSceneReadiness(nextScenes, current.activeSceneId);
     setScenes(nextScenes);
     if (markDirty) setIsDirty(true);
+    return nextScenes;
+  }
+
+  // Dedicated path for the physics loop's angle/collision commits (onMovePlanets), which
+  // land up to 100Hz while collisions settle and every ANGLE_SYNC_INTERVAL_SECONDS while
+  // playing. Unlike commitActiveSceneMutation this must NEVER call resetPlaybackRenderScope:
+  // that would abort in-flight playback-priority self-heal renders every cycle, so a render
+  // taking longer than the sync interval could never complete while the transport runs.
+  // It also skips refreshCommittedSceneReadiness's requirement diff (sameSceneAudioRequirements
+  // allocates two collected+sorted request lists) for the common case, since motion updates
+  // only ever touch angle/collisionSpeedMultiplier/collisionFlashRemaining/direction -- and
+  // only a direction flip (a collision reversing a planet) changes what audio is required.
+  function commitMotionSceneMutation(updates: ReadonlyMap<string, Partial<Planet>>) {
+    const current = stateRef.current;
+    const nextScenes = updateSceneById(current.scenes, current.activeSceneId,
+      (scene) => applyPlanetMotionUpdates(scene, updates));
+    setScenes(nextScenes);
+    let directionChanged = false;
+    for (const update of updates.values()) {
+      if ("direction" in update) { directionChanged = true; break; }
+    }
+    if (!directionChanged) return nextScenes;
+    const target = nextScenes.find((scene) => scene.id === current.activeSceneId);
+    if (!target) return nextScenes;
+    // A direction flip changes which processed artifact a planet needs (forward vs.
+    // reverse variant). Recompute residency so the cache doesn't evict the newly-required
+    // artifact, and kick a prewarm to accelerate the miss self-heal -- but still without
+    // touching resetPlaybackRenderScope or stopping anything currently playing.
+    const requests = collectSceneAudioRequests(target);
+    audioEngine.replacePermanentResidency(permanentSceneResidencyOwner.current, requests);
+    const requestByPlanetId = new Map(requests.map((request) => [request.planetId, request]));
+    for (const planetId of updates.keys()) {
+      if (!("direction" in (updates.get(planetId) ?? {}))) continue;
+      const request = requestByPlanetId.get(planetId);
+      if (!request) continue;
+      void requestProcessedPlanet(
+        request.orbitId, request.planetId, request.speed, request.pitchCents,
+        request.sampleStart, request.sampleEnd,
+        `motion:${current.activeSceneId}:${request.orbitId}:${request.planetId}`, "playback", request.direction
+      );
+    }
     return nextScenes;
   }
 
@@ -1412,7 +1489,7 @@ export default function App() {
               );
             }
           }
-          commitActiveSceneMutation((scene) => applyPlanetMotionUpdates(scene, updates), false);
+          commitMotionSceneMutation(updates);
         }}
         sceneId={activeSceneId}
         playbackEpoch={playbackEpoch.current}
@@ -1477,20 +1554,31 @@ export default function App() {
         const orbit = stateRef.current.orbits.find((item) => item.id === orbitId);
         if (!orbit) return;
         const window = normalizeSampleWindow(orbit.audioDuration, start, end);
+        const audioDurationAtRequest = orbit.audioDuration;
+        const sceneIdAtRequest = stateRef.current.activeSceneId;
         const currentScenes = stateRef.current.scenes;
-        const nextScenes = updateSceneById(currentScenes, stateRef.current.activeSceneId, (scene) => ({
+        const applyWindow = (scenes: Scene[]) => updateSceneById(scenes, sceneIdAtRequest, (scene) => ({
           ...scene,
           orbits: scene.orbits.map((item) => item.id === orbitId
             ? { ...item, sampleStart: window.start, sampleEnd: window.end }
             : item)
         }));
+        const nextScenes = applyWindow(currentScenes);
         const trimOwnerEpoch = projectRenderEpoch.current;
         void prewarmAndCommitSceneMutation(
-          nextScenes, stateRef.current.activeSceneId, `trim:${trimOwnerEpoch}:${orbitId}`, "selected", () => {
-          if (stateRef.current.scenes !== currentScenes) return;
+          nextScenes, sceneIdAtRequest, `trim:${trimOwnerEpoch}:${orbitId}`, "selected", () => {
+          // While playing, motion commits replace the scenes array up to every 250ms, so a
+          // whole-array identity guard here would almost always silently drop this publish.
+          // Rebase onto whatever is current instead: only bail if the orbit itself is gone
+          // or its audio was replaced (a concurrent replacement bumps the source generation,
+          // which would make the prewarmed artifacts above stale).
+          const rebaseOrbit = stateRef.current.scenes
+            .find((scene) => scene.id === sceneIdAtRequest)?.orbits.find((item) => item.id === orbitId);
+          if (!rebaseOrbit || rebaseOrbit.audioDuration !== audioDurationAtRequest) return;
+          const rebased = applyWindow(stateRef.current.scenes);
           pushParameterHistory();
-          refreshCommittedSceneReadiness(nextScenes, stateRef.current.activeSceneId);
-          setScenes(nextScenes);
+          refreshCommittedSceneReadiness(rebased, sceneIdAtRequest);
+          setScenes(rebased);
           audioEngine.stopActiveLoopPlaybacksForOrbit(orbitId);
         }).catch((error: unknown) => {
           if (!isExpectedDspAbort(error)) flash("Trim processing failed; the previous sample window remains active.");

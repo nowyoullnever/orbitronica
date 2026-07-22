@@ -254,7 +254,7 @@ test("scene preflight acquires before enqueue and atomically publishes after aud
   assert.deepEqual(calls, ["acquire", "prewarm", "hydrate", "publish", "release"]);
 });
 
-test("scene preflight never lets stale or failed audio publish and always releases the target pin", async () => {
+test("scene preflight never lets a stale transition publish and always releases the target pin", async () => {
   const staleController = new AbortController();
   const staleAudio = deferred<void>();
   const staleWam = deferred<boolean>();
@@ -273,20 +273,94 @@ test("scene preflight never lets stale or failed audio publish and always releas
   staleWam.resolve(true);
   await stale;
   assert.deepEqual(staleCalls, ["release"]);
+});
 
-  const failedController = new AbortController();
-  const failedCalls: string[] = [];
+// One planet's render failing must never veto the whole scene's publish -- otherwise
+// audibleSceneId stays null and every other (successfully rendered) planet in the scene
+// goes silent along with the one that actually failed. Prewarms are settled individually
+// (not Promise.all) so a single rejection can't propagate into the transition's own catch.
+test("a failed prewarm still publishes a current, owned transition and is reported via reportPartialAudioFailure, not reportAudioFailure", async () => {
+  const controller = new AbortController();
+  const calls: string[] = [];
+  let reportedRequests: readonly (typeof readinessRequest)[] = [];
+  let reportedErrors: readonly unknown[] = [];
   await runSceneAudioReadinessTransition({
     requests: [readinessRequest],
-    signal: failedController.signal,
+    signal: controller.signal,
     isCurrent: () => true,
-    acquire: () => () => failedCalls.push("release"),
+    acquire: () => () => calls.push("release"),
     prewarm: () => Promise.reject(new Error("render failed")),
     hydrate: () => Promise.resolve(true),
-    publish: () => failedCalls.push("publish"),
-    reportAudioFailure: () => failedCalls.push("failure")
+    publish: () => calls.push("publish"),
+    reportAudioFailure: () => calls.push("failure"),
+    reportPartialAudioFailure: (failedRequests, errors) => {
+      calls.push("partial-failure");
+      reportedRequests = failedRequests;
+      reportedErrors = errors;
+    }
   });
-  assert.deepEqual(failedCalls, ["failure", "release"]);
+  assert.deepEqual(calls, ["publish", "partial-failure", "release"]);
+  assert.deepEqual(reportedRequests, [readinessRequest]);
+  assert.equal((reportedErrors[0] as Error).message, "render failed");
+});
+
+test("a partial prewarm failure among several requests reports only the requests that actually failed", async () => {
+  const okRequest = { ...readinessRequest, planetId: "planet-ok" };
+  const failRequest = { ...readinessRequest, planetId: "planet-fail" };
+  const controller = new AbortController();
+  const calls: string[] = [];
+  let reportedRequests: readonly (typeof readinessRequest)[] = [];
+  await runSceneAudioReadinessTransition({
+    requests: [okRequest, failRequest],
+    signal: controller.signal,
+    isCurrent: () => true,
+    acquire: () => () => calls.push("release"),
+    prewarm: (request) => request.planetId === "planet-fail"
+      ? Promise.reject(new Error("render failed"))
+      : Promise.resolve(),
+    hydrate: () => Promise.resolve(true),
+    publish: () => calls.push("publish"),
+    reportAudioFailure: () => calls.push("failure"),
+    reportPartialAudioFailure: (failedRequests) => {
+      calls.push("partial-failure");
+      reportedRequests = failedRequests;
+    }
+  });
+  assert.deepEqual(calls, ["publish", "partial-failure", "release"]);
+  assert.deepEqual(reportedRequests, [failRequest]);
+});
+
+test("a prewarm AbortError is treated as the scene switching away, not a reportable partial failure", async () => {
+  const controller = new AbortController();
+  const calls: string[] = [];
+  await runSceneAudioReadinessTransition({
+    requests: [readinessRequest],
+    signal: controller.signal,
+    isCurrent: () => true,
+    acquire: () => () => calls.push("release"),
+    prewarm: () => Promise.reject(new DOMException("cancelled", "AbortError")),
+    hydrate: () => Promise.resolve(true),
+    publish: () => calls.push("publish"),
+    reportAudioFailure: () => calls.push("failure"),
+    reportPartialAudioFailure: () => calls.push("partial-failure")
+  });
+  assert.deepEqual(calls, ["publish", "release"]);
+});
+
+test("a failed prewarm still publishes even when the caller supplies no reportPartialAudioFailure callback", async () => {
+  const controller = new AbortController();
+  const calls: string[] = [];
+  await runSceneAudioReadinessTransition({
+    requests: [readinessRequest],
+    signal: controller.signal,
+    isCurrent: () => true,
+    acquire: () => () => calls.push("release"),
+    prewarm: () => Promise.reject(new Error("render failed")),
+    hydrate: () => Promise.resolve(true),
+    publish: () => calls.push("publish"),
+    reportAudioFailure: () => calls.push("failure")
+  });
+  assert.deepEqual(calls, ["publish", "release"]);
 });
 
 test("scene preflight treats WAM failure as dry-ready after exact audio succeeds", async () => {
@@ -305,7 +379,7 @@ test("scene preflight treats WAM failure as dry-ready after exact audio succeeds
   assert.deepEqual(calls, ["publish", "release"]);
 });
 
-test("deferred scene transitions keep selection synchronous, reject stale publish, retain old pins, and retry in place", async () => {
+test("deferred scene transitions keep selection synchronous, reject stale publish, and retain old pins until the new one is acquired", async () => {
   let active = "A";
   let audible: string | null = "A";
   let permanent = "A";
@@ -344,25 +418,23 @@ test("deferred scene transitions keep selection synchronous, reject stale publis
     active: "B", audible: null, permanent: "A", selectionChanges: 1
   });
 
-  const c = begin("C", Promise.reject(new Error("C audio failed")), Promise.resolve(true));
+  // C supersedes B before B's audio settles: B must never publish once it's stale, and
+  // its residency pin must still release even though nothing downstream awaits it.
+  const cAudio = deferred<void>();
+  const cWam = deferred<boolean>();
+  const c = begin("C", cAudio.promise, cWam.promise);
   b.controller.abort();
   bAudio.resolve();
   bWam.resolve(true);
-  await Promise.all([b.done, c.done]);
-  assert.deepEqual({ active, audible, permanent, selectionChanges, failures }, {
-    active: "C", audible: null, permanent: "A", selectionChanges: 2, failures: ["C audio failed"]
+  await b.done;
+  assert.deepEqual({ active, audible, permanent, selectionChanges, releases, failures }, {
+    active: "C", audible: null, permanent: "A", selectionChanges: 2, releases: ["B"], failures: []
   });
 
-  const retryAudio = deferred<void>();
-  const retryWam = deferred<boolean>();
-  const retry = begin("C", retryAudio.promise, retryWam.promise);
-  assert.equal(selectionChanges, 2);
-  retryAudio.resolve();
-  await Promise.resolve();
-  assert.deepEqual({ audible, permanent }, { audible: null, permanent: "A" });
-  retryWam.resolve(true);
-  await retry.done;
-  assert.deepEqual({ active, audible, permanent, selectionChanges, releases }, {
-    active: "C", audible: "C", permanent: "C", selectionChanges: 2, releases: ["C", "B", "C"]
+  cAudio.resolve();
+  cWam.resolve(true);
+  await c.done;
+  assert.deepEqual({ active, audible, permanent, selectionChanges, releases, failures }, {
+    active: "C", audible: "C", permanent: "C", selectionChanges: 2, releases: ["B", "C"], failures: []
   });
 });

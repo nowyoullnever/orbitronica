@@ -11,17 +11,39 @@ export type SceneAudioReadinessTransition = {
   readonly hydrate: () => Promise<boolean>;
   readonly publish: () => void;
   readonly reportAudioFailure: (error: unknown) => void;
+  // Optional: called with the requests that failed to prewarm when the transition still
+  // published despite one or more individual render failures (see below). A request whose
+  // failure is an AbortError (the scene switched away mid-render) is never reported here.
+  readonly reportPartialAudioFailure?: (
+    failedRequests: readonly ProcessedBufferRequest[], errors: readonly unknown[]
+  ) => void;
 };
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
 
 export async function runSceneAudioReadinessTransition(transition: SceneAudioReadinessTransition): Promise<void> {
   const release = transition.acquire();
   try {
-    const [_, ownsTarget] = await Promise.all([
-      Promise.all(transition.requests.map((request, index) => transition.prewarm(request, index))),
+    // Prewarms are settled individually (not Promise.all) so a single planet's render
+    // failure can never veto the whole scene's publish -- otherwise one bad artifact
+    // would leave audibleSceneId null and mute every other planet in the scene forever.
+    const [prewarmResults, ownsTarget] = await Promise.all([
+      Promise.allSettled(transition.requests.map((request, index) => transition.prewarm(request, index))),
       transition.hydrate().catch(() => true)
     ]);
-    if (!ownsTarget || transition.signal.aborted || !transition.isCurrent()) return;
+    if (transition.signal.aborted || !transition.isCurrent()) return;
+    if (!ownsTarget) return;
     transition.publish();
+    const failures = prewarmResults.flatMap((result, index) =>
+      result.status === "rejected" ? [{ request: transition.requests[index], error: result.reason }] : []
+    ).filter(({ error }) => !isAbortError(error));
+    if (failures.length) {
+      transition.reportPartialAudioFailure?.(
+        failures.map(({ request }) => request), failures.map(({ error }) => error)
+      );
+    }
   } catch (error) {
     if (!transition.signal.aborted && transition.isCurrent()) transition.reportAudioFailure(error);
   } finally {
